@@ -790,6 +790,7 @@ async fn agent_chat_start(
     use_reclaude: Option<bool>,
     preload_messages: Option<Vec<crate::types::Msg>>,
     title: Option<String>,
+    ephemeral: Option<bool>,
 ) -> Result<crate::types::ChatStartInfo, String> {
     if !Path::new(&cwd).is_dir() {
         return Err("Project directory no longer exists".to_string());
@@ -837,6 +838,7 @@ async fn agent_chat_start(
             model,
             effort,
             fork.unwrap_or(false),
+            ephemeral.unwrap_or(false),
             use_reclaude.unwrap_or(false),
             preload_messages,
             title,

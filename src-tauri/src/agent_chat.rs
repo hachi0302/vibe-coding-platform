@@ -356,6 +356,7 @@ pub fn start(
     model: Option<String>,
     effort: Option<String>,
     fork: bool,
+    ephemeral: bool,
     use_reclaude: bool,
     preload_messages: Option<Vec<crate::types::Msg>>,
     title: Option<String>,
@@ -442,6 +443,8 @@ pub fn start(
                     &permission_mode,
                     model.as_deref(),
                     effort.as_deref(),
+                    fork,
+                    ephemeral,
                 )?;
                 if let ChatHandle::CodexAppServer { shared } = &*handle {
                     if let Some(thread_id) = shared.thread_id.lock().ok().and_then(|g| g.clone()) {
@@ -649,6 +652,7 @@ fn codex_thread_params(
     permission_mode: &str,
     model: Option<&str>,
     effort: Option<&str>,
+    ephemeral: bool,
 ) -> serde_json::Value {
     let mut params = codex_thread_permission_overrides(permission_mode);
     params.insert("cwd".into(), serde_json::json!(cwd));
@@ -658,7 +662,71 @@ fn codex_thread_params(
     if let Some(effort) = effort {
         params.insert("effort".into(), serde_json::json!(effort));
     }
+    if ephemeral {
+        params.insert("ephemeral".into(), serde_json::json!(true));
+    }
     serde_json::Value::Object(params)
+}
+
+/// `thread/fork` 的参数形状和 `thread/start` 略有不同：它可以直接接收 threadId，
+/// 也原生支持 `ephemeral: true`，因此 Codex `/side` 无需在关闭时删除磁盘 transcript。
+fn codex_thread_fork_params(
+    thread_id: &str,
+    cwd: &str,
+    permission_mode: &str,
+    model: Option<&str>,
+    ephemeral: bool,
+) -> serde_json::Value {
+    let mut params = codex_thread_permission_overrides(permission_mode);
+    params.insert("threadId".into(), serde_json::json!(thread_id));
+    params.insert("cwd".into(), serde_json::json!(cwd));
+    // side 面板只渲染新分支产生的消息，不需要把源 thread 的全部 turns 回传一遍。
+    params.insert("excludeTurns".into(), serde_json::json!(true));
+    if let Some(model) = model {
+        params.insert("model".into(), serde_json::json!(model));
+    }
+    if ephemeral {
+        params.insert("ephemeral".into(), serde_json::json!(true));
+    }
+    serde_json::Value::Object(params)
+}
+
+#[cfg(test)]
+mod codex_side_tests {
+    use super::{codex_thread_fork_params, codex_thread_params};
+
+    #[test]
+    fn fork_params_preserve_source_and_request_ephemeral_thread() {
+        let params = codex_thread_fork_params(
+            "source-thread",
+            "/workspace/app",
+            "approve",
+            Some("gpt-5.4"),
+            true,
+        );
+
+        assert_eq!(params["threadId"], "source-thread");
+        assert_eq!(params["cwd"], "/workspace/app");
+        assert_eq!(params["model"], "gpt-5.4");
+        assert_eq!(params["ephemeral"], true);
+        assert_eq!(params["excludeTurns"], true);
+        assert_eq!(params["sandbox"], "workspace-write");
+    }
+
+    #[test]
+    fn fresh_side_thread_can_be_ephemeral_without_a_fork_source() {
+        let params = codex_thread_params(
+            "/workspace/app",
+            "fullAccess",
+            None,
+            Some("high"),
+            true,
+        );
+
+        assert_eq!(params["cwd"], "/workspace/app");
+        assert_eq!(params["ephemeral"], true);
+        assert_eq!(params["sandbox"], "danger-full-access");
+    }
 }
 
 fn usage_from_app_server_breakdown(v: &serde_json::Value) -> UsageSummary {
@@ -700,6 +768,8 @@ fn start_codex_app_server(
     permission_mode: &str,
     model: Option<&str>,
     effort: Option<&str>,
+    fork: bool,
+    ephemeral: bool,
 ) -> Result<Arc<ChatHandle>, String> {
     ensure_codex_cli_available(&cwd)?;
     let command = AgentCommand::new("codex").arg("app-server").arg("--stdio");
@@ -764,7 +834,21 @@ fn start_codex_app_server(
     )?;
 
     let thread_id_rpc = codex_next_rpc_id(&shared);
-    let (method, params) = if let Some(session_id) = session_id.as_ref() {
+    let (method, params) = if fork {
+        let source_id = session_id
+            .as_deref()
+            .ok_or_else(|| "Codex side conversation requires a source thread".to_string())?;
+        (
+            "thread/fork",
+            codex_thread_fork_params(
+                source_id,
+                &cwd,
+                permission_mode,
+                model,
+                ephemeral,
+            ),
+        )
+    } else if let Some(session_id) = session_id.as_ref() {
         let mut params = codex_thread_permission_overrides(permission_mode);
         params.insert("threadId".into(), serde_json::json!(session_id));
         params.insert("cwd".into(), serde_json::json!(cwd));
@@ -778,7 +862,7 @@ fn start_codex_app_server(
     } else {
         (
             "thread/start",
-            codex_thread_params(&cwd, permission_mode, model, effort),
+            codex_thread_params(&cwd, permission_mode, model, effort, ephemeral),
         )
     };
     codex_write_rpc(

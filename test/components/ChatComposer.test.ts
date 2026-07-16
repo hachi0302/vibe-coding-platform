@@ -5,10 +5,16 @@ import { vTooltip } from '../../src/tooltip'
 import { setLang } from '../../src/settings'
 import type { ChatSession } from '../../src/chatSessions'
 
-const { claudeRuntimeInfoMock, listProjectFilesMock, openSideChatMock } = vi.hoisted(() => ({
+const {
+  claudeRuntimeInfoMock,
+  listProjectFilesMock,
+  openSideChatMock,
+  openCodexSideChatMock,
+} = vi.hoisted(() => ({
   claudeRuntimeInfoMock: vi.fn().mockResolvedValue({ hasCustomBaseUrl: false }),
   listProjectFilesMock: vi.fn().mockResolvedValue([]),
   openSideChatMock: vi.fn().mockResolvedValue(null),
+  openCodexSideChatMock: vi.fn().mockResolvedValue(null),
 }))
 
 vi.mock('../../src/api', () => ({
@@ -20,6 +26,10 @@ vi.mock('../../src/api', () => ({
 
 vi.mock('../../src/sideChat', () => ({
   openSideChat: openSideChatMock,
+}))
+
+vi.mock('../../src/codexSideChat', () => ({
+  openCodexSideChat: openCodexSideChatMock,
 }))
 
 // composer onMounted 注册 Tauri webview 级 drag-drop 监听；jsdom 里没有 Tauri internals，mock 掉。
@@ -479,6 +489,65 @@ describe('ChatComposer /btw side chat', () => {
     await wrapper.vm.$nextTick()
     expect((ta.element as HTMLTextAreaElement).value).toBe('')
     expect(wrapper.text()).not.toContain('History')
+  })
+})
+
+describe('ChatComposer Codex /side', () => {
+  beforeEach(() => {
+    openCodexSideChatMock.mockClear()
+    setLang('en')
+  })
+
+  async function submitText(wrapper: ReturnType<typeof mount>, value: string) {
+    const ta = wrapper.find('textarea')
+    const el = ta.element as HTMLTextAreaElement
+    el.value = value
+    el.selectionStart = el.selectionEnd = value.length
+    await ta.trigger('input')
+    await ta.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+  }
+
+  function codexSession(): ChatSession {
+    return baseSession({
+      agent: 'codex',
+      sessionId: 'thread-1',
+      model: 'gpt-5.4',
+      effort: 'high',
+      permissionMode: 'approve',
+      processModel: 'oneShotResume',
+    })
+  }
+
+  it('routes "/side <prompt>" to the Codex-only side fork', async () => {
+    const wrapper = mount(ChatComposer, {
+      props: { session: codexSession() },
+      global: { directives: { tooltip: vTooltip } },
+    })
+    await submitText(wrapper, '/side inspect this diff')
+
+    expect(openCodexSideChatMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: '/work/proj',
+        forkThreadId: 'thread-1',
+        prompt: 'inspect this diff',
+        permissionMode: 'approve',
+      }),
+    )
+    expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.props('session').msgs.length).toBe(0)
+  })
+
+  it('shows the dedicated side button only for Codex sessions', async () => {
+    const wrapper = mount(ChatComposer, {
+      props: { session: codexSession() },
+      global: { directives: { tooltip: vTooltip } },
+    })
+    expect(wrapper.find('.cc-btw-btn').exists()).toBe(false)
+    const btn = wrapper.find('.cc-side-btn')
+    expect(btn.exists()).toBe(true)
+    await btn.trigger('click')
+    expect(openCodexSideChatMock).toHaveBeenCalledTimes(1)
   })
 })
 

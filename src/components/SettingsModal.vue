@@ -119,7 +119,7 @@ const shortcutGroups = [
     title: 'settings.shortcut.groupChat',
     items: [
       { key: k([mod, 'U']), label: 'settings.shortcut.attachFiles' },
-      { key: k([mod, 'J']), label: 'settings.shortcut.btwSideChat' },
+      { key: k([mod, 'J']), label: 'settings.shortcut.sideChat' },
       { key: 'Ctrl+S', label: 'settings.shortcut.stashInput' },
       { key: 'Ctrl+Del', label: 'settings.shortcut.deleteLine' },
       { key: 'Shift+Enter', label: 'settings.shortcut.newline' },

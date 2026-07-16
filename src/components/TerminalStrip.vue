@@ -386,8 +386,24 @@ watch(
   },
   { immediate: true },
 )
-watch([() => visibleTabs.value.length, () => visibleSaved.value.length], () => nextTick(measure))
+watch([() => visibleTabs.value.length, () => visibleSaved.value.length, () => props.viewTabs.length], () => {
+  nextTick(() => {
+    measure()
+    const id = props.activeViewTabId ?? props.pane.activeUiId
+    if (id != null) {
+      const el = trackRef.value?.querySelector<HTMLElement>(`.term-tab[data-tab-ui-id="${id}"]`)
+      revealEl(el)
+    }
+  })
+})
 watch(() => props.pane.activeUiId, () => revealActiveTab())
+watch(() => props.activeViewTabId, (id) => {
+  if (id == null) return
+  nextTick(() => {
+    const el = trackRef.value?.querySelector<HTMLElement>(`.term-tab[data-tab-ui-id="${id}"]`)
+    revealEl(el)
+  })
+})
 onUnmounted(() => {
   stripRo?.disconnect()
   window.clearTimeout(wheelIdleTimer)

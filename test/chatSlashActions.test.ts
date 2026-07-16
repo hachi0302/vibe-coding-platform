@@ -14,6 +14,14 @@ describe('parseChatSlashAction', () => {
     expect(parseChatSlashAction('  /btw   ')).toEqual({ kind: 'btw', prompt: undefined })
   })
 
+  it('routes "/side" as the Codex side-conversation action', () => {
+    expect(parseChatSlashAction('/side inspect this diff')).toEqual({
+      kind: 'side',
+      prompt: 'inspect this diff',
+    })
+    expect(parseChatSlashAction(' /side ')).toEqual({ kind: 'side', prompt: undefined })
+  })
+
   it('classifies the arg-less client commands', () => {
     expect(parseChatSlashAction('/export')).toEqual({ kind: 'export' })
     expect(parseChatSlashAction('/rename')).toEqual({ kind: 'rename' })

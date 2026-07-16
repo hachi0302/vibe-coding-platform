@@ -541,8 +541,15 @@ export interface StartChatOptions {
   cwd: string
   /** 续聊既有会话时给出；新开会话留空（init 事件回填）。 */
   sessionId?: string
-  /** btw 侧聊：配合 `sessionId` 从主聊**派生**一份独立会话（继承上下文、不污染原 transcript）。 */
+  /**
+   * 侧聊 fork 的源会话。它只传给后端，不能写进新 ChatSession 的 `sessionId`，否则在
+   * app-server 回传新 thread id 前会错误地把主会话当成侧聊。
+   */
+  forkSessionId?: string
+  /** 侧聊：从 `forkSessionId`（或 `sessionId`）派生独立会话。 */
   fork?: boolean
+  /** Codex 专用：不将新 thread materialize 到磁盘。 */
+  ephemeral?: boolean
   title: string
   /** 续聊既有会话时传原会话的 created；新开留空（startChat 用当前时刻）。 */
   created?: string
@@ -646,7 +653,7 @@ export async function startChat(opts: StartChatOptions): Promise<ChatSession> {
       opts.agent,
       opts.projectKey,
       opts.cwd,
-      opts.sessionId,
+      opts.forkSessionId ?? opts.sessionId,
       session.permissionMode,
       session.model,
       eff,
@@ -654,6 +661,7 @@ export async function startChat(opts: StartChatOptions): Promise<ChatSession> {
       useReclaude.value,
       opts.preloadMsgs,
       opts.title,
+      opts.ephemeral,
     )
     session.chatId = info.chatId
     session.processModel = info.processModel

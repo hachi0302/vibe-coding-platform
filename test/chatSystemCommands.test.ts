@@ -29,11 +29,12 @@ describe('systemSlashCommands', () => {
     const names = systemSlashCommands('codex').map((c) => c.name)
     expect(names).toEqual([
       'model', 'export', 'rename', 'clear', 'compact',
-      'goal', 'plan', 'review', 'archive',
+      'goal', 'plan', 'review', 'archive', 'side',
     ])
     expect(names).not.toContain('fork')
     expect(names).not.toContain('btw')
     expect(names).not.toContain('context')
+    expect(names).toContain('side')
   })
 
   it('localizes descriptions via t()', () => {

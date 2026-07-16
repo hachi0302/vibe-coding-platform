@@ -12,8 +12,10 @@ import { buildChatHistory, type ChatHistoryEntry } from '../chatInputHistory'
 import { parseChatSlashAction } from '../chatSlashActions'
 import { systemSlashCommands } from '../chatSystemCommands'
 import { openSideChat } from '../sideChat'
+import { openCodexSideChat } from '../codexSideChat'
 import { useGitBranch } from '../gitBranch'
 import { formatElapsedSeconds } from '../format'
+import { showTooltipFor, hideTooltip } from '../tooltip'
 import type { ChatImageAttachment, ChatFileAttachment, SlashCommand, ProjectFileEntry } from '../types'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
@@ -50,7 +52,7 @@ import {
 
 const props = defineProps<{ session: ChatSession }>()
 // 客户端 slash 指令里需要 ChatView / App 出手的几个（展开右上角导出菜单、打开重命名框、
-// fork 会话）上抛给父组件；/model、/clear、/btw 在 composer 内部就地处理，不走 emit。
+// fork 会话）上抛给父组件；/model、/clear、/btw、/side 在 composer 内部就地处理，不走 emit。
 const emit = defineEmits<{
   openExport: []
   rename: []
@@ -548,6 +550,15 @@ function onCompositionEnd() {
 function syncHlScroll() {
   if (hlEl.value && taEl.value) hlEl.value.scrollTop = taEl.value.scrollTop
 }
+function onHlHover(e: MouseEvent) {
+  const cmd = (e.target as HTMLElement).closest?.('.cc-cmd') as HTMLElement | null
+  if (cmd && leadingCommandObj.value?.description) {
+    showTooltipFor(cmd, `${leadingPrefix.value}${leadingCommandObj.value.name} — ${leadingCommandObj.value.description}`)
+  }
+}
+function onHlLeave() {
+  hideTooltip()
+}
 
 /** 从光标处向前找触发用的 `/`：前面须为行首或空白，且 `/`→光标间无空白 —— 与 `@` 浮层
  *  同一套「任意位置词首触发」规则，故 `http://`、`a/b` 路径里的 `/` 不会误触发。 */
@@ -1019,6 +1030,25 @@ function onKeydown(e: KeyboardEvent) {
     }
     return
   }
+  // Backspace 整体删除已识别的 slash command token（蓝色高亮部分）。
+  // 光标在 token 范围内（含紧跟的空格）且无选区时，一次 Backspace 清掉整个 `/command `。
+  if (e.key === 'Backspace' && !e.isComposing && leadingCommand.value) {
+    const el = taEl.value
+    if (el && el.selectionStart === el.selectionEnd) {
+      const token = `${leadingPrefix.value}${leadingCommand.value}`
+      const hasTrailingSpace = text.value[token.length] === ' '
+      const tokenEnd = token.length + (hasTrailingSpace ? 1 : 0)
+      if (el.selectionStart <= tokenEnd) {
+        e.preventDefault()
+        text.value = text.value.slice(tokenEnd)
+        nextTick(() => {
+          el.selectionStart = el.selectionEnd = 0
+          autosize()
+        })
+        return
+      }
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault()
     submit()
@@ -1150,6 +1180,8 @@ async function submit() {
   const action = parseChatSlashAction(body)
   const intercept =
     !!action &&
+    !(action.kind === 'btw' && props.session.agent !== 'claude') &&
+    !(action.kind === 'side' && props.session.agent !== 'codex') &&
     !(action.kind === 'fork' && props.session.agent !== 'claude') &&
     !(action.kind === 'archive' && props.session.agent !== 'codex') &&
     !(action.kind === 'model' && !showModelPicker.value)
@@ -1162,6 +1194,9 @@ async function submit() {
     switch (action.kind) {
       case 'btw':
         openBtw(action.prompt)
+        break
+      case 'side':
+        openCodexSide(action.prompt)
         break
       case 'export':
         emit('openExport')
@@ -1196,13 +1231,27 @@ async function submit() {
 
 /** 打开 btw 侧聊：fork 主聊上下文（仅 Claude 主聊有 sessionId 时），可带首句提示词。 */
 function openBtw(prompt?: string) {
-  const isClaude = props.session.agent === 'claude'
+  if (props.session.agent !== 'claude') return
   void openSideChat({
     projectKey: props.session.projectKey,
     cwd: props.session.cwd,
-    forkSessionId: isClaude ? props.session.sessionId || undefined : undefined,
-    model: isClaude ? props.session.model : undefined,
-    effort: isClaude ? props.session.effort : undefined,
+    forkSessionId: props.session.sessionId || undefined,
+    model: props.session.model,
+    effort: props.session.effort,
+    prompt,
+  })
+}
+
+/** 打开 Codex `/side`：app-server fork 出 ephemeral thread，不复用 Claude btw 的流程。 */
+function openCodexSide(prompt?: string) {
+  if (props.session.agent !== 'codex') return
+  void openCodexSideChat({
+    projectKey: props.session.projectKey,
+    cwd: props.session.cwd,
+    forkThreadId: props.session.sessionId || undefined,
+    model: props.session.model,
+    effort: props.session.effort,
+    permissionMode: props.session.permissionMode,
     prompt,
   })
 }
@@ -1366,14 +1415,6 @@ function queuedLabel(q: QueuedMessage): string {
       <div class="cc-input-row">
         <!-- 文本框 + 命令高亮镜像层：镜像在底层渲染带色文本，textarea 文本透明、只留光标 -->
         <div class="cc-ta-wrap">
-          <div
-            v-if="highlightActive"
-            ref="hlEl"
-            class="cc-highlight"
-            :class="{ 'cc-highlight--hint': argHintGhost }"
-            aria-hidden="true"
-            v-html="highlightHtml"
-          ></div>
           <textarea
             ref="taEl"
             v-model="text"
@@ -1392,6 +1433,18 @@ function queuedLabel(q: QueuedMessage): string {
             @compositionend="onCompositionEnd"
             @scroll="syncHlScroll"
           />
+          <div
+            v-if="highlightActive"
+            ref="hlEl"
+            class="cc-highlight"
+            :class="{ 'cc-highlight--hint': argHintGhost }"
+            aria-hidden="true"
+            v-html="highlightHtml"
+            @mouseenter.self.stop
+            @mouseover="onHlHover"
+            @mouseleave="onHlLeave"
+            @click="taEl?.focus()"
+          ></div>
         </div>
 
         <button
@@ -1450,6 +1503,15 @@ function queuedLabel(q: QueuedMessage): string {
           class="cc-attach-btn cc-btw-btn"
           v-tooltip="t('chat.btw.open')"
           @click="openBtw()"
+        >
+          <IconZap />
+        </button>
+        <!-- Codex `/side`：独立的 ephemeral fork 浮层，不与 Claude `/btw` 共用状态。 -->
+        <button
+          v-if="session.agent === 'codex'"
+          class="cc-attach-btn cc-side-btn"
+          v-tooltip="t('chat.side.open')"
+          @click="openCodexSide()"
         >
           <IconZap />
         </button>
@@ -1787,6 +1849,8 @@ function queuedLabel(q: QueuedMessage): string {
    :deep() 必需 —— 镜像层用 v-html 注入，注入节点拿不到 scoped 的 data-v 属性，普通 scoped 选择器选不中。 */
 .cc-highlight :deep(.cc-cmd) {
   color: #2563eb;
+  pointer-events: auto;
+  cursor: default;
 }
 :root.theme-dark .cc-highlight :deep(.cc-cmd) {
   color: #60a5fa;

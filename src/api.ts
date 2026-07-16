@@ -345,6 +345,8 @@ export const agentChatStart = (
   useReclaude?: boolean,
   preloadMessages?: Msg[],
   title?: string,
+  /** Codex side conversation：临时 thread，不写入 session history。 */
+  ephemeral?: boolean,
 ) =>
   invoke<ChatStartInfo>('agent_chat_start', {
     agent,
@@ -358,6 +360,7 @@ export const agentChatStart = (
     useReclaude,
     preloadMessages,
     title,
+    ...(ephemeral === undefined ? {} : { ephemeral }),
   })
 
 export const agentChatListRunning = () =>
