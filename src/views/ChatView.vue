@@ -1082,7 +1082,7 @@ function computeSearchHits() {
 }
 
 // 对当前挂载的可见行打 <mark>（不改计数 / 当前项）。滚动进新行时由 scheduleDecorate 调用。
-function markVisibleSearch() {
+function markVisibleSearch(scroll = true) {
   unmarkAll()
   const root = innerEl.value
   const q = search.value.trim()
@@ -1131,7 +1131,7 @@ function markVisibleSearch() {
     text.parentNode?.replaceChild(frag, text)
   }
   marks = collected
-  applyCurrentClass()
+  applyCurrentClass(scroll)
 }
 
 function currentHitMsgIndex(): number | null {
@@ -1139,7 +1139,7 @@ function currentHitMsgIndex(): number | null {
   return searchHits[searchIndex.value - 1]
 }
 // 把当前命中消息行内的第一个 mark 设为 .current,展开其祖先 details,并滚到视区中部。
-function applyCurrentClass() {
+function applyCurrentClass(scroll = true) {
   marks.forEach((mk) => mk.classList.remove('current'))
   const mi = currentHitMsgIndex()
   if (mi == null) return
@@ -1154,7 +1154,7 @@ function applyCurrentClass() {
     }
     p = p.parentElement
   }
-  first.scrollIntoView({ block: 'center' })
+  if (scroll) first.scrollIntoView({ block: 'center' })
 }
 
 // 跳到第 k 个命中消息（1-based,环绕）：虚拟器滚过去,等行挂载后标记 + 高亮当前。
@@ -1231,7 +1231,7 @@ function scheduleDecorate() {
   decorateRAF = requestAnimationFrame(() => {
     decorateRAF = 0
     decorateVisible()
-    if (search.value) markVisibleSearch()
+    if (search.value) markVisibleSearch(false)
   })
 }
 // 注意：不要 watch(virtualRows) 来触发装饰 —— 会形成 装饰→改行高→重测→virtualRows 变→装饰

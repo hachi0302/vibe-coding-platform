@@ -6,6 +6,22 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ---
 
+## [v0.3.3]
+
+### Features
+
+- **Codex `/side` side chat** — Codex GUI chat gains a floating side panel (mirroring Claude's `/btw`), accessible via `Ctrl+J`, the `/side` slash command, or the side-panel button. Forks the current Codex thread via the app-server so the side chat inherits context without polluting the main conversation. Session files are purged on close to keep the session list clean.
+- **Slash command one-press delete** — pressing Backspace when the cursor is within a recognized slash command token (the blue-highlighted `/git-push`, `/side`, etc.) deletes the entire token in one keystroke instead of character-by-character.
+- **Slash command hover tooltip** — hovering over a recognized slash command in the composer now shows a tooltip with the command name and description, using the app's custom tooltip system rather than native browser tooltips.
+- **Tab strip auto-scroll** — opening a new session, chat, or TUI tab now automatically scrolls the tab strip to reveal the newly activated tab, so it's always visible even when many tabs are open.
+
+### Bug Fixes
+
+- **Topbar search bar not restoring after tab switch** — switching from a TUI or session tab to a chat GUI or git diff tab and then back left the global topbar empty (no "Search terminal" / "Search sessions" bar). The topbar condition now checks whether a TUI tab is active before checking for chat/git view tabs, so the correct topbar always renders when switching back.
+- **Git diff tab showing "Search sessions"** — the git diff view tab fell through to the SessionsTopbar condition, showing an irrelevant search bar. Git tabs now render an empty topbar since GitChangesView has its own built-in toolbar.
+
+---
+
 ## [v0.1.0] - 2026-07-16
 
 ### Features

@@ -719,6 +719,7 @@ function normalizeLightSgrSemicolon(params: string): string {
       out.push(part)
       continue
     }
+    // Background: dark bg colors → default
     if (part === '40' || part === '47' || part === '100' || part === '107') {
       out.push('49')
       continue
@@ -734,6 +735,25 @@ function normalizeLightSgrSemicolon(params: string): string {
       isDarkRgb(parts[i + 2] ?? '', parts[i + 3] ?? '', parts[i + 4] ?? '')
     ) {
       out.push('49')
+      i += 4
+      continue
+    }
+    // Foreground: light fg colors → default (they're unreadable on white)
+    if (part === '37' || part === '97') {
+      out.push('39')
+      continue
+    }
+    if (part === '38' && parts[i + 1] === '5' && isLightAnsiColor(parts[i + 2] ?? '')) {
+      out.push('39')
+      i += 2
+      continue
+    }
+    if (
+      part === '38' &&
+      parts[i + 1] === '2' &&
+      isLightRgb(parts[i + 2] ?? '', parts[i + 3] ?? '', parts[i + 4] ?? '')
+    ) {
+      out.push('39')
       i += 4
       continue
     }
@@ -754,6 +774,14 @@ function normalizeLightSgrColon(params: string): string {
       (match, sep: string, r: string, g: string, b: string) =>
         isDarkRgb(r, g, b) ? `${sep}49` : match,
     )
+    .replace(/(^|;)38:5:(\d+)(?=;|$)/g, (match, sep: string, color: string) =>
+      isLightAnsiColor(color) ? `${sep}39` : match,
+    )
+    .replace(
+      /(^|;)38:2:(\d+):(\d+):(\d+)(?=;|$)/g,
+      (match, sep: string, r: string, g: string, b: string) =>
+        isLightRgb(r, g, b) ? `${sep}39` : match,
+    )
 }
 
 function normalizeLightSgr(params: string): string | null {
@@ -770,6 +798,7 @@ function normalizeDarkSgrSemicolon(params: string): string {
       out.push(part)
       continue
     }
+    // Background: light bg colors → default
     if (part === '47' || part === '107') {
       out.push('49')
       continue
@@ -788,6 +817,25 @@ function normalizeDarkSgrSemicolon(params: string): string {
       i += 4
       continue
     }
+    // Foreground: dark fg colors → default (invisible on dark bg)
+    if (part === '30') {
+      out.push('39')
+      continue
+    }
+    if (part === '38' && parts[i + 1] === '5' && isDarkAnsiColor(parts[i + 2] ?? '')) {
+      out.push('39')
+      i += 2
+      continue
+    }
+    if (
+      part === '38' &&
+      parts[i + 1] === '2' &&
+      isDarkRgb(parts[i + 2] ?? '', parts[i + 3] ?? '', parts[i + 4] ?? '')
+    ) {
+      out.push('39')
+      i += 4
+      continue
+    }
     out.push(part)
   }
   return out.join(';')
@@ -802,6 +850,14 @@ function normalizeDarkSgrColon(params: string): string {
       /(^|;)48:2:(\d+):(\d+):(\d+)(?=;|$)/g,
       (match, sep: string, r: string, g: string, b: string) =>
         isLightRgb(r, g, b) ? `${sep}49` : match,
+    )
+    .replace(/(^|;)38:5:(\d+)(?=;|$)/g, (match, sep: string, color: string) =>
+      isDarkAnsiColor(color) ? `${sep}39` : match,
+    )
+    .replace(
+      /(^|;)38:2:(\d+):(\d+):(\d+)(?=;|$)/g,
+      (match, sep: string, r: string, g: string, b: string) =>
+        isDarkRgb(r, g, b) ? `${sep}39` : match,
     )
 }
 
