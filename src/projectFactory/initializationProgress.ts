@@ -33,6 +33,13 @@ export function isInitializationTaskVisible(phase: ProjectInitializationPhase): 
   return phase !== 'complete' && phase !== 'failed'
 }
 
+export function isInitializationTaskCardVisible(
+  phase: ProjectInitializationPhase,
+  minimized: boolean,
+): boolean {
+  return minimized && isInitializationTaskVisible(phase)
+}
+
 export const projectInitializationSteps = [
   { phase: 'analyze', label: '分析项目' },
   { phase: 'documents', label: '生成文档' },

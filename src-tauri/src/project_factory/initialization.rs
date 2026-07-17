@@ -160,6 +160,23 @@ fn progress_for_artifact_changes(stage: InitializationStage, changed_files: usiz
     }
 }
 
+fn progress_for_stage_activity(
+    stage: InitializationStage,
+    changed_files: usize,
+    elapsed_seconds: u64,
+) -> u8 {
+    let artifact_progress = progress_for_artifact_changes(stage, changed_files);
+    let (start, cap) = match stage {
+        InitializationStage::Documents => (18, 56),
+        InitializationStage::RulesAndSkills => (62, 84),
+        InitializationStage::Repair => (92, 98),
+    };
+    // Agent 可能先长时间分析、最后一次性落盘。活动进度只在当前阶段内移动，
+    // 真正跨阶段仍以 Agent 退出和产物校验通过为准。
+    let activity_progress = start + (elapsed_seconds / 5).min(u64::from(cap - start)) as u8;
+    artifact_progress.max(activity_progress).min(cap)
+}
+
 type ArtifactState = HashMap<PathBuf, (u64, Option<SystemTime>)>;
 
 fn collect_artifacts(path: &Path, files: &mut ArtifactState) {
@@ -229,14 +246,17 @@ where
     });
 
     let mut last_percent = start_percent;
+    let mut elapsed_seconds = 0_u64;
     loop {
         match receiver.recv_timeout(Duration::from_secs(1)) {
             Ok(result) => return result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                elapsed_seconds = elapsed_seconds.saturating_add(1);
                 let current = artifact_snapshot(Path::new(project_path), stage);
-                let percent = progress_for_artifact_changes(
+                let percent = progress_for_stage_activity(
                     stage,
                     changed_artifact_count(&baseline, &current),
+                    elapsed_seconds,
                 );
                 if percent > last_percent {
                     last_percent = percent;
@@ -363,7 +383,10 @@ pub fn initialize_existing_project_with_agent_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::{progress_for_artifact_changes, stage_start_progress, InitializationStage};
+    use super::{
+        progress_for_artifact_changes, progress_for_stage_activity, stage_start_progress,
+        InitializationStage,
+    };
 
     #[test]
     fn stage_is_reported_when_work_starts_instead_of_after_agent_finishes() {
@@ -398,5 +421,35 @@ mod tests {
             progress_for_artifact_changes(InitializationStage::RulesAndSkills, 100),
             84
         );
+    }
+
+    #[test]
+    fn long_running_agent_advances_visible_progress_without_finishing_the_stage() {
+        assert_eq!(
+            progress_for_stage_activity(InitializationStage::Documents, 0, 0),
+            18
+        );
+        assert!(progress_for_stage_activity(InitializationStage::Documents, 0, 30) > 18);
+        assert_eq!(
+            progress_for_stage_activity(InitializationStage::Documents, 0, 10_000),
+            56
+        );
+        assert_eq!(
+            progress_for_stage_activity(InitializationStage::RulesAndSkills, 0, 10_000),
+            84
+        );
+        assert_eq!(
+            progress_for_stage_activity(InitializationStage::Repair, 0, 10_000),
+            98
+        );
+    }
+
+    #[test]
+    fn artifact_and_activity_progress_are_monotonic() {
+        let early = progress_for_stage_activity(InitializationStage::Documents, 1, 5);
+        let later = progress_for_stage_activity(InitializationStage::Documents, 1, 25);
+        let with_more_files = progress_for_stage_activity(InitializationStage::Documents, 5, 25);
+        assert!(later >= early);
+        assert!(with_more_files >= later);
     }
 }

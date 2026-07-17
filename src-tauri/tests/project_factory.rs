@@ -337,12 +337,35 @@ fn every_project_skill_template_contains_the_runtime_skill_contract() {
 fn fixture_spring_project(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("vibe-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("src/main/java")).expect("create backend source directory");
+    std::fs::create_dir_all(root.join("src/main/java/com/example"))
+        .expect("create backend source directory");
     std::fs::write(
         root.join("pom.xml"),
         "<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent><dependencies><dependency><artifactId>spring-boot-starter-data-jpa</artifactId></dependency><dependency><artifactId>mysql-connector-j</artifactId></dependency></dependencies></project>",
     )
     .expect("write spring manifest");
+    std::fs::write(
+        root.join("src/main/java/com/example/SamplePaymentService.java"),
+        "package com.example;\n\nimport org.springframework.stereotype.Service;\n\n@Service\npublic class SamplePaymentService {\n    public void processOrder() {}\n}\n",
+    )
+    .expect("write backend source evidence");
+    root
+}
+
+fn fixture_frontend_project(name: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("vibe-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("create frontend source directory");
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"scripts":{"build":"vite build","test":"vitest run"},"dependencies":{"vue":"^3.5.0"},"devDependencies":{"typescript":"^5.7.0","vite":"^6.0.0","vitest":"^3.0.0"}}"#,
+    )
+    .expect("write frontend manifest");
+    std::fs::write(
+        root.join("src/App.vue"),
+        "<script setup lang=\"ts\">\nconst pageTitle = '示例';\n</script>\n<template><main>{{ pageTitle }}</main></template>",
+    )
+    .expect("write frontend entry");
     root
 }
 
@@ -374,7 +397,7 @@ fn write_real_backend_assets(root: &std::path::Path) {
         std::fs::create_dir_all(path.parent().expect("rule parent")).expect("create rule");
         std::fs::write(
             path,
-            format!("# {rule}\n\n本规则来自当前 Spring Boot 示例项目的 pom.xml、源码目录与现有文档。修改前必须读取相关入口、Service、Repository 和测试，全局检索同类实现，保持历史行为与契约，完成真实测试后再交付。"),
+            format!("# {rule}\n\n本规则来自当前 Spring Boot 示例项目。业务服务扩展点是 `src/main/java/com/example/SamplePaymentService.java` 中的 `SamplePaymentService`（`@Service`）；修改前必须读取该服务与关联测试，全局检索同类实现，保持历史行为与契约，完成真实测试后再交付。"),
         )
         .expect("write rule");
     }
@@ -420,6 +443,78 @@ fn write_real_backend_assets(root: &std::path::Path) {
     }
 }
 
+fn write_real_frontend_assets(root: &std::path::Path) {
+    for (relative, content) in [
+        ("docs/frontend/MOC.md", "# 示例管理端文档导航\n\n长期文档位于 latest，历次需求位于版本目录。业务、架构、公共组件与规范模板均从本页进入，并随真实代码变化同步。"),
+        ("docs/frontend/latest/index.md", "# 示例管理端项目文档索引\n\n该项目使用 Vue、TypeScript 与 Vite 构建管理端页面，证据来自 package.json 与 src/App.vue。后续开发必须先读业务总览、前端架构和命中规则。"),
+        ("docs/frontend/latest/业务/业务功能总览.md", "# 业务功能总览\n\n## 示例首页\n\n当前项目由 `src/App.vue` 提供示例首页。这里只记录源码可以证明的页面与交互，不把尚未实现的路由、接口或业务能力写成已支持。"),
+        ("docs/frontend/latest/系统架构/前端架构.md", "# 前端架构\n\n项目由 Vue 组件、TypeScript 和 Vite 构成，入口、组件、样式、构建和测试边界均以 package.json 与 src 目录的真实实现为准。"),
+        ("docs/frontend/latest/公共能力/组件与公共能力.md", "# 组件与公共能力\n\n当前项目仅确认 `src/App.vue` 这一页面入口；尚未发现可复用组件库、状态容器或请求封装，因此不虚构公共能力。后续新增前必须先检索现有实现。"),
+        ("CLAUDE.md", "# 示例管理端 AI 开发指南\n\n该项目使用 Vue、TypeScript 与 Vite。修改前先读 `docs/frontend/latest/index.md`、`.claude/rules/README.md`、命中的 `.claude/skills/` 和同类源码；优先复用现有组件、样式与工具，不添加伪默认值、吞错或静默降级。构建使用 `npm run build`，自测使用 `npm test`。详设、TDD、实现、自测和长期文档同步必须形成闭环，提交由用户决定。"),
+    ] {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        std::fs::write(path, content).expect("write real frontend asset");
+    }
+    for rule in [
+        "README.md",
+        "公共/开发基线.md",
+        "公共/复用与影响面.md",
+        "公共/事实与兜底边界.md",
+        "公共/开发流程与文档同步.md",
+        "公共/自测与交付.md",
+        "前端/前端工程规则.md",
+        "前端/前端验证规则.md",
+    ] {
+        let path = root.join(".claude/rules").join(rule);
+        std::fs::create_dir_all(path.parent().expect("rule parent")).expect("create rule");
+        std::fs::write(
+            path,
+            format!("# {rule}\n\n本规则来自当前 Vue 示例项目。页面组件入口是 `src/App.vue` 中的 `App` 组件；修改前必须读取该组件、样式与关联测试，全局检索同类实现，保持历史交互与契约，完成真实构建和测试后再交付。"),
+        )
+        .expect("write rule");
+    }
+    let detail_template = format!(
+        "# 详设文档模板\n\n## 前置材料与前置确认\n\n## 变更摘要与方案概述\n\n## 兼容性与影响分析\n\n## 代码设计\n\n## TDD 与自测要点\n\n{}",
+        "每次使用必须结合真实页面、组件、交互和测试证据，不保留占位符。\n".repeat(80)
+    );
+    let progress_template = format!(
+        "# 开发进度文档模板\n\n## 完成状态\n\n## 开发清单\n\n## TDD\n\n## 用户反馈\n\n## 文档同步\n\n{}",
+        "每项状态只能由真实代码、命令和测试结果推进，失败时保留真实证据。\n".repeat(80)
+    );
+    for (relative, content) in [
+        (
+            "docs/frontend/latest/规范约束/详设文档模板.md",
+            detail_template,
+        ),
+        (
+            "docs/frontend/latest/规范约束/开发进度文档模板.md",
+            progress_template,
+        ),
+    ] {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("template parent"))
+            .expect("create project template directory");
+        std::fs::write(path, content).expect("write project template");
+    }
+    for skill in [
+        "detail-design-writer",
+        "developer",
+        "problem-diagnose",
+        "code-review",
+        "review-feedback-handler",
+        "frontend-self-test",
+    ] {
+        let path = root.join(".claude/skills").join(skill).join("SKILL.md");
+        std::fs::create_dir_all(path.parent().expect("skill parent")).expect("create skill");
+        std::fs::write(
+            path,
+            format!("---\nname: {skill}\ndescription: Use when the current Vue project needs the {skill} workflow.\nmetadata:\n  pattern: pipeline\n---\n\n# {skill}\n\n## 项目资源\n\n- 入口：`CLAUDE.md`\n- 总览：`docs/frontend/latest/index.md`\n- 规则：`.claude/rules/README.md`\n- 源码：`src`\n- 测试：`npm test`\n\n## 执行流程\n\n1. 读取项目入口、业务总览、架构和命中规则。\n2. 沿真实页面、组件、状态、样式与测试追踪完整交互链路。\n3. 保留源码路径、命令与测试结果证据，不覆盖无关历史改动。\n4. 使用项目现有组件、工具、错误处理和测试基座，不创建平行框架。\n5. 完成后同步受影响长期文档并报告真实结果。\n\n## 完成 Gate\n\n- 结论有 `src` 代码、`npm run build` 或 `npm test` 结果支撑。\n- 正常、边界、异常、原 Bug 和直接回归均已覆盖。\n- 未伪造成功，未添加未经需求确认的兜底。\n\n## 失败处理\n\n命令失败时报告真实错误和未验证范围；不得删除测试、放宽断言或声称应该通过。"),
+        )
+        .expect("write skill");
+    }
+}
+
 #[test]
 fn preparing_existing_project_installs_only_required_templates_and_original_skill_designer() {
     let root = fixture_spring_project("existing-prepare");
@@ -456,6 +551,24 @@ fn preparing_existing_project_installs_only_required_templates_and_original_skil
             ".vibe-coding-platform/init-reference-v3/技能模板/可选/database-read-diagnose/SKILL.md"
         )
         .is_file());
+    assert!(
+        !root
+            .join(".vibe-coding-platform/init-reference-v3/文档模板/前端")
+            .exists(),
+        "纯后端项目不得安装前端文档模板"
+    );
+    assert!(
+        !root
+            .join(".vibe-coding-platform/init-reference-v3/规则模板/前端")
+            .exists(),
+        "纯后端项目不得安装前端规则模板"
+    );
+    assert!(
+        !root
+            .join(".vibe-coding-platform/init-reference-v3/技能模板/前端")
+            .exists(),
+        "纯后端项目不得安装前端技能模板"
+    );
     assert_eq!(
         relative_file_bytes(&root.join(".claude/skills/skill-designer")),
         relative_file_bytes(std::path::Path::new(
@@ -464,6 +577,75 @@ fn preparing_existing_project_installs_only_required_templates_and_original_skil
         "prepared projects must receive every IPS skill-designer file byte for byte"
     );
     assert!(!root.join("CLAUDE.md").exists());
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn preparing_frontend_project_excludes_backend_reference_assets() {
+    let root = fixture_frontend_project("existing-prepare-frontend");
+
+    let result = prepare_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect("prepare frontend project");
+
+    assert!(result.layers.frontend);
+    assert!(!result.layers.backend);
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3/文档模板/前端/前端架构模板.md")
+        .is_file());
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3/规则模板/前端/前端工程规则.md")
+        .is_file());
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3/技能模板/前端/frontend-self-test/SKILL.md")
+        .is_file());
+    assert!(!root
+        .join(".vibe-coding-platform/init-reference-v3/文档模板/后端")
+        .exists());
+    assert!(!root
+        .join(".vibe-coding-platform/init-reference-v3/规则模板/后端")
+        .exists());
+    assert!(!root
+        .join(".vibe-coding-platform/init-reference-v3/技能模板/后端")
+        .exists());
+    assert!(!root
+        .join(".vibe-coding-platform/init-reference-v3/技能模板/可选/backend-log-diagnose")
+        .exists());
+
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn preparing_fullstack_project_includes_frontend_and_backend_reference_assets() {
+    let root = fixture_spring_project("existing-prepare-fullstack");
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"dependencies":{"react":"^19.0.0"},"devDependencies":{"vite":"^6.0.0"}}"#,
+    )
+    .expect("write frontend manifest");
+    std::fs::write(
+        root.join("src/App.tsx"),
+        "export default () => <main>示例</main>;",
+    )
+    .expect("write frontend entry");
+
+    let result = prepare_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect("prepare fullstack project");
+
+    assert!(result.layers.frontend);
+    assert!(result.layers.backend);
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3/文档模板/前端/前端架构模板.md")
+        .is_file());
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3/文档模板/后端/系统架构详解模板.md")
+        .is_file());
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3/技能模板/前端/frontend-self-test/SKILL.md")
+        .is_file());
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3/技能模板/后端/backend-self-test/SKILL.md")
+        .is_file());
+
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -513,6 +695,115 @@ fn finalization_marks_only_real_project_specific_assets_as_initialized() {
     assert!(!root
         .join(".vibe-coding-platform/init-reference-v3")
         .exists());
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[cfg(unix)]
+#[test]
+fn finalization_creates_all_shared_agent_links_after_validation() {
+    let root = fixture_spring_project("existing-finalize-shared-links");
+    write_real_backend_assets(&root);
+
+    finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect("finalize real project assets");
+
+    for name in ["rules", "skills", "scripts"] {
+        let path = root.join(".agents").join(name);
+        let metadata = std::fs::symlink_metadata(&path).expect("shared link metadata");
+        assert!(
+            metadata.file_type().is_symlink(),
+            "{name} must be a symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(path).expect("read shared link"),
+            std::path::PathBuf::from(format!("../.claude/{name}"))
+        );
+    }
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn finalization_never_overwrites_a_regular_agents_directory() {
+    let root = fixture_spring_project("existing-finalize-regular-agents-directory");
+    write_real_backend_assets(&root);
+    let protected = root.join(".agents/rules/用户原规则.md");
+    std::fs::create_dir_all(protected.parent().expect("protected parent"))
+        .expect("create protected rules directory");
+    std::fs::write(&protected, "# 用户原规则\n\n必须保留该目录和文件。")
+        .expect("write protected rule");
+
+    let error = finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect_err("a regular shared directory must block finalization");
+
+    assert!(error.contains(".agents/rules"));
+    assert_eq!(
+        std::fs::read_to_string(&protected).expect("protected rule survives"),
+        "# 用户原规则\n\n必须保留该目录和文件。"
+    );
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3")
+        .is_dir());
+    assert!(!std::fs::read_to_string(root.join("CLAUDE.md"))
+        .expect("read entry")
+        .contains("vibe-coding-platform:init:"));
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn pure_backend_finalization_rejects_frontend_formal_outputs_without_deleting_them() {
+    let root = fixture_spring_project("existing-finalize-backend-layer-pollution");
+    write_real_backend_assets(&root);
+    let unexpected = root.join("docs/frontend/latest/index.md");
+    std::fs::create_dir_all(unexpected.parent().expect("unexpected parent"))
+        .expect("create frontend formal directory");
+    std::fs::write(&unexpected, "# 用户原有前端文档\n\n平台不得删除这个文件。")
+        .expect("write original doc");
+
+    let error = finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect_err("pure backend must reject frontend formal outputs");
+
+    assert!(error.contains("纯后端"));
+    assert!(error.contains("docs/frontend/latest/index.md"));
+    assert_eq!(
+        std::fs::read_to_string(&unexpected).expect("original doc survives"),
+        "# 用户原有前端文档\n\n平台不得删除这个文件。"
+    );
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3")
+        .is_dir());
+    assert!(!std::fs::read_to_string(root.join("CLAUDE.md"))
+        .expect("read entry")
+        .contains("vibe-coding-platform:init:"));
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn pure_frontend_finalization_rejects_backend_formal_outputs_without_deleting_them() {
+    let root = fixture_frontend_project("existing-finalize-frontend-layer-pollution");
+    prepare_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect("prepare frontend project");
+    write_real_frontend_assets(&root);
+    let unexpected = root.join("docs/backend/latest/index.md");
+    std::fs::create_dir_all(unexpected.parent().expect("unexpected parent"))
+        .expect("create backend formal directory");
+    std::fs::write(&unexpected, "# 用户原有后端文档\n\n平台不得删除这个文件。")
+        .expect("write original doc");
+
+    let error = finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect_err("pure frontend must reject backend formal outputs");
+
+    assert!(error.contains("纯前端"));
+    assert!(error.contains("docs/backend/latest/index.md"));
+    assert_eq!(
+        std::fs::read_to_string(&unexpected).expect("original doc survives"),
+        "# 用户原有后端文档\n\n平台不得删除这个文件。"
+    );
+    assert!(root
+        .join(".vibe-coding-platform/init-reference-v3")
+        .is_dir());
+    assert!(!std::fs::read_to_string(root.join("CLAUDE.md"))
+        .expect("read entry")
+        .contains("vibe-coding-platform:init:"));
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -581,6 +872,132 @@ fn finalization_rejects_generic_agent_entry_without_project_navigation() {
     assert!(
         !existing_project_init_status(root.to_str().expect("valid path"))
             .expect("status")
+            .initialized
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn finalization_rejects_backend_rules_without_real_source_path_and_symbol_evidence() {
+    let root = fixture_spring_project("existing-generic-backend-rules");
+    write_real_backend_assets(&root);
+    for rule in [
+        ".claude/rules/后端/API与业务实现规则.md",
+        ".claude/rules/后端/持久化与迁移规则.md",
+    ] {
+        std::fs::write(
+            root.join(rule),
+            "# 后端通用约束\n\n所有实现以源码为准；未识别的模块后续再补。开发时遵守分层、复用、异常、日志、事务、兼容性与测试等最佳实践，先搜索再修改，完成构建与自测后交付。这里故意写得足够长，用来证明长度和中文数量不能代替当前项目的真实路径、类名与扩展点证据。",
+        )
+        .expect("replace backend rule with generic shell");
+    }
+
+    let error = finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect_err("generic backend rules must not finalize");
+
+    assert!(error.contains("后端"));
+    assert!(error.contains("通用约束") || error.contains("以源码为准"));
+    assert!(!std::fs::read_to_string(root.join("CLAUDE.md"))
+        .expect("read entry")
+        .contains("vibe-coding-platform:init:"));
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn finalization_rejects_project_rules_that_name_no_existing_source_or_symbol() {
+    let root = fixture_spring_project("existing-backend-rules-without-code-evidence");
+    write_real_backend_assets(&root);
+    for rule in [
+        ".claude/rules/后端/API与业务实现规则.md",
+        ".claude/rules/后端/持久化与迁移规则.md",
+    ] {
+        std::fs::write(
+            root.join(rule),
+            "# 后端项目规则\n\n本项目所有业务变化都必须先确认输入、输出、状态、事务和兼容性，再按现有分层完成最小改动。修改前检索同类实现，复用公共能力，保留错误与测试证据；修改后运行真实构建与自测，失败时如实报告，不放宽断言，也不编造成功结果。",
+        )
+        .expect("replace backend rule without code evidence");
+    }
+
+    let error = finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect_err("rules without a real path and symbol must not finalize");
+
+    assert!(error.contains("真实源码路径"));
+    assert!(error.contains("真实符号/类名"));
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn backend_rules_must_record_a_detected_nested_project_module() {
+    let root = fixture_spring_project("existing-backend-module-evidence");
+    write_real_backend_assets(&root);
+    let module_source = root.join("payments/src/main/java/com/example/PaymentHandler.java");
+    std::fs::create_dir_all(module_source.parent().expect("module source parent"))
+        .expect("create nested module");
+    std::fs::write(
+        module_source,
+        "package com.example;\n\npublic class PaymentHandler {\n    public void handle() {}\n}\n",
+    )
+    .expect("write nested module source");
+
+    let error = finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect_err("an unrecorded real module must block finalization");
+
+    assert!(error.contains("项目模块"));
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn frontend_rules_must_cover_each_detected_router_store_and_api_client_category() {
+    let root = fixture_frontend_project("existing-frontend-category-evidence");
+    prepare_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect("prepare frontend project");
+    write_real_frontend_assets(&root);
+    for (relative, content) in [
+        (
+            "src/router/index.ts",
+            "import { createRouter, createWebHistory } from 'vue-router';\nexport const router = createRouter({ history: createWebHistory(), routes: [] });",
+        ),
+        (
+            "src/stores/session.ts",
+            "import { defineStore } from 'pinia';\nexport const useSessionStore = defineStore('session', () => ({}));",
+        ),
+        (
+            "src/api/client.ts",
+            "import axios from 'axios';\nexport const apiClient = axios.create({ baseURL: '/api' });",
+        ),
+    ] {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("source parent"))
+            .expect("create frontend evidence directory");
+        std::fs::write(path, content).expect("write frontend category evidence");
+    }
+
+    let error = finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect_err("unrecorded frontend categories must block finalization");
+
+    assert!(error.contains("前端"));
+    assert!(error.contains("路由"));
+    assert!(error.contains("状态管理"));
+    assert!(error.contains("API client"));
+    assert!(!std::fs::read_to_string(root.join("CLAUDE.md"))
+        .expect("read entry")
+        .contains("vibe-coding-platform:init:"));
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn frontend_finalization_accepts_real_component_path_and_symbol_evidence() {
+    let root = fixture_frontend_project("existing-frontend-component-evidence");
+    prepare_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect("prepare frontend project");
+    write_real_frontend_assets(&root);
+
+    finalize_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect("real frontend component evidence must finalize");
+
+    assert!(
+        existing_project_init_status(root.to_str().expect("valid path"))
+            .expect("read status")
             .initialized
     );
     std::fs::remove_dir_all(root).expect("cleanup");

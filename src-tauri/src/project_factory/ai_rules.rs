@@ -22,6 +22,8 @@ const BACKEND_SELF_TEST: &str =
 const DDL_REVIEW: &str = include_str!("../../../docs/规范约束/技能模板/可选/ddl-review/SKILL.md");
 const BACKEND_LOG_DIAGNOSE: &str =
     include_str!("../../../docs/规范约束/技能模板/可选/backend-log-diagnose/SKILL.md");
+const DATABASE_READ_DIAGNOSE: &str =
+    include_str!("../../../docs/规范约束/技能模板/可选/database-read-diagnose/SKILL.md");
 const EXTERNAL_INTEGRATION: &str =
     include_str!("../../../docs/规范约束/技能模板/可选/external-integration/SKILL.md");
 
@@ -197,6 +199,7 @@ fn validate_generated_materials(root: &Path) -> Result<(), String> {
         "frontend-self-test",
         "backend-self-test",
         "backend-log-diagnose",
+        "database-read-diagnose",
         "ddl-review",
         "external-integration",
     ] {
@@ -392,6 +395,122 @@ fn existing_dirs(root: &Path, names: &[&str]) -> Vec<String> {
     paths
 }
 
+fn collect_source_files(
+    base: &Path,
+    current: &Path,
+    depth: usize,
+    name_patterns: &[&str],
+    output: &mut Vec<PathBuf>,
+) {
+    if depth > 8 || output.len() >= 48 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if matches!(
+                name.as_str(),
+                ".git" | ".idea" | "node_modules" | "target" | "dist" | "build" | "docs"
+            ) {
+                continue;
+            }
+            collect_source_files(base, &path, depth + 1, name_patterns, output);
+            continue;
+        }
+        let lower = name.to_lowercase();
+        let path_lower = relative(base, &path).to_lowercase();
+        let source_file = matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("java" | "kt" | "ts" | "tsx" | "js" | "jsx" | "vue" | "py" | "go" | "rs" | "cs")
+        );
+        if source_file
+            && name_patterns.iter().any(|pattern| {
+                let pattern = pattern.to_lowercase();
+                lower.contains(&pattern) || path_lower.contains(&pattern)
+            })
+        {
+            output.push(path);
+            if output.len() >= 48 {
+                return;
+            }
+        }
+    }
+}
+
+fn source_files_matching(root: &Path, patterns: &[&str]) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_source_files(root, root, 0, patterns, &mut files);
+    let mut relative_paths = files
+        .into_iter()
+        .map(|path| relative(root, &path))
+        .collect::<Vec<_>>();
+    relative_paths.sort();
+    relative_paths.dedup();
+    relative_paths
+}
+
+fn manifest_contents(root: &Path) -> String {
+    [
+        "package.json",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "pyproject.toml",
+        "requirements.txt",
+        "go.mod",
+        "Cargo.toml",
+        "Program.cs",
+    ]
+    .into_iter()
+    .flat_map(|name| project_files_named(root, name))
+    .filter_map(|path| fs::read_to_string(path).ok())
+    .collect::<Vec<_>>()
+    .join("\n")
+    .to_lowercase()
+}
+
+fn actual_backend_framework(root: &Path, request: &CreateProjectRequest) -> String {
+    let manifests = manifest_contents(root);
+    let known = [
+        ("spring-boot", "Spring Boot"),
+        ("spring boot", "Spring Boot"),
+        ("quarkus", "Quarkus"),
+        ("micronaut", "Micronaut"),
+        ("fastapi", "FastAPI"),
+        ("django", "Django"),
+        ("flask", "Flask"),
+        ("@nestjs", "NestJS"),
+        ("express", "Express"),
+        ("axum", "Axum"),
+        ("actix-web", "Actix Web"),
+        ("gin-gonic", "Gin"),
+        ("aspnetcore", "ASP.NET Core"),
+    ];
+    let mut frameworks = known
+        .iter()
+        .filter(|(needle, _)| manifests.contains(needle))
+        .map(|(_, label)| (*label).to_string())
+        .collect::<Vec<_>>();
+    frameworks.sort();
+    frameworks.dedup();
+    if frameworks.is_empty() {
+        if request.recommendation.backend.is_empty() {
+            "当前构建文件未识别出具体后端框架".to_string()
+        } else {
+            format!(
+                "技术选型为 {}；实现时仍以构建文件和源码为准",
+                request.recommendation.backend.join("、")
+            )
+        }
+    } else {
+        frameworks.join("、")
+    }
+}
+
 fn markdown_paths(paths: Vec<String>, empty: &str) -> String {
     if paths.is_empty() {
         empty.to_string()
@@ -471,6 +590,151 @@ fn selected_database(request: &CreateProjectRequest) -> String {
     }
 }
 
+fn database_config_paths(root: &Path) -> Vec<String> {
+    existing_files(
+        root,
+        &[
+            "application.yaml",
+            "application.yml",
+            "application.properties",
+            ".env",
+            ".env.example",
+            "config.toml",
+            "database.yml",
+            "prisma.schema",
+        ],
+    )
+}
+
+fn has_database_capability_evidence(root: &Path, request: &CreateProjectRequest) -> bool {
+    if !request.recommendation.database.is_empty() || !database_config_paths(root).is_empty() {
+        return true;
+    }
+    let dependencies = format!(
+        "{}\n{}\n{}",
+        package_scripts(root),
+        project_files_named(root, "pom.xml")
+            .into_iter()
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        project_files_named(root, "pyproject.toml")
+            .into_iter()
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+    .to_lowercase();
+    [
+        "mysql",
+        "postgres",
+        "mariadb",
+        "oracle",
+        "sqlserver",
+        "sqlite",
+        "prisma",
+        "sqlalchemy",
+        "jdbc",
+    ]
+    .iter()
+    .any(|needle| dependencies.contains(needle))
+}
+
+fn maven_multi_module_test_guidance(root: &Path) -> String {
+    if project_files_named(root, "pom.xml").is_empty() {
+        "不适用：当前未检测到 Maven `pom.xml`".to_string()
+    } else {
+        "`mvn -pl <模块> -am -Dtest=<测试类> test -Dsurefire.failIfNoSpecifiedTests=false`；避免上游依赖模块没有同名测试时误报失败".to_string()
+    }
+}
+
+fn log_capability_rows(root: &Path) -> String {
+    let local = existing_files(
+        root,
+        &[
+            "application.yaml",
+            "application.yml",
+            "application.properties",
+            "logback.xml",
+            "log4j2.xml",
+            "tracing.ts",
+        ],
+    );
+    let containers = existing_files(
+        root,
+        &["Dockerfile", "docker-compose.yml", "docker-compose.yaml"],
+    );
+    let kubernetes = existing_files(
+        root,
+        &["deployment.yaml", "deployment.yml", "kustomization.yaml"],
+    );
+    let row = |name: &str, evidence: Vec<String>, missing: &str, probe: &str| {
+        let (status, location) = if evidence.is_empty() {
+            ("未配置", "项目中未发现接入线索".to_string())
+        } else {
+            (
+                "有证据但需配置",
+                markdown_paths(evidence, "项目中未发现接入线索"),
+            )
+        };
+        format!(
+            "| {name} | {status} | {missing} | {location} | `{probe}` | 命令退出码 0、环境/服务/时间与脱敏结果摘要 |"
+        )
+    };
+    let rows = [
+        row(
+            "本地文件/标准输出",
+            local,
+            "真实日志路径、启动方式、时间格式与检索命令",
+            "读取一行当前环境日志",
+        ),
+        row(
+            "Docker/容器",
+            containers,
+            "容器名、服务名与只读日志命令",
+            "docker logs <container> --tail 1",
+        ),
+        row(
+            "Kubernetes",
+            kubernetes,
+            "context、namespace、服务/Deployment、label selector、container",
+            "kubectl logs -n <namespace> <pod> -c <container> --tail=1",
+        ),
+        row(
+            "集中日志",
+            Vec::new(),
+            "Loki/ELK/Grafana/云日志入口、查询范围与只读授权",
+            "使用已授权 CLI/API 查询一条日志",
+        ),
+        row(
+            "SSH/远程 API",
+            Vec::new(),
+            "主机别名或 API/CLI、只读权限与脱敏规则",
+            "读取一行非生产敏感日志",
+        ),
+    ]
+    .join("\n");
+    format!(
+        "| 能力项 | 当前状态 | 缺少信息 | 补充位置/证据 | 最小只读探测 | 验收证据 |\n|---|---|---|---|---|---|\n{rows}"
+    )
+}
+
+fn database_capability_rows(root: &Path, request: &CreateProjectRequest) -> String {
+    let configs = database_config_paths(root);
+    let evidence = if configs.is_empty() {
+        if request.recommendation.database.is_empty() {
+            "项目中未发现数据库接入线索".to_string()
+        } else {
+            format!("技术选型：{}", selected_database(request))
+        }
+    } else {
+        markdown_paths(configs, "项目中未发现数据库接入线索")
+    };
+    format!(
+        "| 能力项 | 当前状态 | 缺少信息 | 补充位置/证据 | 最小只读探测 | 验收证据 |\n|---|---|---|---|---|---|\n| 数据库只读诊断 | 有证据但需配置 | 环境到数据库映射、数据库类型/版本、凭证来源名称、只读账号、CLI/MCP/脚本 | {evidence} | `SELECT 1`，并查询当前库/用户/版本/只读状态/授权范围 | 命令退出码 0、验证时间/环境与脱敏结果摘要 |"
+    )
+}
+
 fn adopted_decision(request: &CreateProjectRequest, category: &str) -> bool {
     request.recommendation.decisions.iter().any(|decision| {
         decision.status == "adopt" && decision.category.eq_ignore_ascii_case(category)
@@ -519,14 +783,34 @@ fn common_capability_rows(root: &Path) -> String {
             "clients",
         ],
     );
-    if paths.is_empty() {
+    let source_files = source_files_matching(
+        root,
+        &[
+            "util",
+            "helper",
+            "converter",
+            "mapper",
+            "enum",
+            "constant",
+            "exception",
+            "errorcode",
+            "client",
+            "adapter",
+            "base",
+            "abstract",
+        ],
+    );
+    if paths.is_empty() && source_files.is_empty() {
         "| 当前未形成独立公共目录 | 新增前先全局检索同职责实现 | 当前源码 | 以实际调用方为证据 | 不为单一调用提前抽象 |".to_string()
     } else {
-        paths
+        let mut rows = paths
             .into_iter()
             .map(|path| format!("| `{path}` | 复用其中已有组件、类型、工具或客户端 | `{path}` | 使用前检索真实调用方 | 保持当前目录职责 |"))
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect::<Vec<_>>();
+        rows.extend(source_files.into_iter().map(|path| {
+            format!("| `{path}` | 复用该文件已定义的公共类型、工具、枚举或错误表达 | `{path}` | 全局检索该符号的真实调用方 | 修改前评估所有引用方 |")
+        }));
+        rows.join("\n")
     }
 }
 
@@ -563,24 +847,103 @@ fn dependency_fact<'a>(package: &str, needles: &[&str], yes: &'a str, no: &'a st
     }
 }
 
-fn frontend_engineering_rows(root: &Path) -> String {
+fn actual_frontend_framework(root: &Path, request: &CreateProjectRequest) -> String {
+    let manifests = manifest_contents(root);
+    let known = [
+        ("\"vue\"", "Vue 3"),
+        ("\"react\"", "React"),
+        ("\"next\"", "Next.js"),
+        ("\"svelte\"", "Svelte"),
+        ("@angular/core", "Angular"),
+        ("\"nuxt\"", "Nuxt"),
+        ("\"astro\"", "Astro"),
+        ("solid-js", "SolidJS"),
+    ];
+    let mut frameworks = known
+        .iter()
+        .filter(|(needle, _)| manifests.contains(needle))
+        .map(|(_, label)| (*label).to_string())
+        .collect::<Vec<_>>();
+    frameworks.sort();
+    frameworks.dedup();
+    if frameworks.is_empty() {
+        if request.recommendation.frontend.is_empty() {
+            "当前构建文件未识别出具体前端框架".to_string()
+        } else {
+            format!(
+                "技术选型为 {}；实现时仍以构建文件和源码为准",
+                request.recommendation.frontend.join("、")
+            )
+        }
+    } else {
+        frameworks.join("、")
+    }
+}
+
+fn frontend_engineering_rows(root: &Path, request: &CreateProjectRequest) -> String {
     let package = package_scripts(root).to_lowercase();
-    let source = project_evidence(root);
+    let routes = markdown_paths(
+        source_files_matching(root, &["router", "routes", "routing"]),
+        "当前源码中未识别出独立路由文件",
+    );
+    let state = markdown_paths(
+        source_files_matching(root, &["store", "stores", "state", "context"]),
+        "当前源码中未识别出独立共享状态文件",
+    );
+    let clients = markdown_paths(
+        source_files_matching(root, &["api", "client", "request", "http"]),
+        "当前源码中未识别出独立请求客户端文件",
+    );
+    let components = markdown_paths(
+        source_files_matching(root, &["component", "components", "layout"]),
+        "当前源码中未识别出公共组件文件",
+    );
+    let styles = markdown_paths(
+        source_files_matching(root, &["style", "theme", "token"]),
+        "当前源码中未识别出独立样式 token 文件",
+    );
     format!(
-        "| 路由 | {} | {} | 使用前检索现有路由入口 |\n| 状态管理 | {} | {} | 使用前检索现有 store/context |\n| 请求封装 | {} | {} | 使用前检索现有客户端 |\n| UI/样式 | {} | {} | 延续现有组件与 token |\n| 权限 | 以现有路由、组件和请求拦截证据为准 | {} | 未发现证据时不自创权限框架 |\n| 错误展示 | 复用当前组件与请求层错误表达 | {} | 不吞错、不伪造成功 |",
-        dependency_fact(&package, &["vue-router", "react-router", "next"], "已检测到路由依赖", "未检测到独立路由依赖"), source,
-        dependency_fact(&package, &["pinia", "vuex", "redux", "zustand", "mobx"], "已检测到状态库", "未检测到独立状态库"), source,
-        dependency_fact(&package, &["axios", "ky", "@tanstack/query"], "已检测到请求依赖", "使用运行时原生请求能力或当前源码封装"), source,
-        dependency_fact(&package, &["element-plus", "antd", "tailwind", "vuetify", "@mui"], "已检测到 UI/样式依赖", "使用当前源码样式体系"), source,
-        source, source,
+        "| 前端框架 | {} | {} | 以构建依赖和已有源码用法为准 |\n| 路由 | {} | {} | 使用前读取现有路由入口和守卫 |\n| 状态管理 | {} | {} | 使用前读取现有 store/context 调用方 |\n| 请求封装 | {} | {} | 不在页面或组件中重复创建客户端 |\n| 公共组件 | 优先复用当前组件体系 | {} | 新增前检索真实调用方 |\n| UI/样式 | {} | {}；{} | 延续现有组件、视觉语言与 token |\n| 权限与错误展示 | 只按路由、组件和请求拦截的真实证据实现 | {}；{} | 未发现证据时不自创权限框架，不吞错或伪造成功 |",
+        actual_frontend_framework(root, request),
+        build_evidence(root),
+        dependency_fact(&package, &["vue-router", "react-router", "next"], "已检测到路由依赖", "未检测到独立路由依赖"), routes,
+        dependency_fact(&package, &["pinia", "vuex", "redux", "zustand", "mobx"], "已检测到状态库", "未检测到独立状态库"), state,
+        dependency_fact(&package, &["axios", "ky", "@tanstack/query"], "已检测到请求依赖", "使用运行时原生请求能力或当前源码封装"), clients,
+        components,
+        dependency_fact(&package, &["element-plus", "antd", "tailwind", "vuetify", "@mui"], "已检测到 UI/样式依赖", "使用当前源码样式体系"), components, styles,
+        routes, clients,
     )
 }
 
 fn backend_engineering_rows(root: &Path, request: &CreateProjectRequest) -> String {
     let evidence = project_evidence(root);
+    let api_entries = markdown_paths(
+        source_files_matching(root, &["controller", "resource", "router", "route"]),
+        "当前源码中未识别出命名明确的 API 入口",
+    );
+    let error_entries = markdown_paths(
+        source_files_matching(root, &["exception", "errorcode", "advice", "problem"]),
+        "当前源码中未识别出独立异常/错误码文件",
+    );
+    let enum_entries = markdown_paths(
+        source_files_matching(root, &["enum", "status", "type"]),
+        "当前源码中未识别出命名明确的枚举文件",
+    );
+    let common_entries = markdown_paths(
+        source_files_matching(root, &["util", "helper", "converter", "mapper", "client"]),
+        "当前源码中未识别出命名明确的公共工具文件",
+    );
     format!(
-        "| API 层 | {} | {} | 沿用当前入口与序列化方式 |\n| 业务层 | 按当前项目分层组织 | {} | 新增前检索同职责实现 |\n| 错误体系 | 复用现有异常、错误码与响应结构 | {} | 无现成体系时先在详设确定 |\n| 鉴权 | 只采用代码或需求已确认的机制 | {} | 未确认时不默认放行 |\n| 日志 | 复用运行时日志门面与当前格式 | {} | 敏感信息脱敏 |\n| DTO/序列化 | 使用当前运行时与框架的类型系统 | {} | 契约变化同步调用方和测试 |",
-        request.recommendation.backend.join("、"), evidence, evidence, evidence, evidence, evidence, evidence,
+        "| 后端框架 | {} | {} | 以构建依赖和已有源码用法为准 |\n| API 层 | 沿用当前框架入口与序列化方式 | {} | 修改前读取真实入口及调用链 |\n| 业务层 | 按当前项目分层组织 | {} | 新增前检索同职责实现 |\n| 公共工具/转换器/客户端 | 优先复用现有实现 | {} | 使用前读取真实调用方 |\n| 枚举与状态 | 复用已有枚举和值语义 | {} | 改值前全局检索序列化和分支引用 |\n| 错误体系 | 复用现有异常、错误码与响应结构 | {} | 无现成体系时先在详设确定 |\n| 鉴权 | 只采用代码或需求已确认的机制 | {} | 未确认时不默认放行 |\n| 日志 | 复用运行时日志门面与当前格式 | {} | 敏感信息脱敏 |",
+        actual_backend_framework(root, request),
+        build_evidence(root),
+        api_entries,
+        evidence,
+        common_entries,
+        enum_entries,
+        error_entries,
+        evidence,
+        evidence,
     )
 }
 
@@ -620,7 +983,7 @@ fn log_source(root: &Path) -> String {
         "应用启动进程的标准输出；持久化或集中日志入口尚未由项目配置证明".to_string()
     } else {
         format!(
-            "应用标准输出及配置 {} 中明确的日志来源",
+            "应用标准输出；配置 {} 仅作为日志接入线索，尚未完成读取探测",
             markdown_paths(configs, "")
         )
     }
@@ -671,6 +1034,10 @@ fn render_template_for(
         .replace("{{类型检查命令}}", &typecheck)
         .replace("{{test命令}}", &test)
         .replace("{{测试命令}}", &test)
+        .replace(
+            "{{Maven多模块定向测试说明}}",
+            &maven_multi_module_test_guidance(root),
+        )
         .replace("{{构建命令}}", &build)
         .replace("{{typecheck命令}}", &typecheck)
         .replace("{{build命令}}", &build)
@@ -687,7 +1054,10 @@ fn render_template_for(
         .replace("{{公共能力事实表}}", &common_capability_rows(root))
         .replace("{{Git事实表}}", &git_rows(root))
         .replace("{{验证命令事实表}}", &verification_rows(root, layers))
-        .replace("{{前端工程事实表}}", &frontend_engineering_rows(root))
+        .replace(
+            "{{前端工程事实表}}",
+            &frontend_engineering_rows(root, request),
+        )
         .replace(
             "{{后端工程事实表}}",
             &backend_engineering_rows(root, request),
@@ -695,6 +1065,7 @@ fn render_template_for(
         .replace("{{持久化事实表}}", &persistence_rows(root, request))
         .replace("{{异步集成事实表}}", &integration_rows(root, request))
         .replace("{{日志来源说明}}", &log_source(root))
+        .replace("{{日志能力补充表}}", &log_capability_rows(root))
         .replace(
             "{{数据库证据说明}}",
             &format!(
@@ -738,11 +1109,20 @@ fn render_template_for(
         )
         .replace(
             "{{持久化规则路径}}",
-            ".claude/rules/后端/持久化与迁移规则.md",
+            if adopted_decision(request, "persistence")
+                && !request.recommendation.database.is_empty()
+            {
+                ".claude/rules/后端/持久化与迁移规则.md"
+            } else {
+                ".claude/rules/公共/事实与兜底边界.md"
+            },
         )
         .replace(
             "{{配置文件/环境变量/配置中心键名，不写值}}",
-            &build_evidence(root),
+            &markdown_paths(
+                database_config_paths(root),
+                "未发现数据库连接配置文件；仅有技术选型时仍需开发者补充",
+            ),
         )
         .replace(
             "{{CLI/MCP/脚本/未配置}}",
@@ -750,7 +1130,11 @@ fn render_template_for(
         )
         .replace(
             "{{环境 → 可用/有证据但需配置/不适用}}",
-            "有数据库配置证据但需由用户提供并授权只读访问方式",
+            "有证据但需配置；配置键或技术选型尚未经过只读探测",
+        )
+        .replace(
+            "{{数据库能力补充表}}",
+            &database_capability_rows(root, request),
         )
         .replace("{{数据访问代码路径}}", &project_evidence(root))
         .replace(
@@ -873,6 +1257,19 @@ fn write_runtime_skills(root: &Path, request: &CreateProjectRequest) -> Result<(
                 MaterialLayer::Backend,
             )?,
         )?;
+        if has_database_capability_evidence(root, request) {
+            write_skill(
+                root,
+                "database-read-diagnose",
+                &render_template_for(
+                    DATABASE_READ_DIAGNOSE,
+                    root,
+                    request,
+                    layers,
+                    MaterialLayer::Backend,
+                )?,
+            )?;
+        }
     }
     if layers.backend
         && adopted_decision(request, "persistence")
@@ -1046,6 +1443,10 @@ fn entry_document(root: &Path, request: &CreateProjectRequest) -> String {
     }
     if layers.backend {
         skills.push("后端自测 → `backend-self-test`");
+        skills.push("后端日志诊断 → `backend-log-diagnose`");
+        if has_database_capability_evidence(root, request) {
+            skills.push("数据库只读诊断 → `database-read-diagnose`");
+        }
     }
     format!(
         "{PLATFORM_INIT_MARKER}\n# {} — AI 助手开发指南\n\n> {}。主要技术栈：{}。\n> `CLAUDE.md` 是唯一维护源，`AGENTS.md` 软链接到本文件；`.agents/rules`、`.agents/skills`、`.agents/scripts` 软链接到 `.claude/` 同名目录。\n\n## 工厂初始化边界\n\n本项目已完成工程骨架、项目文档、规则与 skills 的初始化。**项目工厂到此结束，不自动开发任何业务功能。** 后续由用户另开 Agent 会话并明确提出需求，再按本文件、rules 和对应 skill 生成详设、进度文档、代码与自测证据。\n\n## 项目结构与模块职责\n\n{}\n\n## 核心约束\n\n1. 改文件前读取目标文件、上游入口、下游调用方、同类实现和命中规则。\n2. 优先复用现有组件、工具、模型、错误处理和测试基座；不存在才新增。\n3. 只改当前任务直接相关内容，不覆盖用户改动，不顺手重构。\n4. 结论必须来自代码、配置、测试、数据或用户材料；证据不足时写“推测”。\n5. 不添加未经需求或项目证据确认的默认值、吞错、模拟成功或降级兜底。\n{}\n\n## 后续会话开发流程\n\n1. 读取“项目需求与技术选型”、业务总览、架构和 `.claude/rules/README.md`。\n2. 新需求先使用 `detail-design-writer` 生成详设与进度；用户确认前不改业务代码。\n3. 用户明确要求开发后才使用 `developer`，先写失败测试，再做最小实现。\n4. 覆盖正常、边界、异常、原 Bug 和相关回归，同步受影响长期文档。\n5. 是否 commit/push 由用户选择，不自动执行。\n\n## 文档索引\n\n{}\n\n## 技能触发\n\n- {}\n\n## 构建与自测\n\n| 用途 | 真实命令 |\n|---|---|\n| 测试 | `{}` |\n| lint | `{}` |\n| 类型检查 | `{}` |\n| 构建 | `{}` |\n",
@@ -1157,7 +1558,56 @@ pub fn write_ai_rules(root: &Path, request: &CreateProjectRequest) -> Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::reject_forbidden_material;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        reject_forbidden_material, render_template_for, write_runtime_rules, write_runtime_skills,
+        MaterialLayer, BACKEND_LOG_DIAGNOSE, BACKEND_SELF_TEST,
+    };
+    use crate::project_factory::{
+        CreateProjectRequest, ProjectProfilePayload, StackRecommendationPayload, TechnologyDecision,
+    };
+
+    fn temporary_project(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "vibe-ai-rules-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove stale test project");
+        }
+        fs::create_dir_all(&root).expect("create test project");
+        root
+    }
+
+    fn maven_backend_request(root: &Path) -> CreateProjectRequest {
+        CreateProjectRequest {
+            project_name: "demo-service".to_string(),
+            parent_path: root.to_string_lossy().to_string(),
+            recommendation: StackRecommendationPayload {
+                backend: vec!["Java 21".to_string(), "Spring Boot".to_string()],
+                database: vec!["MySQL".to_string()],
+                decisions: vec![TechnologyDecision {
+                    category: "persistence".to_string(),
+                    title: "关系型持久化".to_string(),
+                    status: "adopt".to_string(),
+                    choices: vec!["MySQL".to_string()],
+                    reason: "业务需要持久化".to_string(),
+                    provision: "project".to_string(),
+                    trigger: None,
+                }],
+                ..Default::default()
+            },
+            profile: ProjectProfilePayload {
+                summary: "后端服务".to_string(),
+                system_type: "backend-api".to_string(),
+            },
+            agent_choice: "both".to_string(),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn generated_material_rejects_unresolved_placeholders() {
@@ -1176,5 +1626,177 @@ mod tests {
     fn generated_material_accepts_honest_unavailable_capability() {
         reject_forbidden_material("package.json 未定义测试脚本", "skill")
             .expect("honest unavailable capability is executable guidance");
+    }
+
+    #[test]
+    fn maven_backend_self_test_handles_multi_module_targeted_tests() {
+        let root = temporary_project("maven-self-test");
+        fs::write(root.join("pom.xml"), "<project><modules/></project>").expect("write pom");
+        let request = maven_backend_request(&root);
+        let rendered = render_template_for(
+            BACKEND_SELF_TEST,
+            &root,
+            &request,
+            crate::project_factory::docs::project_layers(&root),
+            MaterialLayer::Backend,
+        )
+        .expect("render backend self-test");
+
+        assert!(rendered.contains("-Dsurefire.failIfNoSpecifiedTests=false"));
+        fs::remove_dir_all(root).expect("cleanup test project");
+    }
+
+    #[test]
+    fn backend_log_skill_requires_developer_completion_before_available() {
+        assert!(BACKEND_LOG_DIAGNOSE.contains("## 待开发者补充"));
+        assert!(BACKEND_LOG_DIAGNOSE.contains("## 完成 Gate"));
+        assert!(BACKEND_LOG_DIAGNOSE.contains("最小只读探测"));
+        assert!(BACKEND_LOG_DIAGNOSE.contains("配置键"));
+    }
+
+    #[test]
+    fn database_skill_is_generated_but_not_available_without_probe() {
+        let root = temporary_project("database-skill");
+        fs::write(
+            root.join("pom.xml"),
+            "<project><dependencies><mysql-connector-j/></dependencies></project>",
+        )
+        .expect("write pom");
+        fs::write(
+            root.join("application.yml"),
+            "spring:\n  datasource:\n    url: ${DB_URL}\n",
+        )
+        .expect("write datasource config");
+        let request = maven_backend_request(&root);
+
+        write_runtime_skills(&root, &request).expect("write backend skills");
+        let skill = fs::read_to_string(root.join(".claude/skills/database-read-diagnose/SKILL.md"))
+            .expect("database skill must be generated");
+
+        assert!(skill.contains("## 待开发者补充"));
+        assert!(skill.contains("## 完成 Gate"));
+        assert!(skill.contains("有证据但需配置"));
+        assert!(skill.contains("SELECT 1"));
+        assert!(skill.contains("配置键不等于能力可用"));
+        fs::remove_dir_all(root).expect("cleanup test project");
+    }
+
+    #[test]
+    fn database_skill_does_not_reference_an_unselected_persistence_rule() {
+        let root = temporary_project("database-rule-fallback");
+        fs::write(
+            root.join("pom.xml"),
+            "<project><dependencies><mysql-connector-j/></dependencies></project>",
+        )
+        .expect("write pom");
+        let mut request = maven_backend_request(&root);
+        request.recommendation.decisions.clear();
+
+        write_runtime_skills(&root, &request).expect("write backend skills");
+        let skill = fs::read_to_string(root.join(".claude/skills/database-read-diagnose/SKILL.md"))
+            .expect("database skill must be generated");
+
+        assert!(skill.contains(".claude/rules/公共/事实与兜底边界.md"));
+        assert!(!skill.contains(".claude/rules/后端/持久化与迁移规则.md"));
+        fs::remove_dir_all(root).expect("cleanup test project");
+    }
+
+    #[test]
+    fn generated_rules_reference_real_framework_and_shared_source_files() {
+        let root = temporary_project("real-project-evidence");
+        fs::create_dir_all(root.join("src/main/java/demo/common")).expect("create common dir");
+        fs::create_dir_all(root.join("src/main/java/demo/domain")).expect("create domain dir");
+        fs::create_dir_all(root.join("src/main/java/demo/web")).expect("create web dir");
+        fs::write(
+            root.join("pom.xml"),
+            "<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent></project>",
+        )
+        .expect("write pom");
+        fs::write(root.join(".editorconfig"), "root = true\n").expect("write style config");
+        fs::write(
+            root.join("src/main/java/demo/common/MoneyUtils.java"),
+            "final class MoneyUtils {}",
+        )
+        .expect("write utility");
+        fs::write(
+            root.join("src/main/java/demo/domain/OrderStatusEnum.java"),
+            "enum OrderStatusEnum { CREATED }",
+        )
+        .expect("write enum");
+        fs::write(
+            root.join("src/main/java/demo/web/GlobalExceptionHandler.java"),
+            "final class GlobalExceptionHandler {}",
+        )
+        .expect("write exception handler");
+        let request = maven_backend_request(&root);
+
+        write_runtime_rules(&root, &request).expect("write project rules");
+        let reuse = fs::read_to_string(root.join(".claude/rules/公共/复用与影响面.md"))
+            .expect("read reuse rule");
+        let backend = fs::read_to_string(root.join(".claude/rules/后端/API与业务实现规则.md"))
+            .expect("read backend rule");
+        let baseline = fs::read_to_string(root.join(".claude/rules/公共/开发基线.md"))
+            .expect("read baseline rule");
+
+        assert!(reuse.contains("src/main/java/demo/common/MoneyUtils.java"));
+        assert!(reuse.contains("src/main/java/demo/domain/OrderStatusEnum.java"));
+        assert!(backend.contains("src/main/java/demo/web/GlobalExceptionHandler.java"));
+        assert!(backend.contains("Spring Boot"));
+        assert!(baseline.contains(".editorconfig"));
+        fs::remove_dir_all(root).expect("cleanup test project");
+    }
+
+    #[test]
+    fn frontend_rules_reference_real_routes_components_state_and_clients() {
+        let root = temporary_project("frontend-evidence");
+        for directory in ["src/router", "src/components", "src/stores", "src/api"] {
+            fs::create_dir_all(root.join(directory)).expect("create frontend source dir");
+        }
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"vue":"^3.5.0","vue-router":"^4.0.0","pinia":"^3.0.0","axios":"^1.0.0"},"scripts":{"test":"vitest","build":"vite build"}}"#,
+        )
+        .expect("write package");
+        fs::write(root.join("src/App.vue"), "<template />").expect("write app");
+        fs::write(root.join("src/router/index.ts"), "export const router = {}")
+            .expect("write router");
+        fs::write(root.join("src/components/BaseButton.vue"), "<template />")
+            .expect("write component");
+        fs::write(
+            root.join("src/stores/user.ts"),
+            "export const useUserStore = () => ({})",
+        )
+        .expect("write store");
+        fs::write(root.join("src/api/client.ts"), "export const client = {}")
+            .expect("write client");
+        let request = CreateProjectRequest {
+            project_name: "demo-web".to_string(),
+            parent_path: root.to_string_lossy().to_string(),
+            recommendation: StackRecommendationPayload {
+                frontend: vec!["Vue 3".to_string()],
+                ..Default::default()
+            },
+            profile: ProjectProfilePayload {
+                summary: "前端应用".to_string(),
+                system_type: "web".to_string(),
+            },
+            agent_choice: "both".to_string(),
+            ..Default::default()
+        };
+
+        write_runtime_rules(&root, &request).expect("write frontend rules");
+        let frontend = fs::read_to_string(root.join(".claude/rules/前端/前端工程规则.md"))
+            .expect("read frontend rule");
+
+        for expected in [
+            "src/router/index.ts",
+            "src/components/BaseButton.vue",
+            "src/stores/user.ts",
+            "src/api/client.ts",
+        ] {
+            assert!(frontend.contains(expected), "missing {expected}");
+        }
+        assert!(frontend.contains("Vue 3"));
+        fs::remove_dir_all(root).expect("cleanup test project");
     }
 }

@@ -42,4 +42,14 @@ describe('project initialization progress', () => {
     expect((isVisible as (phase: string) => boolean)('complete')).toBe(false)
     expect((isVisible as (phase: string) => boolean)('failed')).toBe(false)
   })
+
+  it('shows the sidebar task card only after running progress is minimized', () => {
+    const isCardVisible = (initializationUi as Record<string, unknown>).isInitializationTaskCardVisible
+
+    expect(isCardVisible).toBeTypeOf('function')
+    expect((isCardVisible as (phase: string, minimized: boolean) => boolean)('analyze', false)).toBe(false)
+    expect((isCardVisible as (phase: string, minimized: boolean) => boolean)('analyze', true)).toBe(true)
+    expect((isCardVisible as (phase: string, minimized: boolean) => boolean)('complete', true)).toBe(false)
+    expect((isCardVisible as (phase: string, minimized: boolean) => boolean)('failed', true)).toBe(false)
+  })
 })

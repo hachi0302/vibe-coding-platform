@@ -165,7 +165,7 @@ import { buildProjectInitializationPrompt } from './workflows/prompt'
 import {
   initializationAgentGuardMessage,
   initializationProgressFor,
-  isInitializationTaskVisible,
+  isInitializationTaskCardVisible,
   isProjectInitializationAgent,
   projectInitializationSteps,
   type ProjectInitializationPhase,
@@ -219,7 +219,7 @@ function setInitializationProgress(project: ProjectInfo, phase: ProjectInitializ
     window.clearTimeout(initializationCompleteTimer)
     initializationElapsedSeconds.value = 0
     initializationElapsedTimer = window.setInterval(() => { initializationElapsedSeconds.value += 1 }, 1000)
-    initializationProgressMinimized.value = true
+    initializationProgressMinimized.value = false
   }
   initializationProgress.value = {
     ...progress,
@@ -256,7 +256,10 @@ function advanceInitializationProgress(projectPath: string, phase: ProjectInitia
 const backgroundTasks = computed<BackgroundTaskSummary[]>(() => {
   const tasks: BackgroundTaskSummary[] = []
   const initialization = initializationProgress.value
-  if (initialization && isInitializationTaskVisible(initialization.phase)) {
+  if (
+    initialization
+    && isInitializationTaskCardVisible(initialization.phase, initializationProgressMinimized.value)
+  ) {
     tasks.push({
       kind: 'initialization',
       title: `正在初始化 ${initialization.projectName}`,

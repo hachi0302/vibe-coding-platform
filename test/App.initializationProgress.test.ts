@@ -84,16 +84,22 @@ const SidebarStub = defineComponent({
   props: {
     backgroundTasks: { type: Array, default: () => [] },
   },
-  emits: ['select-project', 'restore-background-task'],
+  emits: ['select-project', 'restore-background-task', 'open-project-factory'],
   setup(props, { emit }) {
     return () => h('aside', { 'data-sidebar-stub': '' }, [
       h('button', {
         'data-select-project': '',
         onClick: () => emit('select-project', project.dirName),
       }, '选择项目'),
+      h('button', {
+        'data-open-project-factory': '',
+        onClick: () => emit('open-project-factory'),
+      }, '新项目工厂'),
       ...(props.backgroundTasks as BackgroundTaskSummary[]).map((task) => h('button', {
         'data-background-task': task.kind,
         'data-elapsed': String(task.elapsedSeconds),
+        'data-detail': task.detail,
+        'data-percent': String(task.percent),
         onClick: () => emit('restore-background-task', task.kind),
       }, task.title)),
     ])
@@ -108,6 +114,25 @@ const PaneGridStub = defineComponent({
       'data-start-initialization': '',
       onClick: () => actions?.initializeProject(),
     }, '初始化项目')
+  },
+})
+
+const ProjectFactoryViewStub = defineComponent({
+  name: 'ProjectFactoryView',
+  emits: ['task-progress', 'task-finished', 'minimize-analysis'],
+  setup(_, { emit }) {
+    const task: BackgroundTaskSummary = {
+      kind: 'analysis',
+      title: '技术方案分析中',
+      detail: '正在分析方案',
+      percent: 32,
+      elapsedSeconds: 4,
+    }
+    return () => h('section', { 'data-project-factory': '' }, [
+      h('button', { 'data-publish-analysis': '', onClick: () => emit('task-progress', task) }, '发布任务'),
+      h('button', { 'data-minimize-analysis': '', onClick: () => emit('minimize-analysis') }, '缩小'),
+      h('button', { 'data-finish-analysis': '', onClick: () => emit('task-finished') }, '完成'),
+    ])
   },
 })
 
@@ -139,6 +164,7 @@ async function mountAndStartInitialization(): Promise<VueWrapper> {
       stubs: {
         Sidebar: SidebarStub,
         PaneGrid: PaneGridStub,
+        ProjectFactoryView: ProjectFactoryViewStub,
       },
     },
   })
@@ -165,14 +191,35 @@ describe('App existing-project initialization progress', () => {
     vi.useRealTimers()
   })
 
-  it('increments elapsed time, restores the minimized card, and clears completed progress', async () => {
+  it('shows live progress first, then minimizes to an elapsed task card and clears on completion', async () => {
     const initialization = deferred<{ generated: string[] }>()
     initializeExistingProjectMock.mockReturnValue(initialization.promise)
     const wrapper = await mountAndStartInitialization()
 
-    expect(wrapper.get('[data-background-task="initialization"]').attributes('data-elapsed')).toBe('0')
+    expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(true)
+    expect(wrapper.find('[data-background-task="initialization"]').exists()).toBe(false)
+
+    const progressHandler = listenInitializationProgressMock.mock.calls[0]?.[0]
+    expect(progressHandler).toBeTypeOf('function')
+    progressHandler({
+      projectPath: project.displayPath,
+      phase: 'documents',
+      percent: 44,
+      detail: '正在根据真实代码生成中文项目文档',
+    })
+    await nextTick()
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
+      phase: 'documents',
+      percent: 44,
+      detail: '正在根据真实代码生成中文项目文档',
+    })
+
     await vi.advanceTimersByTimeAsync(3_000)
     await nextTick()
+
+    wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).vm.$emit('minimize')
+    await nextTick()
+    expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(false)
     expect(wrapper.get('[data-background-task="initialization"]').attributes('data-elapsed')).toBe('3')
 
     await wrapper.get('[data-background-task="initialization"]').trigger('click')
@@ -190,13 +237,37 @@ describe('App existing-project initialization progress', () => {
     wrapper.unmount()
   })
 
+  it('removes the minimized new-project task as soon as analysis finishes', async () => {
+    const wrapper = shallowMount(App, {
+      global: {
+        directives: { tooltip: () => {} },
+        stubs: {
+          Sidebar: SidebarStub,
+          PaneGrid: PaneGridStub,
+          ProjectFactoryView: ProjectFactoryViewStub,
+        },
+      },
+    })
+    await settle()
+
+    await wrapper.get('[data-open-project-factory]').trigger('click')
+    await nextTick()
+    await wrapper.get('[data-publish-analysis]').trigger('click')
+    await wrapper.get('[data-minimize-analysis]').trigger('click')
+    await nextTick()
+    expect(wrapper.find('[data-background-task="analysis"]').exists()).toBe(true)
+
+    wrapper.getComponent({ name: 'ProjectFactoryView' }).vm.$emit('task-finished')
+    await nextTick()
+    expect(wrapper.find('[data-background-task="analysis"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('automatically clears failed initialization progress', async () => {
     const initialization = deferred<{ generated: string[] }>()
     initializeExistingProjectMock.mockReturnValue(initialization.promise)
     const wrapper = await mountAndStartInitialization()
 
-    await wrapper.get('[data-background-task="initialization"]').trigger('click')
-    await nextTick()
     expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(true)
 
     initialization.reject(new Error('初始化失败'))

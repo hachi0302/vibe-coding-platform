@@ -15,6 +15,40 @@ const PROGRESS_TEMPLATE: &str =
 const FRONTEND_INTEGRATION_TEMPLATE: &str =
     include_str!("../../../docs/规范约束/文档模板/公共/前端接入说明模板.md");
 const INIT_REFERENCE_DIR: &str = ".vibe-coding-platform/init-reference-v3";
+const FRONTEND_FORMAL_OUTPUTS: &[&str] = &[
+    "docs/frontend/MOC.md",
+    "docs/frontend/latest/index.md",
+    "docs/frontend/latest/业务/业务功能总览.md",
+    "docs/frontend/latest/系统架构/前端架构.md",
+    "docs/frontend/latest/公共能力/组件与公共能力.md",
+    "docs/frontend/latest/规范约束/详设文档模板.md",
+    "docs/frontend/latest/规范约束/开发进度文档模板.md",
+    ".claude/rules/前端/前端工程规则.md",
+    ".claude/rules/前端/前端验证规则.md",
+    ".claude/skills/frontend-self-test/SKILL.md",
+];
+const BACKEND_FORMAL_OUTPUTS: &[&str] = &[
+    "docs/backend/MOC.md",
+    "docs/backend/latest/index.md",
+    "docs/backend/latest/业务/业务功能总览.md",
+    "docs/backend/latest/系统架构/系统架构详解.md",
+    "docs/backend/latest/接口文档/API接口总览.md",
+    "docs/backend/latest/接口文档/回调接口总览.md",
+    "docs/backend/latest/接口文档/枚举值总览.md",
+    "docs/backend/latest/接口文档/物理模型总览.md",
+    "docs/backend/latest/第三方集成/第三方集成总览.md",
+    "docs/backend/latest/规范约束/详设文档模板.md",
+    "docs/backend/latest/规范约束/开发进度文档模板.md",
+    "docs/backend/latest/规范约束/前端接入说明模板.md",
+    ".claude/rules/后端/API与业务实现规则.md",
+    ".claude/rules/后端/持久化与迁移规则.md",
+    ".claude/rules/后端/异步与第三方规则.md",
+    ".claude/skills/backend-self-test/SKILL.md",
+    ".claude/skills/backend-log-diagnose/SKILL.md",
+    ".claude/skills/database-read-diagnose/SKILL.md",
+    ".claude/skills/ddl-review/SKILL.md",
+    ".claude/skills/external-integration/SKILL.md",
+];
 
 /// 初始化 Agent 的只读参考包。正式长期文档不能直接复制空模板，因此参考包只在初始化期间
 /// 存在；最终真实产物校验通过后立即删除。
@@ -361,6 +395,8 @@ fn is_text_evidence_file(path: &Path) -> bool {
                     | "tsx"
                     | "js"
                     | "jsx"
+                    | "vue"
+                    | "svelte"
                     | "cs"
                     | "sql"
                     | "xml"
@@ -415,6 +451,347 @@ fn any_project_source_file(root: &Path, mut predicate: impl FnMut(&Path, &str) -
         false
     }
     visit(root, 0, &mut predicate)
+}
+
+#[derive(Clone, Debug)]
+struct SourceFact {
+    relative: String,
+    extension: String,
+    normalized: String,
+    symbols: Vec<String>,
+}
+
+fn source_symbols(path: &Path, content: &str) -> Vec<String> {
+    let mut symbols = Vec::new();
+    let tokens = content
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    for pair in tokens.windows(2) {
+        if matches!(
+            pair[0],
+            "class"
+                | "interface"
+                | "enum"
+                | "record"
+                | "struct"
+                | "trait"
+                | "type"
+                | "fn"
+                | "def"
+                | "function"
+                | "const"
+        ) && pair[1].len() >= 3
+        {
+            symbols.push(pair[1].to_string());
+        }
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "vue" | "svelte" | "tsx" | "jsx") {
+        if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+            if stem.len() >= 3 && stem != "index" {
+                symbols.push(stem.to_string());
+            }
+        }
+    }
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
+fn project_source_facts(root: &Path) -> Vec<SourceFact> {
+    fn visit(root: &Path, path: &Path, depth: usize, facts: &mut Vec<SourceFact>) {
+        if depth > 8 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                if should_scan_evidence_dir(&entry.file_name().to_string_lossy()) {
+                    visit(root, &child, depth + 1, facts);
+                }
+                continue;
+            }
+            if !is_text_evidence_file(&child) {
+                continue;
+            }
+            let Ok(metadata) = child.metadata() else {
+                continue;
+            };
+            if metadata.len() > 2 * 1024 * 1024 {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&child) else {
+                continue;
+            };
+            let Ok(relative) = child.strip_prefix(root) else {
+                continue;
+            };
+            let extension = child
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            facts.push(SourceFact {
+                relative: relative.to_string_lossy().replace('\\', "/"),
+                extension,
+                normalized: content.to_ascii_lowercase(),
+                symbols: source_symbols(&child, &content),
+            });
+        }
+    }
+    let mut facts = Vec::new();
+    visit(root, root, 0, &mut facts);
+    facts
+}
+
+fn layer_rule_contents(root: &Path, layer: &str) -> Result<String, String> {
+    let directory = root.join(".claude/rules").join(layer);
+    let entries = fs::read_dir(&directory)
+        .map_err(|_| format!("缺少项目专属{layer}规则目录：{}", directory.display()))?;
+    let mut contents = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        contents.push(
+            fs::read_to_string(&path)
+                .map_err(|_| format!("无法读取项目专属{layer}规则：{}", path.display()))?,
+        );
+    }
+    Ok(contents.join("\n"))
+}
+
+fn fact_is_referenced(rules: &str, fact: &SourceFact) -> bool {
+    rules.contains(&fact.relative)
+        && fact
+            .symbols
+            .iter()
+            .any(|symbol| rules.contains(symbol.as_str()))
+}
+
+fn validate_layer_rule_evidence(
+    root: &Path,
+    layer: &str,
+    facts: &[SourceFact],
+) -> Result<String, String> {
+    let rules = layer_rule_contents(root, layer)?;
+    let generic = ["以源码为准", "未识别", "通用约束"]
+        .iter()
+        .filter(|phrase| rules.contains(**phrase))
+        .copied()
+        .collect::<Vec<_>>();
+    if !generic.is_empty() {
+        return Err(format!(
+            "{layer}项目规则仍用空壳措辞冒充实填（{}）；必须改为当前项目真实证据",
+            generic.join("、")
+        ));
+    }
+    if !facts.iter().any(|fact| fact_is_referenced(&rules, fact)) {
+        return Err(format!(
+            "{layer}项目规则缺少成对的真实源码路径与真实符号/类名证据"
+        ));
+    }
+    Ok(rules)
+}
+
+fn require_category_evidence(
+    layer: &str,
+    label: &str,
+    rules: &str,
+    facts: &[SourceFact],
+    predicate: impl Fn(&SourceFact) -> bool,
+    errors: &mut Vec<String>,
+) {
+    let category = facts
+        .iter()
+        .filter(|fact| predicate(fact))
+        .collect::<Vec<_>>();
+    if !category.is_empty() && !category.iter().any(|fact| fact_is_referenced(rules, fact)) {
+        errors.push(format!(
+            "{layer}项目规则缺少已检测到的{label}真实路径与符号证据"
+        ));
+    }
+}
+
+fn validate_project_rule_evidence(root: &Path, layers: ProjectLayers) -> Result<(), String> {
+    let facts = project_source_facts(root);
+    let backend_facts = facts
+        .iter()
+        .filter(|fact| !matches!(fact.extension.as_str(), "vue" | "svelte" | "tsx" | "jsx"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let frontend_facts = facts
+        .iter()
+        .filter(|fact| {
+            matches!(
+                fact.extension.as_str(),
+                "vue" | "svelte" | "tsx" | "jsx" | "ts" | "js"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    if layers.backend {
+        match validate_layer_rule_evidence(root, "后端", &backend_facts) {
+            Ok(rules) => {
+                require_category_evidence(
+                    "后端",
+                    "项目模块",
+                    &rules,
+                    &backend_facts,
+                    |fact| {
+                        let components = fact.relative.split('/').collect::<Vec<_>>();
+                        components.len() > 3
+                            && components[0] != "src"
+                            && components.iter().any(|component| *component == "src")
+                    },
+                    &mut errors,
+                );
+                require_category_evidence(
+                    "后端",
+                    "框架扩展点",
+                    &rules,
+                    &facts,
+                    |fact| {
+                        contains_any(
+                            &fact.normalized,
+                            &[
+                                "@service",
+                                "@component",
+                                "@controller",
+                                "@repository",
+                                "@configuration",
+                                " implements ",
+                                " extends ",
+                                "#[tauri::command]",
+                                "app.get(",
+                                "app.post(",
+                                "router.get(",
+                                "router.post(",
+                            ],
+                        )
+                    },
+                    &mut errors,
+                );
+                require_category_evidence(
+                    "后端",
+                    "异常处理",
+                    &rules,
+                    &facts,
+                    |fact| {
+                        fact.relative.to_ascii_lowercase().contains("exception")
+                            || fact.relative.to_ascii_lowercase().contains("error")
+                            || contains_any(
+                                &fact.normalized,
+                                &["extends runtimeexception", "extends exception", "errorcode"],
+                            )
+                    },
+                    &mut errors,
+                );
+                require_category_evidence(
+                    "后端",
+                    "公共复用",
+                    &rules,
+                    &facts,
+                    |fact| {
+                        let path = fact.relative.to_ascii_lowercase();
+                        [
+                            "/common/",
+                            "/util/",
+                            "/utils/",
+                            "/helper/",
+                            "/shared/",
+                            "/support/",
+                        ]
+                        .iter()
+                        .any(|segment| path.contains(segment))
+                    },
+                    &mut errors,
+                );
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    if layers.frontend {
+        match validate_layer_rule_evidence(root, "前端", &frontend_facts) {
+            Ok(rules) => {
+                require_category_evidence(
+                    "前端",
+                    "组件",
+                    &rules,
+                    &facts,
+                    |fact| matches!(fact.extension.as_str(), "vue" | "svelte" | "tsx" | "jsx"),
+                    &mut errors,
+                );
+                require_category_evidence(
+                    "前端",
+                    "路由",
+                    &rules,
+                    &facts,
+                    |fact| {
+                        let path = fact.relative.to_ascii_lowercase();
+                        path.contains("/router/")
+                            || path.contains("/routes/")
+                            || contains_any(
+                                &fact.normalized,
+                                &["createRouter", "createrouter", "react-router", "vue-router"],
+                            )
+                    },
+                    &mut errors,
+                );
+                require_category_evidence(
+                    "前端",
+                    "状态管理",
+                    &rules,
+                    &facts,
+                    |fact| {
+                        let path = fact.relative.to_ascii_lowercase();
+                        path.contains("/store/")
+                            || path.contains("/stores/")
+                            || contains_any(
+                                &fact.normalized,
+                                &["definestore", "createstore", "redux", "zustand", "vuex"],
+                            )
+                    },
+                    &mut errors,
+                );
+                require_category_evidence(
+                    "前端",
+                    "API client",
+                    &rules,
+                    &facts,
+                    |fact| {
+                        let path = fact.relative.to_ascii_lowercase();
+                        path.contains("/api/")
+                            || path.contains("/client/")
+                            || contains_any(
+                                &fact.normalized,
+                                &["axios.create", "fetch(", "createapi("],
+                            )
+                    },
+                    &mut errors,
+                );
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "项目规则缺少真实代码证据：\n- {}",
+            errors.join("\n- ")
+        ))
+    }
 }
 
 fn project_source_contains(root: &Path, candidates: &[&str]) -> bool {
@@ -603,12 +980,35 @@ fn write_if_missing(path: &Path, content: &str) -> Result<(), String> {
     fs::write(path, content).map_err(|error| error.to_string())
 }
 
-fn write_initialization_reference_bundle(root: &Path) -> Result<(), String> {
+fn reference_file_matches_layers(relative: &str, layers: ProjectLayers) -> bool {
+    if relative == "文档模板/公共/前端接入说明模板.md" {
+        return layers.frontend && layers.backend;
+    }
+    if relative.starts_with("文档模板/前端/")
+        || relative.starts_with("规则模板/前端/")
+        || relative.starts_with("技能模板/前端/")
+    {
+        return layers.frontend;
+    }
+    if relative.starts_with("文档模板/后端/")
+        || relative.starts_with("规则模板/后端/")
+        || relative.starts_with("技能模板/后端/")
+        || relative.starts_with("技能模板/可选/")
+    {
+        return layers.backend;
+    }
+    true
+}
+
+fn write_initialization_reference_bundle(root: &Path, layers: ProjectLayers) -> Result<(), String> {
     let base = root.join(INIT_REFERENCE_DIR);
     if base.exists() {
         fs::remove_dir_all(&base).map_err(|error| error.to_string())?;
     }
-    for (relative, content) in INIT_REFERENCE_FILES {
+    for (relative, content) in INIT_REFERENCE_FILES
+        .iter()
+        .filter(|(relative, _)| reference_file_matches_layers(relative, layers))
+    {
         let path = base.join(relative);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -617,7 +1017,10 @@ fn write_initialization_reference_bundle(root: &Path) -> Result<(), String> {
     }
     fs::write(
         base.join("README.md"),
-        "# 初始化只读参考包\n\n本目录由平台临时生成。后台 Agent 必须先逐份读取这里命中当前代码层的文档、规则和 skill 模板，再依据目标项目真实代码填充正式产物。禁止把模板占位符或空表复制进正式长期文档。最终校验成功后平台会自动删除本目录。\n",
+        format!(
+            "# 初始化只读参考包\n\n本目录由平台临时生成。识别结果：前端层={}，后端层={}。后台 Agent 只能读取这里与当前代码层匹配的文档、规则和 skill 模板，再依据目标项目真实代码填充正式产物。禁止把模板占位符或空表复制进正式长期文档。最终校验成功后平台会自动删除本目录。\n",
+            layers.frontend, layers.backend
+        ),
     )
     .map_err(|error| error.to_string())
 }
@@ -666,7 +1069,7 @@ pub fn prepare_existing_project_initialization(
     write_skill_designer(root)?;
     // 业务总览、架构、API、物理模型、规则与 skills 都需要严格参照平台模板，但不能把空模板
     // 当成正式项目产物。故这里只提供初始化期间的隐藏只读参考包，成功后自动清理。
-    write_initialization_reference_bundle(root)?;
+    write_initialization_reference_bundle(root, layers)?;
     // 详设、进度、前端接入本来就是目标项目长期保留的规范模板；只在缺失时补齐，绝不
     // 覆盖项目已有版本。其他长期文档必须由 Agent 读取完整源码后填写，不能预铺空壳。
     install_project_document_templates(root, layers)?;
@@ -972,6 +1375,26 @@ fn ensure_agent_links(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_layer_formal_outputs(root: &Path, layers: ProjectLayers) -> Result<(), String> {
+    let (label, unexpected) = match (layers.frontend, layers.backend) {
+        (false, true) => ("纯后端", FRONTEND_FORMAL_OUTPUTS),
+        (true, false) => ("纯前端", BACKEND_FORMAL_OUTPUTS),
+        _ => return Ok(()),
+    };
+    let existing = unexpected
+        .iter()
+        .filter(|relative| root.join(relative).exists())
+        .copied()
+        .collect::<Vec<_>>();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{label}项目存在另一代码层的平台正式产物，请确认项目层识别或移走这些文件后重试；平台不会自动删除用户原文档：{}",
+        existing.join("、")
+    ))
+}
+
 fn validate_agent_entry_and_link(root: &Path) -> Result<String, String> {
     let entry = root.join("CLAUDE.md");
     let content =
@@ -1052,6 +1475,7 @@ pub fn finalize_existing_project_initialization(
     let callback = has_callback_evidence(root);
     let boundary_enum = has_boundary_enum_evidence(root);
     let external_integration = has_external_integration_evidence(root);
+    validate_layer_formal_outputs(root, preparation.layers)?;
     let mut required = Vec::new();
     if preparation.layers.frontend {
         required.extend([
@@ -1127,6 +1551,7 @@ pub fn finalize_existing_project_initialization(
         database_connection,
         external_integration,
     )?;
+    validate_project_rule_evidence(root, preparation.layers)?;
     ensure_agent_links(root)?;
     let entry_content = validate_agent_entry_and_link(root)?;
     remove_initialization_reference_bundle(root)?;
