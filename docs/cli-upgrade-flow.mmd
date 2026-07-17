@@ -1,0 +1,37 @@
+flowchart TD
+    Start["upgrade_single(cli)"] --> FindSpec["查找 CliSpec"]
+    FindSpec --> FindBin["find_all_paths(binary)<br/>获取第一个路径"]
+    FindBin --> Resolve["resolve_symlink → detect_package_manager"]
+
+    Resolve --> PM{安装方式?}
+
+    PM -->|homebrew-cask| Brew["brew upgrade --cask claude-code"]
+    PM -->|homebrew| BrewPkg["brew upgrade &lt;pkg&gt;"]
+    PM -->|nvm / fnm / volta / npm| Npm["sibling npm install -g &lt;pkg&gt;@latest<br/>+ NPM_CONFIG_PREFIX"]
+    PM -->|system / unknown| Builtin{有 builtin_update?}
+
+    Builtin -->|Yes| BuiltinCmd["claude update / codex update"]
+    Builtin -->|No| FallbackNpm["npm install -g &lt;pkg&gt;@latest"]
+
+    Brew --> Run
+    BrewPkg --> Run
+    Npm --> Run
+    BuiltinCmd --> Run
+    FallbackNpm --> Run
+
+    Run["run_in_login_shell(cmd)"] --> RunResult{执行结果?}
+
+    RunResult -->|Err| Fail["❌ success: false<br/>error: stderr"]
+    RunResult -->|Ok output| ParseOutput["extract_fallback_cmd(output)"]
+
+    ParseOutput --> HasFallback{输出中有<br/>brew/npm 命令?}
+    HasFallback -->|Yes| RunFallback["run_in_login_shell(fallback)"]
+    HasFallback -->|No| Compare
+
+    RunFallback --> FBResult{fallback 结果?}
+    FBResult -->|Err| Fail
+    FBResult -->|Ok| Compare
+
+    Compare["对比版本:<br/>prev vs new"] --> Changed{版本变了?}
+    Changed -->|Yes| OK["✅ success: true<br/>newVersion"]
+    Changed -->|No| Unchanged["❌ success: false<br/>version_unchanged"]

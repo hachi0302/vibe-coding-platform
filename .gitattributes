@@ -1,0 +1,22 @@
+# Normalize all text files to LF in the repo AND the working tree, on every OS.
+# This kills the Windows "LF will be replaced by CRLF" warning without relying
+# on each machine's core.autocrlf. macOS/Linux already use LF, so they're
+# unaffected; the repo has always stored LF, so this only pins existing behavior.
+* text=auto eol=lf
+
+# Binary assets — never touch line endings.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.icns  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.pdf   binary
+*.wasm  binary
+*.dmg   binary
+*.node  binary

@@ -1,0 +1,35 @@
+{
+  "skill_name": "skill-designer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我创建一个周报生成的skill，要求每周一自动生成并发送给团队",
+      "expected_output": "应该使用Generator模式，因为是生成固定格式的周报文档。输出应包含SKILL.md结构和关键指令",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "我想创建一个skill，让AI在写代码前先询问用户的技术栈和部署环境偏好",
+      "expected_output": "应该使用Inversion模式，因为需要先收集用户信息。输出应包含Phase结构的采访式提问流程",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "创建一个Flutter代码规范的skill，确保团队代码风格一致",
+      "expected_output": "应该使用Tool Wrapper模式，因为是传递Flutter/Dart的编码规范。输出应包含规范文件引用和审查流程",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "帮我创建一个API文档自动生成流水线，从Python代码提取文档",
+      "expected_output": "应该使用Pipeline模式，因为有多个步骤和检查点。输出应包含Step结构和Gate条件",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "我想封装一个代码审查skill，按安全、性能、可读性分组输出问题",
+      "expected_output": "应该使用Reviewer模式，因为是评审代码并按严重性分组。输出应包含检查清单和评分结构",
+      "files": []
+    }
+  ]
+}

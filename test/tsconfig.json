@@ -1,0 +1,15 @@
+{
+  // Editor-only tsconfig for the test suite. `npm run build` (vue-tsc) reads
+  // the root tsconfig.json, which scopes type-checking to src/** — so test
+  // files never block a production build. This file just gives the IDE the
+  // right lib/types and the `*.vue` module shim while editing tests.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "types": ["vitest/globals", "node"]
+  },
+  "include": ["./**/*.ts", "../src/vite-env.d.ts"]
+}

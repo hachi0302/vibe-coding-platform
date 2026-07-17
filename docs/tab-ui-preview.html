@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tab UI Preview</title>
+  <style>
+    :root {
+      --bg: #f5f6f7;
+      --surface: #fff;
+      --surface2: #f7f7f8;
+      --hover: #f1f2f3;
+      --border: #e6e7ea;
+      --text: #171717;
+      --mute: #737373;
+      --codex: #047857;
+      --claude: #c2410c;
+      --gemini: #1a73e8;
+      --running: #2563eb;
+      --done: #16a34a;
+      --error: #dc2626;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Microsoft YaHei", Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      padding: 28px;
+    }
+    .wrap {
+      max-width: 1080px;
+      margin: 0 auto;
+      display: grid;
+      gap: 22px;
+    }
+    .hint {
+      justify-self: end;
+      font-size: 12px;
+      color: #666;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 999px;
+      padding: 5px 10px;
+    }
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+    }
+    .panel-title {
+      height: 42px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      color: #555;
+      font-weight: 600;
+    }
+    .strip {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--border);
+      background: #fff;
+      overflow: hidden;
+    }
+    .tab {
+      height: 30px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      max-width: 220px;
+      min-width: 0;
+      padding: 0 9px;
+      border-radius: 7px;
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
+    .icon {
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      flex: 0 0 auto;
+    }
+    .codex { background: var(--codex); }
+    .claude { background: var(--claude); }
+    .gemini { background: var(--gemini); }
+    .title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .close {
+      margin-left: 2px;
+      width: 17px;
+      height: 17px;
+      border-radius: 5px;
+      display: grid;
+      place-items: center;
+      color: inherit;
+      opacity: 0.55;
+      flex: 0 0 auto;
+    }
+    .view {
+      color: var(--mute);
+      background: transparent;
+    }
+    .old .tab.active {
+      background: #111;
+      color: #fff;
+      box-shadow: 0 0 0 1px #111;
+    }
+    .old .tab:not(.active) {
+      background: #f2f3f4;
+      color: #2b2b2b;
+    }
+    .old .tab.active .close {
+      background: rgba(255, 255, 255, 0.12);
+      opacity: 0.72;
+    }
+    .new .tab {
+      position: relative;
+      border: 1px solid transparent;
+      color: #444;
+      background: transparent;
+    }
+    .new .tab:hover {
+      background: var(--hover);
+    }
+    .new .tab.active {
+      background: var(--surface2);
+      border-color: var(--border);
+      color: var(--text);
+      box-shadow: 0 1px 1px rgba(0, 0, 0, 0.03);
+    }
+    .new .tab.active::after {
+      content: "";
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: -10px;
+      height: 2px;
+      border-radius: 2px;
+      background: var(--codex);
+    }
+    .new .tab.running {
+      overflow: hidden;
+      border-color: color-mix(in srgb, var(--running) 28%, var(--border));
+      background:
+        radial-gradient(circle at 18% 50%, rgba(37, 99, 235, 0.18), transparent 26%),
+        linear-gradient(110deg, transparent 0%, rgba(37, 99, 235, 0.12) 48%, transparent 82%),
+        var(--surface2);
+      background-size: auto, 220% 100%, auto;
+      box-shadow:
+        0 0 0 1px rgba(37, 99, 235, 0.08),
+        0 0 18px rgba(37, 99, 235, 0.12);
+      animation: tab-running-bg 1.45s linear infinite;
+    }
+    .new .tab.running::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(115deg,
+          transparent 0%,
+          transparent 34%,
+          rgba(255, 255, 255, 0.55) 46%,
+          rgba(59, 130, 246, 0.28) 52%,
+          transparent 66%,
+          transparent 100%);
+      transform: translateX(-130%);
+      animation: tab-running-sheen 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      pointer-events: none;
+    }
+    .new .tab.running::after {
+      height: 3px;
+      background:
+        linear-gradient(90deg,
+          transparent 0%,
+          rgba(37, 99, 235, 0.2) 18%,
+          #60a5fa 44%,
+          #2563eb 52%,
+          #93c5fd 60%,
+          rgba(37, 99, 235, 0.2) 82%,
+          transparent 100%);
+      background-size: 220% 100%;
+      box-shadow: 0 -2px 12px rgba(37, 99, 235, 0.55);
+      animation: tab-running-line 0.95s linear infinite;
+    }
+    .new .tab.done {
+      border-color: color-mix(in srgb, var(--done) 34%, var(--border));
+      background: color-mix(in srgb, var(--done) 7%, var(--surface2));
+    }
+    .new .tab.done::after {
+      background: var(--done);
+    }
+    .new .tab.error {
+      border-color: color-mix(in srgb, var(--error) 38%, var(--border));
+      background: color-mix(in srgb, var(--error) 7%, var(--surface2));
+      color: var(--text);
+    }
+    .new .tab.error::after {
+      background: var(--error);
+    }
+    .new .tab.running-orbit {
+      border-color: color-mix(in srgb, var(--running) 34%, var(--border));
+      background: color-mix(in srgb, var(--running) 6%, var(--surface2));
+    }
+    .new .tab.running-orbit::after {
+      background: var(--running);
+      box-shadow: 0 -2px 12px rgba(37, 99, 235, 0.38);
+      animation: tab-running-line 1.2s linear infinite;
+    }
+    .new .tab.running-beam {
+      overflow: hidden;
+      border-color: color-mix(in srgb, #06b6d4 34%, var(--border));
+      background:
+        repeating-linear-gradient(100deg,
+          rgba(6, 182, 212, 0.05) 0 8px,
+          transparent 8px 18px),
+        var(--surface2);
+    }
+    .new .tab.running-beam::after {
+      height: 3px;
+      background:
+        linear-gradient(90deg,
+          transparent 0%,
+          #67e8f9 24%,
+          #06b6d4 42%,
+          transparent 62%,
+          #a5f3fc 76%,
+          transparent 100%);
+      background-size: 240% 100%;
+      box-shadow: 0 -2px 14px rgba(6, 182, 212, 0.48);
+      animation: tab-running-line 0.75s linear infinite;
+    }
+    .new .tab.running-dots {
+      border-color: color-mix(in srgb, #8b5cf6 28%, var(--border));
+      background: color-mix(in srgb, #8b5cf6 6%, var(--surface2));
+    }
+    .new .tab.running-dots::after {
+      background: #8b5cf6;
+      animation: status-glow 1.1s ease-in-out infinite;
+    }
+    .new .tab.running-border {
+      isolation: isolate;
+      overflow: hidden;
+      border-color: transparent;
+      background: var(--surface2);
+    }
+    .new .tab.running-border::before {
+      content: "";
+      position: absolute;
+      inset: -40%;
+      z-index: -2;
+      background:
+        conic-gradient(from 0deg,
+          transparent 0 42%,
+          #22d3ee 48%,
+          #2563eb 54%,
+          transparent 62% 100%);
+      animation: border-orbit 1.1s linear infinite;
+    }
+    .new .tab.running-border > .tab-fill {
+      position: absolute;
+      inset: 1px;
+      z-index: -1;
+      border-radius: 6px;
+      background: var(--surface2);
+    }
+    .new .tab.running-border::after {
+      background: linear-gradient(90deg, #22d3ee, #2563eb, #a78bfa);
+    }
+    .new .tab.claude-active::after {
+      background: var(--claude);
+    }
+    .agent-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: var(--codex);
+    }
+    .agent-dot.claude { background: var(--claude); }
+    .agent-dot.gemini { background: var(--gemini); }
+    .status-dot {
+      position: relative;
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: var(--mute);
+      box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent);
+    }
+    .status-dot.running {
+      background: var(--running);
+      box-shadow: 0 0 8px rgba(37, 99, 235, 0.7);
+      animation: status-pulse 1s ease-in-out infinite;
+    }
+    .status-dot.running::before {
+      content: "";
+      position: absolute;
+      inset: -5px;
+      border-radius: 999px;
+      border: 1px solid rgba(37, 99, 235, 0.24);
+      border-top-color: #93c5fd;
+      border-right-color: rgba(96, 165, 250, 0.9);
+      animation: status-orbit 0.9s linear infinite;
+    }
+    .status-dot.running::after {
+      content: "";
+      position: absolute;
+      inset: -2px;
+      border-radius: 999px;
+      background: radial-gradient(circle, rgba(147, 197, 253, 0.42), transparent 62%);
+      animation: status-glow 1.1s ease-in-out infinite;
+    }
+    .status-dot.done {
+      background: var(--done);
+    }
+    .status-dot.error {
+      background: var(--error);
+    }
+    .spinner-ring {
+      width: 13px;
+      height: 13px;
+      border-radius: 999px;
+      border: 2px solid rgba(37, 99, 235, 0.16);
+      border-top-color: var(--running);
+      border-right-color: #60a5fa;
+      flex: 0 0 auto;
+      animation: status-orbit 0.72s linear infinite;
+    }
+    .beam-chip {
+      width: 16px;
+      height: 10px;
+      flex: 0 0 auto;
+      border-radius: 99px;
+      background:
+        linear-gradient(90deg,
+          transparent,
+          #67e8f9,
+          #06b6d4,
+          transparent);
+      background-size: 220% 100%;
+      filter: drop-shadow(0 0 5px rgba(6, 182, 212, 0.42));
+      animation: tab-running-line 0.75s linear infinite;
+    }
+    .loading-dots {
+      width: 20px;
+      height: 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: space-between;
+      flex: 0 0 auto;
+    }
+    .loading-dots i {
+      width: 4px;
+      height: 4px;
+      border-radius: 999px;
+      background: #8b5cf6;
+      box-shadow: 0 0 8px rgba(139, 92, 246, 0.55);
+      animation: dot-wave 0.9s ease-in-out infinite;
+    }
+    .loading-dots i:nth-child(2) { animation-delay: 0.12s; }
+    .loading-dots i:nth-child(3) { animation-delay: 0.24s; }
+    .new .close { opacity: 0.25; }
+    .new .tab:hover .close,
+    .new .tab.active .close { opacity: 0.6; }
+    .content {
+      height: 150px;
+      background: linear-gradient(#fff, #fafafa);
+      padding: 18px;
+      color: #9a9a9a;
+      font-size: 13px;
+    }
+    .note {
+      font-size: 13px;
+      line-height: 1.7;
+      color: #555;
+      padding: 14px 16px 16px;
+      background: #fbfbfc;
+      border-top: 1px solid var(--border);
+    }
+    .note strong { color: #222; }
+    .dark {
+      --surface: #101010;
+      --surface2: #171717;
+      --hover: #1d1d1d;
+      --border: #262626;
+      --text: #ededed;
+      --mute: #8c8c8c;
+      background: #080808;
+      color: var(--text);
+      box-shadow: none;
+    }
+    .dark .panel-title,
+    .dark .strip {
+      background: #101010;
+      border-color: var(--border);
+    }
+    .dark .new .tab.active,
+    .dark.new .tab.active {
+      background: #191919;
+      border-color: #333;
+    }
+    .dark .content,
+    .dark.new .content {
+      background: linear-gradient(#101010, #0b0b0b);
+      color: #666;
+    }
+    @keyframes status-pulse {
+      0%, 100% {
+        transform: scale(0.82);
+      }
+      50% {
+        transform: scale(1.04);
+      }
+    }
+    @keyframes status-orbit {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes status-glow {
+      0%, 100% { opacity: 0.35; transform: scale(0.8); }
+      50% { opacity: 0.85; transform: scale(1.2); }
+    }
+    @keyframes tab-running-line {
+      from { background-position: 120% 0; }
+      to { background-position: -80% 0; }
+    }
+    @keyframes tab-running-bg {
+      from { background-position: 0 0, 140% 0, 0 0; }
+      to { background-position: 0 0, -80% 0, 0 0; }
+    }
+    @keyframes tab-running-sheen {
+      0% { transform: translateX(-140%); opacity: 0; }
+      18% { opacity: 1; }
+      62% { opacity: 1; }
+      100% { transform: translateX(145%); opacity: 0; }
+    }
+    @keyframes dot-wave {
+      0%, 100% { transform: translateY(2px) scale(0.78); opacity: 0.45; }
+      50% { transform: translateY(-2px) scale(1); opacity: 1; }
+    }
+    @keyframes border-orbit {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hint">预览文件，不影响真实项目代码</div>
+
+    <section class="panel old">
+      <div class="panel-title">当前风格：激活 tab 是大面积黑底</div>
+      <div class="strip">
+        <div class="tab view"><span class="icon" style="background:#888">L</span><span class="title">列表</span></div>
+        <div class="tab active"><span class="icon codex">C</span><span class="title">测试一下</span><span class="close">×</span></div>
+        <div class="tab"><span class="icon claude">A</span><span class="title">修复 Windows 项目路径短名展示</span><span class="close">×</span></div>
+        <div class="tab"><span class="icon gemini">G</span><span class="title">分析会话右键菜单交互</span><span class="close">×</span></div>
+      </div>
+      <div class="content">主内容区域</div>
+    </section>
+
+    <section class="panel new">
+      <div class="panel-title">建议风格：轻量 tab，用细线和浅背景表达激活态</div>
+      <div class="strip">
+        <div class="tab view"><span class="icon" style="background:#888">L</span><span class="title">列表</span></div>
+        <div class="tab active"><span class="agent-dot"></span><span class="title">测试一下</span><span class="close">×</span></div>
+        <div class="tab"><span class="agent-dot claude"></span><span class="title">修复 Windows 项目路径短名展示</span><span class="close">×</span></div>
+        <div class="tab"><span class="agent-dot gemini"></span><span class="title">分析会话右键菜单交互</span><span class="close">×</span></div>
+      </div>
+      <div class="content">主内容区域</div>
+      <div class="note">
+        <strong>差异：</strong>激活态不再是一整块黑色；用浅灰背景、1px 边框、底部 2px agent 色线标识当前 tab。关闭按钮默认弱化，hover/active 时才更明显。
+      </div>
+    </section>
+
+    <section class="panel dark new">
+      <div class="panel-title">暗色模式建议效果</div>
+      <div class="strip">
+        <div class="tab view"><span class="icon" style="background:#444">L</span><span class="title">列表</span></div>
+        <div class="tab active claude-active"><span class="agent-dot claude"></span><span class="title">重命名会话与标题同步</span><span class="close">×</span></div>
+        <div class="tab"><span class="agent-dot"></span><span class="title">右键菜单追加能力</span><span class="close">×</span></div>
+        <div class="tab"><span class="agent-dot gemini"></span><span class="title">侧边栏路径展示优化</span><span class="close">×</span></div>
+      </div>
+      <div class="content">主内容区域</div>
+    </section>
+
+    <section class="panel new">
+      <div class="panel-title">状态化 tab 设计：运行中 / 已完成 / 错误</div>
+      <div class="strip">
+        <div class="tab view"><span class="icon" style="background:#888">L</span><span class="title">列表</span></div>
+        <div class="tab active running"><span class="status-dot running"></span><span class="title">正在分析右键菜单</span><span class="close">×</span></div>
+        <div class="tab done"><span class="status-dot done"></span><span class="title">标题同步已完成</span><span class="close">×</span></div>
+        <div class="tab error"><span class="status-dot error"></span><span class="title">终端启动失败</span><span class="close">×</span></div>
+        <div class="tab"><span class="agent-dot gemini"></span><span class="title">普通未激活会话</span><span class="close">×</span></div>
+      </div>
+      <div class="content">主内容区域</div>
+      <div class="note">
+        <strong>状态规则：</strong>运行中用蓝色呼吸点和流动底线，表达“仍在工作”；完成用绿色点和绿色底线，表达“任务结束且正常”；错误用红色点、红色底线和轻微红色背景，表达“需要处理”。颜色只用于状态，不铺满整个 tab。
+      </div>
+    </section>
+
+    <section class="panel dark new">
+      <div class="panel-title">暗色模式下的状态化 tab</div>
+      <div class="strip">
+        <div class="tab view"><span class="icon" style="background:#444">L</span><span class="title">列表</span></div>
+        <div class="tab active running"><span class="status-dot running"></span><span class="title">正在生成会话标题</span><span class="close">×</span></div>
+        <div class="tab done"><span class="status-dot done"></span><span class="title">会话已完成</span><span class="close">×</span></div>
+        <div class="tab error"><span class="status-dot error"></span><span class="title">命令异常退出</span><span class="close">×</span></div>
+      </div>
+      <div class="content">主内容区域</div>
+    </section>
+
+    <section class="panel new">
+      <div class="panel-title">参考开源加载动效后的其他运行中方案</div>
+      <div class="strip">
+        <div class="tab view"><span class="icon" style="background:#888">L</span><span class="title">列表</span></div>
+        <div class="tab active running-orbit"><span class="spinner-ring"></span><span class="title">Orbit 环形旋转</span><span class="close">×</span></div>
+        <div class="tab running-beam"><span class="beam-chip"></span><span class="title">Beam 双段扫描</span><span class="close">×</span></div>
+        <div class="tab running-dots"><span class="loading-dots"><i></i><i></i><i></i></span><span class="title">Pulse 三点波动</span><span class="close">×</span></div>
+        <div class="tab running-border"><span class="tab-fill"></span><span class="status-dot running"></span><span class="title">Neon 边框环绕</span><span class="close">×</span></div>
+      </div>
+      <div class="content">主内容区域</div>
+      <div class="note">
+        <strong>参考来源：</strong>Orbit 参考 GitHub Primer / PatternFly 的 spinner；Beam 参考 Wikimedia Codex 与 MUI 的 indeterminate progress bar；Pulse 参考常见开源 spinner 的 dotted/pulse 模式；Neon 是把环形 spinner 转成 tab 边框扫描。
+      </div>
+    </section>
+
+    <section class="panel dark new">
+      <div class="panel-title">暗色模式下的其他运行中方案</div>
+      <div class="strip">
+        <div class="tab view"><span class="icon" style="background:#444">L</span><span class="title">列表</span></div>
+        <div class="tab active running-orbit"><span class="spinner-ring"></span><span class="title">Orbit 环形旋转</span><span class="close">×</span></div>
+        <div class="tab running-beam"><span class="beam-chip"></span><span class="title">Beam 双段扫描</span><span class="close">×</span></div>
+        <div class="tab running-dots"><span class="loading-dots"><i></i><i></i><i></i></span><span class="title">Pulse 三点波动</span><span class="close">×</span></div>
+        <div class="tab running-border"><span class="tab-fill"></span><span class="status-dot running"></span><span class="title">Neon 边框环绕</span><span class="close">×</span></div>
+      </div>
+      <div class="content">主内容区域</div>
+    </section>
+  </div>
+</body>
+</html>

@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A new push to the same branch/PR cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: frontend (typecheck + vitest)
+    runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.event.head_commit.message, 'Release:') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type-check
+        run: npx vue-tsc --noEmit
+
+      - name: Unit tests
+        run: npm run test:run
+
+  rust:
+    name: rust (clippy + cargo test)
+    # macOS runners ship the WebKit framework Tauri's crate links against, so
+    # `cargo` builds with no extra system packages — unlike Linux, which would
+    # need the webkit2gtk apt stack. release.yml already uses macOS too.
+    runs-on: macos-latest
+    if: ${{ !startsWith(github.event.head_commit.message, 'Release:') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml

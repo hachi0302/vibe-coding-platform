@@ -1,0 +1,82 @@
+[package]
+name = "vibe-coding-platform"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "claude_session_viewer_lib"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2.3.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 仅开发期用：MCP Bridge 让 AI 经 WebSocket 看/控窗口。
+# optional = true + feature "dev-mcp" 保证 release 不链接，
+# 同时 rust-analyzer 能正常解析（dev-dependencies 做不到）。
+tauri-plugin-mcp-bridge = { version = "0.2", optional = true }
+dirs = "5"
+# bundled = 编译期把 SQLite 源码静态链进来，不依赖系统 libsqlite3，
+# macOS 系统库版本太旧，Windows 也没有，bundled 一劳永逸
+rusqlite = { version = "0.32", features = ["bundled"] }
+# 全局搜索时跨 session 并行扫描；rayon 是纯 CPU work-stealing 线程池，零运行时配置。
+rayon = "1"
+# 统计活动分类（codeburn 风格的关键词正则）+ Bash 命令首词提取用。
+# lite 版去掉 Unicode 表和 DFA，二进制小 ~1MB，这里只用简单模式足够。
+regex-lite = "0.1"
+once_cell = "1"
+# 实时 tail：监听打开会话所在 JSONL 文件的写入事件。
+# default-features=false 关掉 cross-beam 依赖，统一走平台原生（FSEvents/inotify/ReadDirectoryChangesW）。
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+# 嵌入终端 (resume 直接在窗口里跑 CLI)：portable-pty 跨平台开 PTY 拉起子进程；
+# base64 把 PTY 原始字节 chunk 化后通过 Tauri event emit 给前端 xterm.js。
+portable-pty = "0.8"
+base64 = "0.22"
+# 启动时后台从 LiteLLM 拉模型价格表，新模型上架不必发版。
+# 同步 API（默认 native-tls，rustls 失败可退回系统 OpenSSL），
+# 在 background thread 里跑、不污染 cost_usd 的同步调用链。
+ureq = { version = "2", features = ["json"] }
+# Today / 7d / 30d 统计窗口要按本地日历日切，而非滚动 24h —— 和
+# codeburn / 各家 dashboard 保持一致。chrono 提供 Local::now + 日历运算。
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+# `/fork`：克隆会话时给新 transcript 生成全新 session id / 消息 uuid（v4）。
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+
+[features]
+default = []
+dev-mcp = ["tauri-plugin-mcp-bridge"]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std", "NSGeometry", "NSString", "NSDictionary", "NSAttributedString",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std", "NSResponder", "NSView", "NSButton", "NSWindow", "NSToolbar",
+    "NSMenu", "NSMenuItem", "NSFont", "NSColor",
+    "NSStatusBar", "NSStatusBarButton", "NSStatusItem",
+    "NSImage", "NSGraphics", "NSParagraphStyle",
+    "NSTextField", "NSControl", "NSText", "NSStackView", "NSBox",
+] }

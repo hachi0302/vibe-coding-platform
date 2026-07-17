@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+.screenshots
+
+node_modules
+dist
+dist-ssr
+coverage
+*.local
+
+# Local build and runtime output
+src-tauri/target/
+piapi_runs/
+infinite-castle-duel/
+.codex/config.toml
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

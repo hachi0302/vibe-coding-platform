@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "kling-cli": {
+      "source": "klingai-tech/skills",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "e52e3a6182e2feec132c1fa1081808372f268e50cb327d0ba7bfc475818d6d92"
+    },
+    "production-ready": {
+      "source": "adamos486/skills",
+      "sourceType": "github",
+      "skillPath": "production-ready/SKILL.md",
+      "computedHash": "79a7bcb20c2ae9fada10b31a8f0c76649449e9d02dada205c45e3384dd3a2db5"
+    },
+    "software-architect": {
+      "source": "firatcand/founder-skills",
+      "sourceType": "github",
+      "skillPath": "software-architect/SKILL.md",
+      "computedHash": "a0aed428a454caba0a15af62826df3f02be1ac883c95cdcfb297964697265afa"
+    }
+  }
+}
