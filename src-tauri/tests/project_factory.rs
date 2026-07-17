@@ -162,20 +162,25 @@ fn relative_file_bytes(root: &std::path::Path) -> std::collections::BTreeMap<Str
 }
 
 #[test]
-fn platform_skill_designer_is_an_exact_recursive_copy_of_ips() {
-    let ips = std::path::Path::new("/Users/wax/MyCode/ips/.agents/skills/skill-designer");
+fn platform_skill_designer_template_contains_the_complete_file_tree() {
     let platform = platform_root().join("docs/规范约束/技能模板/公共/skill-designer");
+    let files = relative_file_bytes(&platform);
 
-    assert!(
-        ips.is_dir(),
-        "IPS skill-designer source is missing: {}",
-        ips.display()
-    );
-    assert_eq!(
-        relative_file_bytes(&platform),
-        relative_file_bytes(ips),
-        "platform skill-designer must preserve the complete IPS file tree byte for byte"
-    );
+    for expected in [
+        "SKILL.md",
+        "evals/evals.json",
+        "references/decision-tree.md",
+        "references/generator-example.md",
+        "references/inversion-example.md",
+        "references/pipeline-example.md",
+        "references/reviewer-example.md",
+        "references/tool-wrapper-example.md",
+    ] {
+        assert!(
+            files.contains_key(expected),
+            "platform skill-designer template is missing {expected}"
+        );
+    }
 }
 
 #[test]
@@ -571,10 +576,10 @@ fn preparing_existing_project_installs_only_required_templates_and_original_skil
     );
     assert_eq!(
         relative_file_bytes(&root.join(".claude/skills/skill-designer")),
-        relative_file_bytes(std::path::Path::new(
-            "/Users/wax/MyCode/ips/.agents/skills/skill-designer"
-        )),
-        "prepared projects must receive every IPS skill-designer file byte for byte"
+        relative_file_bytes(
+            &platform_root().join("docs/规范约束/技能模板/公共/skill-designer")
+        ),
+        "prepared projects must receive every platform skill-designer template file byte for byte"
     );
     assert!(!root.join("CLAUDE.md").exists());
     std::fs::remove_dir_all(root).expect("cleanup");
@@ -1596,10 +1601,10 @@ fn creates_a_runnable_web_skeleton_with_shared_agent_rules() {
         .is_file());
     assert_eq!(
         relative_file_bytes(&project.join(".claude/skills/skill-designer")),
-        relative_file_bytes(std::path::Path::new(
-            "/Users/wax/MyCode/ips/.agents/skills/skill-designer"
-        )),
-        "created projects must receive every IPS skill-designer file byte for byte"
+        relative_file_bytes(
+            &platform_root().join("docs/规范约束/技能模板/公共/skill-designer")
+        ),
+        "created projects must receive every platform skill-designer template file byte for byte"
     );
     assert!(project
         .join(".claude/skills/frontend-self-test/SKILL.md")
