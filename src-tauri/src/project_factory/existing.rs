@@ -801,7 +801,44 @@ fn require_runtime_assets(
     database_connection: bool,
     external_integration: bool,
 ) -> Result<(), String> {
-    require_real_file(root, ".claude/rules/README.md", "规则索引")?;
+    let errors = runtime_asset_errors(
+        root,
+        layers,
+        database_dependency,
+        database_model,
+        database_connection,
+        external_integration,
+    );
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "项目规则与 skills 共有 {} 个校验缺口：\n- {}",
+            errors.len(),
+            errors.join("\n- ")
+        ))
+    }
+}
+
+fn runtime_asset_errors(
+    root: &Path,
+    layers: ProjectLayers,
+    database_dependency: bool,
+    database_model: bool,
+    database_connection: bool,
+    external_integration: bool,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut collect = |result: Result<(), String>| {
+        if let Err(error) = result {
+            errors.push(error);
+        }
+    };
+    collect(require_real_file(
+        root,
+        ".claude/rules/README.md",
+        "规则索引",
+    ));
     for rule in [
         ".claude/rules/公共/开发基线.md",
         ".claude/rules/公共/复用与影响面.md",
@@ -809,22 +846,46 @@ fn require_runtime_assets(
         ".claude/rules/公共/开发流程与文档同步.md",
         ".claude/rules/公共/自测与交付.md",
     ] {
-        require_real_file(root, rule, "规则")?;
+        collect(require_real_file(root, rule, "规则"));
     }
     if root.join(".git").exists() {
-        require_real_file(root, ".claude/rules/公共/Git协作与历史保护.md", "规则")?;
+        collect(require_real_file(
+            root,
+            ".claude/rules/公共/Git协作与历史保护.md",
+            "规则",
+        ));
     }
     if layers.frontend {
-        require_real_file(root, ".claude/rules/前端/前端工程规则.md", "规则")?;
-        require_real_file(root, ".claude/rules/前端/前端验证规则.md", "规则")?;
+        collect(require_real_file(
+            root,
+            ".claude/rules/前端/前端工程规则.md",
+            "规则",
+        ));
+        collect(require_real_file(
+            root,
+            ".claude/rules/前端/前端验证规则.md",
+            "规则",
+        ));
     }
     if layers.backend {
-        require_real_file(root, ".claude/rules/后端/API与业务实现规则.md", "规则")?;
+        collect(require_real_file(
+            root,
+            ".claude/rules/后端/API与业务实现规则.md",
+            "规则",
+        ));
         if database_dependency {
-            require_real_file(root, ".claude/rules/后端/持久化与迁移规则.md", "规则")?;
+            collect(require_real_file(
+                root,
+                ".claude/rules/后端/持久化与迁移规则.md",
+                "规则",
+            ));
         }
         if external_integration {
-            require_real_file(root, ".claude/rules/后端/异步与第三方规则.md", "规则")?;
+            collect(require_real_file(
+                root,
+                ".claude/rules/后端/异步与第三方规则.md",
+                "规则",
+            ));
         }
     }
     for skill in [
@@ -834,25 +895,47 @@ fn require_runtime_assets(
         "code-review",
         "review-feedback-handler",
     ] {
-        require_project_skill(root, &format!(".claude/skills/{skill}/SKILL.md"))?;
+        collect(require_project_skill(
+            root,
+            &format!(".claude/skills/{skill}/SKILL.md"),
+        ));
     }
     if layers.frontend {
-        require_project_skill(root, ".claude/skills/frontend-self-test/SKILL.md")?;
+        collect(require_project_skill(
+            root,
+            ".claude/skills/frontend-self-test/SKILL.md",
+        ));
     }
     if layers.backend {
-        require_project_skill(root, ".claude/skills/backend-self-test/SKILL.md")?;
-        require_project_skill(root, ".claude/skills/backend-log-diagnose/SKILL.md")?;
+        collect(require_project_skill(
+            root,
+            ".claude/skills/backend-self-test/SKILL.md",
+        ));
+        collect(require_project_skill(
+            root,
+            ".claude/skills/backend-log-diagnose/SKILL.md",
+        ));
         if database_model {
-            require_project_skill(root, ".claude/skills/ddl-review/SKILL.md")?;
+            collect(require_project_skill(
+                root,
+                ".claude/skills/ddl-review/SKILL.md",
+            ));
         }
         if database_connection {
-            require_project_skill(root, ".claude/skills/database-read-diagnose/SKILL.md")?;
+            collect(require_project_skill(
+                root,
+                ".claude/skills/database-read-diagnose/SKILL.md",
+            ));
         }
         if external_integration {
-            require_project_skill(root, ".claude/skills/external-integration/SKILL.md")?;
+            collect(require_project_skill(
+                root,
+                ".claude/skills/external-integration/SKILL.md",
+            ));
         }
     }
-    validate_skill_designer(root)
+    collect(validate_skill_designer(root));
+    errors
 }
 
 fn ensure_agent_links(root: &Path) -> Result<(), String> {
@@ -1071,4 +1154,45 @@ pub fn existing_project_init_status(
         initialized,
         marker_version: initialized.then(|| "v3".to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{runtime_asset_errors, ProjectLayers};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn runtime_asset_validation_reports_all_missing_project_skills_at_once() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vibe-runtime-assets-{suffix}"));
+        fs::create_dir_all(&root).expect("temp project");
+
+        let errors = runtime_asset_errors(
+            &root,
+            ProjectLayers {
+                frontend: false,
+                backend: true,
+            },
+            true,
+            true,
+            true,
+            true,
+        );
+
+        let joined = errors.join("\n");
+        assert!(joined.contains("backend-log-diagnose"));
+        assert!(joined.contains("ddl-review"));
+        assert!(joined.contains("database-read-diagnose"));
+        assert!(joined.contains("external-integration"));
+        assert!(
+            errors.len() > 4,
+            "应一次返回全部缺口，而不是遇到首个错误就停止"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp project");
+    }
 }

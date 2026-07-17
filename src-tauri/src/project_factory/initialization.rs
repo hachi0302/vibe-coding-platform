@@ -1,5 +1,10 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 use tauri::Emitter;
 
@@ -139,6 +144,112 @@ fn run_agent(agent: &str, project_path: &str, prompt: &str) -> Result<(), String
     }
 }
 
+fn stage_start_progress(stage: InitializationStage) -> (&'static str, u8, &'static str) {
+    match stage {
+        InitializationStage::Documents => ("documents", 18, "正在生成并填充项目文档"),
+        InitializationStage::RulesAndSkills => ("rules", 62, "正在生成项目规则与 skills"),
+        InitializationStage::Repair => ("validate", 92, "正在修复产物校验发现的缺口"),
+    }
+}
+
+fn progress_for_artifact_changes(stage: InitializationStage, changed_files: usize) -> u8 {
+    match stage {
+        InitializationStage::Documents => 18 + (changed_files.saturating_mul(4).min(38) as u8),
+        InitializationStage::RulesAndSkills => 62 + (changed_files.saturating_mul(3).min(22) as u8),
+        InitializationStage::Repair => 92 + (changed_files.saturating_mul(2).min(6) as u8),
+    }
+}
+
+type ArtifactState = HashMap<PathBuf, (u64, Option<SystemTime>)>;
+
+fn collect_artifacts(path: &Path, files: &mut ArtifactState) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            collect_artifacts(&path, files);
+        } else if metadata.is_file() {
+            files.insert(path, (metadata.len(), metadata.modified().ok()));
+        }
+    }
+}
+
+fn artifact_snapshot(root: &Path, stage: InitializationStage) -> ArtifactState {
+    let mut files = HashMap::new();
+    match stage {
+        InitializationStage::Documents => {
+            collect_artifacts(&root.join("docs/frontend"), &mut files);
+            collect_artifacts(&root.join("docs/backend"), &mut files);
+        }
+        InitializationStage::RulesAndSkills | InitializationStage::Repair => {
+            collect_artifacts(&root.join(".claude/rules"), &mut files);
+            collect_artifacts(&root.join(".claude/skills"), &mut files);
+            if let Ok(metadata) = fs::metadata(root.join("CLAUDE.md")) {
+                files.insert(
+                    root.join("CLAUDE.md"),
+                    (metadata.len(), metadata.modified().ok()),
+                );
+            }
+        }
+    }
+    files
+}
+
+fn changed_artifact_count(before: &ArtifactState, after: &ArtifactState) -> usize {
+    after
+        .iter()
+        .filter(|(path, state)| before.get(*path) != Some(*state))
+        .count()
+}
+
+fn run_agent_with_progress<F>(
+    agent: &str,
+    project_path: &str,
+    prompt: &str,
+    stage: InitializationStage,
+    reporter: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(ExistingProjectInitializationProgress),
+{
+    let (phase, start_percent, detail) = stage_start_progress(stage);
+    report(reporter, project_path, phase, start_percent, detail);
+    let baseline = artifact_snapshot(Path::new(project_path), stage);
+    let agent = agent.to_string();
+    let project_path_owned = project_path.to_string();
+    let prompt = prompt.to_string();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = sender.send(run_agent(&agent, &project_path_owned, &prompt));
+    });
+
+    let mut last_percent = start_percent;
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let current = artifact_snapshot(Path::new(project_path), stage);
+                let percent = progress_for_artifact_changes(
+                    stage,
+                    changed_artifact_count(&baseline, &current),
+                );
+                if percent > last_percent {
+                    last_percent = percent;
+                    report(reporter, project_path, phase, percent, detail);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("项目初始化 Agent 进程意外中断".to_string());
+            }
+        }
+    }
+}
+
 fn report<F>(reporter: &mut F, project_path: &str, phase: &str, percent: u8, detail: &str)
 where
     F: FnMut(ExistingProjectInitializationProgress),
@@ -172,30 +283,34 @@ where
     );
     prepare_existing_project_initialization(project_path)?;
 
-    run_agent(
+    run_agent_with_progress(
         agent,
         project_path,
         &stage_prompt(base_prompt, InitializationStage::Documents, None),
+        InitializationStage::Documents,
+        &mut reporter,
     )?;
     report(
         &mut reporter,
         project_path,
         "documents",
-        42,
-        "项目分析完成，正在填充真实长期文档",
+        58,
+        "项目文档已生成，正在准备项目规则与 skills",
     );
 
-    run_agent(
+    run_agent_with_progress(
         agent,
         project_path,
         &stage_prompt(base_prompt, InitializationStage::RulesAndSkills, None),
+        InitializationStage::RulesAndSkills,
+        &mut reporter,
     )?;
     report(
         &mut reporter,
         project_path,
         "rules",
-        72,
-        "长期文档已生成，正在生成项目规则与 skills",
+        86,
+        "项目规则与 skills 已生成，正在准备校验",
     );
 
     let mut last_error = String::new();
@@ -218,10 +333,12 @@ where
             }
             Err(error) if attempt < MAX_REPAIR_ATTEMPTS => {
                 last_error = error;
-                run_agent(
+                run_agent_with_progress(
                     agent,
                     project_path,
                     &stage_prompt(base_prompt, InitializationStage::Repair, Some(&last_error)),
+                    InitializationStage::Repair,
+                    &mut reporter,
                 )?;
             }
             Err(error) => {
@@ -242,4 +359,44 @@ pub fn initialize_existing_project_with_agent_progress(
     initialize_with_progress(project_path, agent, prompt, |progress| {
         let _ = app.emit("project-factory://initialization-progress", progress);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{progress_for_artifact_changes, stage_start_progress, InitializationStage};
+
+    #[test]
+    fn stage_is_reported_when_work_starts_instead_of_after_agent_finishes() {
+        assert_eq!(
+            stage_start_progress(InitializationStage::Documents),
+            ("documents", 18, "正在生成并填充项目文档")
+        );
+        assert_eq!(
+            stage_start_progress(InitializationStage::RulesAndSkills),
+            ("rules", 62, "正在生成项目规则与 skills")
+        );
+    }
+
+    #[test]
+    fn real_artifact_changes_advance_progress_without_crossing_stage_boundary() {
+        assert_eq!(
+            progress_for_artifact_changes(InitializationStage::Documents, 0),
+            18
+        );
+        assert!(progress_for_artifact_changes(InitializationStage::Documents, 4) > 18);
+        assert_eq!(
+            progress_for_artifact_changes(InitializationStage::Documents, 100),
+            56
+        );
+
+        assert_eq!(
+            progress_for_artifact_changes(InitializationStage::RulesAndSkills, 0),
+            62
+        );
+        assert!(progress_for_artifact_changes(InitializationStage::RulesAndSkills, 4) > 62);
+        assert_eq!(
+            progress_for_artifact_changes(InitializationStage::RulesAndSkills, 100),
+            84
+        );
+    }
 }
