@@ -472,9 +472,9 @@ export const appVersion = () => invoke<string>('app_version')
 // 过滤掉 draft / prerelease，所以拿到的就是当前稳定版。Tauri WKWebView 自带 fetch，
 // 没有 CSP 限制（tauri.conf.json csp=null），不需要在 Rust 侧加 HTTP client 依赖。
 const GITHUB_LATEST_RELEASE_URL =
-  'https://api.github.com/repos/HACHI0302/vibe-coding-platform/releases/latest'
+  'https://api.github.com/repos/hachi0302/vibe-coding-platform/releases/latest'
 const RELEASE_PAGE_URL =
-  'https://github.com/HACHI0302/vibe-coding-platform/releases/latest'
+  'https://github.com/hachi0302/vibe-coding-platform/releases/latest'
 
 interface GitHubRelease {
   tag_name?: string

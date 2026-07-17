@@ -2,10 +2,10 @@
 
 # Vibe Coding Platform
 
-[![Version](https://img.shields.io/github/v/release/HACHI0302/vibe-coding-platform?color=blue&label=version)](https://github.com/HACHI0302/vibe-coding-platform/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/HACHI0302/vibe-coding-platform/releases)
+[![Version](https://img.shields.io/github/v/release/hachi0302/vibe-coding-platform?color=blue&label=version)](https://github.com/hachi0302/vibe-coding-platform/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/hachi0302/vibe-coding-platform/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
-[![Downloads](https://img.shields.io/github/downloads/HACHI0302/vibe-coding-platform/total)](https://github.com/HACHI0302/vibe-coding-platform/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/hachi0302/vibe-coding-platform/total)](https://github.com/hachi0302/vibe-coding-platform/releases/latest)
 [![Vue 3](https://img.shields.io/badge/Vue-3-42b883?logo=vue.js&logoColor=fff)](https://vuejs.org)
 
 [English](README.md) · [中文](README.zh-CN.md) · **日本語** · [CHANGELOG](CHANGELOG.md)
@@ -101,7 +101,7 @@
 
 ## インストール
 
-[Releases](https://github.com/HACHI0302/vibe-coding-platform/releases) からプラットフォームに合ったインストーラをダウンロード：
+[Releases](https://github.com/hachi0302/vibe-coding-platform/releases) からプラットフォームに合ったインストーラをダウンロード：
 
 | プラットフォーム | ファイル |
 | --- | --- |
@@ -125,7 +125,7 @@ sudo apt install ./vibe-coding-platform_<ver>_amd64.deb
 ## 開発
 
 ```bash
-git clone https://github.com/HACHI0302/vibe-coding-platform.git
+git clone https://github.com/hachi0302/vibe-coding-platform.git
 cd vibe-coding-platform
 npm install
 npm run tauri dev      # 開発モード
