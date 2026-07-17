@@ -85,7 +85,7 @@ export function buildProjectInitializationPrompt(project: WorkflowProject): stri
     `项目路径：${project.path}`,
     '目标：一次性把当前项目的长期文档、规则和 skills 按真实代码完整建立，使以后开发、修 Bug、代码优化都先复用项目已有框架与公共能力，不走偏、不破坏历史行为。',
     '强制顺序（不得跳步）：',
-    '- 第一步读取并执行 `.claude/skills/skill-designer/SKILL.md`。这是从 IPS 原样安装的 skill 设计规范；后续创建或修订任何 skill 都必须用它选择 Generator / Reviewer / Inversion / Pipeline / Tool Wrapper 模式，并按其 references 与 evals 自检。',
+    '- 第一步读取并执行 `.claude/skills/skill-designer/SKILL.md`。这是平台内置的 skill 设计规范；后续创建或修订任何 skill 都必须用它选择 Generator / Reviewer / Inversion / Pipeline / Tool Wrapper 模式，并按其 references 与 evals 自检。',
     '- 同时逐份读取 `.vibe-coding-platform/init-reference-v3/` 下命中当前代码层的文档、规则与 skill 模板。正式产物必须保持模板章节、表格和 Gate，并用当前项目真实代码填满；禁止把空模板、占位符或示例内容直接复制成长期文档。该临时参考包会在最终校验成功后由平台清理。',
     '- 完整读取项目根目录、全部前端/后端源码、构建与测试脚本、依赖清单、配置、已有 docs、`CLAUDE.md`、`AGENTS.md`、`.claude`、`.agents`；不得只扫少量文件或只读 README 就下结论。',
     '- 保留项目原有业务文档、规则和 skills；只允许替换带明确 `vibe-coding-platform` 旧初始化标识的空壳文件，绝不删除或覆盖真实项目资料。',
@@ -108,7 +108,7 @@ export function buildProjectInitializationPrompt(project: WorkflowProject): stri
     '- `.claude/{rules,skills,scripts}` 是唯一维护源；`.agents/{rules,skills,scripts}` 分别软链接到 `.claude/` 同名目录。若已有双份内容，先合并保护信息再建立软链接。',
     '- 不创建运维、部署、监控或 CI 运维文档；开发所需的本地启动、构建、测试命令写入项目入口和对应开发/自测规则。',
     '- 任何事实必须引用源码路径、配置、测试或现有文档证据；没有证据就明确未知。禁止为了流程继续而添加吞异常、伪造默认值、模拟成功、自动降级或猜测配置等兜底逻辑。',
-    '- 完成后逐项自检：长期文档有真实代码证据，正式模板结构完整，rules/skills 与项目技术栈和公共框架匹配，前后端/数据库目录按实际存在裁剪，skill-designer 与 IPS 标准版本一致，软链接正确，既有资料未被覆盖。',
+    '- 完成后逐项自检：长期文档有真实代码证据，正式模板结构完整，rules/skills 与项目技术栈和公共框架匹配，前后端/数据库目录按实际存在裁剪，skill-designer 与平台内置模板一致，软链接正确，既有资料未被覆盖。',
     '完成上述扫描、生成和自检后直接退出；平台会读取并校验真实文件决定是否完成。',
   ].join('\n')
 }

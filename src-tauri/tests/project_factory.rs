@@ -281,11 +281,11 @@ fn platform_template_library_has_only_document_rule_and_skill_sources() {
         ("frontend", &frontend),
     ] {
         for forbidden in [
-            "ips-doc-engineering",
-            "ips-record",
-            "ips-trade",
-            "ips-channel-core",
-            "ips-channel-gateway",
+            "legacy-doc-engineering",
+            "legacy-record",
+            "legacy-trade",
+            "legacy-channel-core",
+            "legacy-channel-gateway",
             "易宝",
             "智汇分账通",
             "192.168.10.34",
@@ -576,12 +576,82 @@ fn preparing_existing_project_installs_only_required_templates_and_original_skil
     );
     assert_eq!(
         relative_file_bytes(&root.join(".claude/skills/skill-designer")),
-        relative_file_bytes(
-            &platform_root().join("docs/规范约束/技能模板/公共/skill-designer")
-        ),
+        relative_file_bytes(&platform_root().join("docs/规范约束/技能模板/公共/skill-designer")),
         "prepared projects must receive every platform skill-designer template file byte for byte"
     );
     assert!(!root.join("CLAUDE.md").exists());
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[cfg(unix)]
+#[test]
+fn preparing_existing_project_installs_a_staged_diff_document_sync_gate() {
+    let root = fixture_spring_project("existing-prepare-doc-sync-gate");
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("run git command")
+    };
+    assert!(git(&["init", "-q"]).status.success());
+
+    prepare_existing_project_initialization(root.to_str().expect("valid path"))
+        .expect("prepare existing project");
+
+    let rule = root.join(".claude/rules/code/doc-sync-review.md");
+    let skill = root.join(".claude/skills/doc-sync-review/SKILL.md");
+    let gate = root.join(".claude/skills/doc-sync-review/scripts/doc-sync-gate.sh");
+    let hook = root.join(".githooks/pre-commit");
+    assert!(rule.is_file(), "初始化必须安装提交前文档审核规则");
+    assert!(skill.is_file(), "初始化必须安装文档审核 skill");
+    assert!(gate.is_file(), "初始化必须安装确定性审核脚本");
+    assert!(hook.is_file(), "初始化必须安装 pre-commit hook");
+    assert_eq!(
+        String::from_utf8_lossy(&git(&["config", "--get", "core.hooksPath"]).stdout).trim(),
+        ".githooks"
+    );
+
+    std::fs::write(root.join("src/main/java/Demo.java"), "class Demo {}\n")
+        .expect("write staged source");
+    assert!(git(&["add", "src/main/java/Demo.java"]).status.success());
+    let blocked = std::process::Command::new(&hook)
+        .current_dir(&root)
+        .output()
+        .expect("run hook without review receipt");
+    assert!(!blocked.status.success(), "没有审核凭证时必须阻止提交");
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("文档一致性审核"));
+
+    assert!(std::process::Command::new(&gate)
+        .arg("--record")
+        .current_dir(&root)
+        .status()
+        .expect("record staged diff review")
+        .success());
+    assert!(
+        std::process::Command::new(&hook)
+            .current_dir(&root)
+            .status()
+            .expect("run hook with current receipt")
+            .success(),
+        "同一份暂存区完成审核后必须允许提交"
+    );
+
+    std::fs::write(
+        root.join("src/main/java/Demo.java"),
+        "class Demo { int value; }\n",
+    )
+    .expect("change staged source");
+    assert!(git(&["add", "src/main/java/Demo.java"]).status.success());
+    assert!(
+        !std::process::Command::new(&hook)
+            .current_dir(&root)
+            .status()
+            .expect("run hook with stale receipt")
+            .success(),
+        "暂存区发生变化后旧审核凭证必须失效"
+    );
+
     std::fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -1601,9 +1671,7 @@ fn creates_a_runnable_web_skeleton_with_shared_agent_rules() {
         .is_file());
     assert_eq!(
         relative_file_bytes(&project.join(".claude/skills/skill-designer")),
-        relative_file_bytes(
-            &platform_root().join("docs/规范约束/技能模板/公共/skill-designer")
-        ),
+        relative_file_bytes(&platform_root().join("docs/规范约束/技能模板/公共/skill-designer")),
         "created projects must receive every platform skill-designer template file byte for byte"
     );
     assert!(project

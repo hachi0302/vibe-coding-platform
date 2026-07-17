@@ -115,7 +115,7 @@ onUnmounted(() => {
   <div ref="titlebarEl" class="window-titlebar">
     <div class="window-app-id" data-tauri-drag-region>
       <span class="window-app-icon" aria-hidden="true">sv</span>
-      <span>Sessions Viewer</span>
+      <span>Vibe Coding Platform</span>
     </div>
     <nav
       class="window-menu"

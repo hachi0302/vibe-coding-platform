@@ -75,7 +75,7 @@ const modKey = isMac ? '⌘' : 'Ctrl'
     </button>
     <div class="welcome-inner">
       <div class="welcome-logo"><img :src="appIcon" alt="" /></div>
-      <h1 class="welcome-title">Sessions Viewer</h1>
+      <h1 class="welcome-title">Vibe Coding Platform</h1>
 
       <!-- 当前 agent 切换；≥3 个时收成纯图标（名字进 tooltip），与侧栏切换器同规则 -->
       <div

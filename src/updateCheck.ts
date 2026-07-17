@@ -16,7 +16,9 @@ import { appVersion, checkUpdate, openUrl, type UpdateInfo } from './api'
 const RELEASES_LATEST_PAGE =
   'https://github.com/hachi0302/vibe-coding-platform/releases/latest'
 
-const CACHE_KEY = 'updateCheck:v1'
+// Tauri WebView 的 localStorage 可能被同机其它桌面应用复用，不能使用通用键。
+const CACHE_KEY = 'vibe-coding-platform:updateCheck:v1'
+const LEGACY_CACHE_KEYS = ['updateCheck:v1']
 const TTL_MS = 24 * 60 * 60 * 1000 // 一天 —— GitHub 未授权 API 是 60 次/小时/IP，足够安全
 
 interface Cached {
@@ -63,6 +65,14 @@ function saveCache(c: Cached) {
   }
 }
 
+function clearLegacyCache() {
+  try {
+    for (const key of LEGACY_CACHE_KEYS) localStorage.removeItem(key)
+  } catch {
+    /* 隐私模式等不支持 localStorage 的环境不影响更新检查 */
+  }
+}
+
 // 复制一份小 semver 比较 —— 与 api.ts 内部那份逻辑一致，不跨模块借用以保持
 // api.ts 作为纯 invoke 包装层的边界。
 function compareVer(a: string, b: string): number {
@@ -90,6 +100,7 @@ function applyInfo(info: UpdateInfo) {
  *   2. 如果缓存超过 24h（或没缓存）再去发一次真实请求。失败完全静默。
  */
 export async function runBackgroundCheck(): Promise<void> {
+  clearLegacyCache()
   const cached = loadCache()
   const current = await appVersion().catch(() => null)
 

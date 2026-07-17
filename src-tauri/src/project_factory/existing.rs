@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::ai_rules::{validate_skill_designer, write_skill_designer};
+use super::ai_rules::{install_doc_sync_review, validate_skill_designer, write_skill_designer};
 use super::docs::{project_file_contents, project_files_named, project_layers, ProjectLayers};
 use super::types::{
     ExistingProjectInitPreparation, ExistingProjectInitResult, ExistingProjectInitStatus,
@@ -148,6 +148,10 @@ const INIT_REFERENCE_FILES: &[(&str, &str)] = &[
         include_str!("../../../docs/规范约束/规则模板/公共/自测与交付.md"),
     ),
     (
+        "规则模板/公共/doc-sync-review.md",
+        include_str!("../../../docs/规范约束/规则模板/公共/doc-sync-review.md"),
+    ),
+    (
         "规则模板/前端/前端工程规则.md",
         include_str!("../../../docs/规范约束/规则模板/前端/前端工程规则.md"),
     ),
@@ -186,6 +190,16 @@ const INIT_REFERENCE_FILES: &[(&str, &str)] = &[
     (
         "技能模板/公共/review-feedback-handler/SKILL.md",
         include_str!("../../../docs/规范约束/技能模板/公共/review-feedback-handler/SKILL.md"),
+    ),
+    (
+        "技能模板/公共/doc-sync-review/SKILL.md",
+        include_str!("../../../docs/规范约束/技能模板/公共/doc-sync-review/SKILL.md"),
+    ),
+    (
+        "技能模板/公共/doc-sync-review/scripts/doc-sync-gate.sh",
+        include_str!(
+            "../../../docs/规范约束/技能模板/公共/doc-sync-review/scripts/doc-sync-gate.sh"
+        ),
     ),
     (
         "技能模板/前端/frontend-self-test/SKILL.md",
@@ -1064,9 +1078,10 @@ pub fn prepare_existing_project_initialization(
     if !layers.frontend && !layers.backend {
         return Err("未识别到前端或后端代码层；请确认项目根目录后再初始化".to_string());
     }
-    // 先原样安装 IPS 的 skill-designer，随后 Agent 必须用它设计项目专属 skills。
+    // 先原样安装平台内置的 skill-designer，随后 Agent 必须用它设计项目专属 skills。
     // 这里只写入这一项初始化工具，不复制整套模板库，也不触碰业务代码和既有 docs。
     write_skill_designer(root)?;
+    install_doc_sync_review(root, layers)?;
     // 业务总览、架构、API、物理模型、规则与 skills 都需要严格参照平台模板，但不能把空模板
     // 当成正式项目产物。故这里只提供初始化期间的隐藏只读参考包，成功后自动清理。
     write_initialization_reference_bundle(root, layers)?;
@@ -1248,6 +1263,7 @@ fn runtime_asset_errors(
         ".claude/rules/公共/事实与兜底边界.md",
         ".claude/rules/公共/开发流程与文档同步.md",
         ".claude/rules/公共/自测与交付.md",
+        ".claude/rules/code/doc-sync-review.md",
     ] {
         collect(require_real_file(root, rule, "规则"));
     }
@@ -1303,6 +1319,16 @@ fn runtime_asset_errors(
             &format!(".claude/skills/{skill}/SKILL.md"),
         ));
     }
+    collect(require_real_file(
+        root,
+        ".claude/skills/doc-sync-review/SKILL.md",
+        "提交前文档审核 skill",
+    ));
+    collect(require_real_file(
+        root,
+        ".claude/skills/doc-sync-review/scripts/doc-sync-gate.sh",
+        "提交前文档审核脚本",
+    ));
     if layers.frontend {
         collect(require_project_skill(
             root,

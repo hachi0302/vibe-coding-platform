@@ -21,7 +21,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(app.default_window_icon().cloned().unwrap())
         .menu(&menu)
-        .tooltip("Sessions Viewer")
+        .tooltip("Vibe Coding Platform")
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| match event {
             TrayIconEvent::Click {

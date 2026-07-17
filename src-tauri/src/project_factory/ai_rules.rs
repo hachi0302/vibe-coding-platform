@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 
@@ -61,6 +62,13 @@ const GIT_COLLABORATION_RULE: &str =
     include_str!("../../../docs/规范约束/规则模板/公共/Git协作与历史保护.md");
 const SELF_TEST_AND_DELIVERY_RULE: &str =
     include_str!("../../../docs/规范约束/规则模板/公共/自测与交付.md");
+const DOC_SYNC_REVIEW_RULE: &str =
+    include_str!("../../../docs/规范约束/规则模板/公共/doc-sync-review.md");
+const DOC_SYNC_REVIEW_SKILL: &str =
+    include_str!("../../../docs/规范约束/技能模板/公共/doc-sync-review/SKILL.md");
+const DOC_SYNC_GATE: &str =
+    include_str!("../../../docs/规范约束/技能模板/公共/doc-sync-review/scripts/doc-sync-gate.sh");
+const DOC_SYNC_HOOK_MARKER: &str = "# vibe-coding-platform:doc-sync-gate:v1";
 const FRONTEND_ENGINEERING_RULE: &str =
     include_str!("../../../docs/规范约束/规则模板/前端/前端工程规则.md");
 const FRONTEND_VERIFICATION_RULE: &str =
@@ -90,6 +98,92 @@ fn write_skill(root: &Path, name: &str, content: &str) -> Result<(), String> {
 
 fn write_rule(root: &Path, path: &str, content: &str) -> Result<(), String> {
     write_file(&root.join(".claude/rules").join(path), content)
+}
+
+fn doc_sync_long_document_mapping(layers: ProjectLayers) -> String {
+    let mut rows = Vec::new();
+    if layers.frontend {
+        rows.extend([
+            "- 业务功能变化 → `docs/frontend/latest/业务/业务功能总览.md`",
+            "- 页面、路由、状态管理或整体分层变化 → `docs/frontend/latest/系统架构/前端架构.md`",
+            "- 公共组件、工具或请求封装变化 → `docs/frontend/latest/公共能力/组件与公共能力.md`",
+        ]);
+    }
+    if layers.backend {
+        rows.extend([
+            "- 业务功能变化 → `docs/backend/latest/业务/业务功能总览.md`",
+            "- 模块边界、调用链或公共能力变化 → `docs/backend/latest/系统架构/系统架构详解.md`",
+            "- API 变化 → `docs/backend/latest/接口文档/API接口总览.md`",
+            "- 回调变化 → `docs/backend/latest/接口文档/回调接口总览.md`",
+            "- 实体、迁移、表或字段变化 → `docs/backend/latest/接口文档/物理模型总览.md`",
+            "- 对外枚举值变化 → `docs/backend/latest/接口文档/枚举值总览.md`",
+        ]);
+    }
+    rows.join("\n")
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// 安装所有项目通用的提交前文档一致性审核。规则和 skill 共用一份来源；hook 只做
+/// 确定性的暂存区指纹校验，不让 shell 猜测业务影响。
+pub(super) fn install_doc_sync_review(root: &Path, layers: ProjectLayers) -> Result<(), String> {
+    let rule = format!(
+        "{}\n{}\n",
+        DOC_SYNC_REVIEW_RULE.trim_end(),
+        doc_sync_long_document_mapping(layers)
+    );
+    write_rule(root, "code/doc-sync-review.md", &rule)?;
+    write_skill(root, "doc-sync-review", DOC_SYNC_REVIEW_SKILL)?;
+    let gate = root.join(".claude/skills/doc-sync-review/scripts/doc-sync-gate.sh");
+    write_file(&gate, DOC_SYNC_GATE)?;
+    make_executable(&gate)?;
+
+    let hook = root.join(".githooks/pre-commit");
+    if hook.exists() {
+        let existing = fs::read_to_string(&hook).map_err(|error| error.to_string())?;
+        if !existing.contains(DOC_SYNC_HOOK_MARKER) {
+            let preserved = root.join(".githooks/pre-commit.user");
+            if !preserved.exists() {
+                write_file(&preserved, &existing)?;
+                make_executable(&preserved)?;
+            }
+        }
+    }
+    write_file(
+        &hook,
+        &format!(
+            "#!/bin/sh\n{DOC_SYNC_HOOK_MARKER}\nset -eu\nif [ -x .githooks/pre-commit.user ]; then\n  .githooks/pre-commit.user\nfi\nexec .claude/skills/doc-sync-review/scripts/doc-sync-gate.sh --check\n"
+        ),
+    )?;
+    make_executable(&hook)?;
+
+    if is_git_repository(root) {
+        let output = Command::new("git")
+            .args(["config", "core.hooksPath", ".githooks"])
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("配置 Git hooksPath 失败：{error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "配置 Git hooksPath 失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn package_scripts(root: &Path) -> String {
@@ -177,6 +271,7 @@ fn validate_generated_materials(root: &Path) -> Result<(), String> {
         ".claude/rules/公共/开发流程与文档同步.md",
         ".claude/rules/公共/自测与交付.md",
         ".claude/rules/公共/Git协作与历史保护.md",
+        ".claude/rules/code/doc-sync-review.md",
         ".claude/rules/前端/前端工程规则.md",
         ".claude/rules/前端/前端验证规则.md",
         ".claude/rules/后端/API与业务实现规则.md",
@@ -212,7 +307,12 @@ fn validate_generated_materials(root: &Path) -> Result<(), String> {
 }
 
 fn is_git_repository(root: &Path) -> bool {
-    root.join(".git").exists()
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn commands(root: &Path, layers: ProjectLayers) -> (String, String, String, String) {
@@ -1161,7 +1261,7 @@ fn render_template_for(
     Ok(rendered)
 }
 
-/// 将 IPS 已验证的 skill-designer 原样安装到项目中。
+/// 将平台内置的 skill-designer 原样安装到项目中。
 ///
 /// 初始化其他项目 skill 之前必须先完成这一步；调用方不得自行改写它的正文、references
 /// 或 evals。该函数也供既有项目的 prepare 阶段使用，确保随后启动的 Agent 能立即加载它。
@@ -1197,9 +1297,11 @@ pub(super) fn validate_skill_designer(root: &Path) -> Result<(), String> {
         ("evals/evals.json", SKILL_DESIGNER_EVALS),
     ] {
         let actual = fs::read_to_string(base.join(relative))
-            .map_err(|_| format!("缺少 IPS 标准 skill-designer 文件：{relative}"))?;
+            .map_err(|_| format!("缺少平台 skill-designer 文件：{relative}"))?;
         if actual != expected {
-            return Err(format!("skill-designer 文件不是 IPS 标准原版：{relative}"));
+            return Err(format!(
+                "skill-designer 文件与平台内置模板不一致：{relative}"
+            ));
         }
     }
     Ok(())
@@ -1385,7 +1487,7 @@ fn write_runtime_rules(root: &Path, request: &CreateProjectRequest) -> Result<()
             )?;
         }
     }
-    let mut index = String::from("# 规则索引\n\n## 所有任务\n\n- `公共/开发基线.md`\n- `公共/复用与影响面.md`\n- `公共/事实与兜底边界.md`\n- `公共/开发流程与文档同步.md`\n- `公共/自测与交付.md`\n");
+    let mut index = String::from("# 规则索引\n\n## 所有任务\n\n- `公共/开发基线.md`\n- `公共/复用与影响面.md`\n- `公共/事实与兜底边界.md`\n- `公共/开发流程与文档同步.md`\n- `公共/自测与交付.md`\n- `code/doc-sync-review.md`\n");
     if is_git_repository(root) {
         index.push_str("- `公共/Git协作与历史保护.md`\n");
     }
@@ -1437,6 +1539,7 @@ fn entry_document(root: &Path, request: &CreateProjectRequest) -> String {
         "问题定位/根因分析 → `problem-diagnose`",
         "代码审查 → `code-review`",
         "创建或维护 skill → `skill-designer`",
+        "提交前长期文档一致性审核 → `doc-sync-review`",
     ];
     if layers.frontend {
         skills.push("前端自测 → `frontend-self-test`");
@@ -1449,7 +1552,7 @@ fn entry_document(root: &Path, request: &CreateProjectRequest) -> String {
         }
     }
     format!(
-        "{PLATFORM_INIT_MARKER}\n# {} — AI 助手开发指南\n\n> {}。主要技术栈：{}。\n> `CLAUDE.md` 是唯一维护源，`AGENTS.md` 软链接到本文件；`.agents/rules`、`.agents/skills`、`.agents/scripts` 软链接到 `.claude/` 同名目录。\n\n## 工厂初始化边界\n\n本项目已完成工程骨架、项目文档、规则与 skills 的初始化。**项目工厂到此结束，不自动开发任何业务功能。** 后续由用户另开 Agent 会话并明确提出需求，再按本文件、rules 和对应 skill 生成详设、进度文档、代码与自测证据。\n\n## 项目结构与模块职责\n\n{}\n\n## 核心约束\n\n1. 改文件前读取目标文件、上游入口、下游调用方、同类实现和命中规则。\n2. 优先复用现有组件、工具、模型、错误处理和测试基座；不存在才新增。\n3. 只改当前任务直接相关内容，不覆盖用户改动，不顺手重构。\n4. 结论必须来自代码、配置、测试、数据或用户材料；证据不足时写“推测”。\n5. 不添加未经需求或项目证据确认的默认值、吞错、模拟成功或降级兜底。\n{}\n\n## 后续会话开发流程\n\n1. 读取“项目需求与技术选型”、业务总览、架构和 `.claude/rules/README.md`。\n2. 新需求先使用 `detail-design-writer` 生成详设与进度；用户确认前不改业务代码。\n3. 用户明确要求开发后才使用 `developer`，先写失败测试，再做最小实现。\n4. 覆盖正常、边界、异常、原 Bug 和相关回归，同步受影响长期文档。\n5. 是否 commit/push 由用户选择，不自动执行。\n\n## 文档索引\n\n{}\n\n## 技能触发\n\n- {}\n\n## 构建与自测\n\n| 用途 | 真实命令 |\n|---|---|\n| 测试 | `{}` |\n| lint | `{}` |\n| 类型检查 | `{}` |\n| 构建 | `{}` |\n",
+        "{PLATFORM_INIT_MARKER}\n# {} — AI 助手开发指南\n\n> {}。主要技术栈：{}。\n> `CLAUDE.md` 是唯一维护源，`AGENTS.md` 软链接到本文件；`.agents/rules`、`.agents/skills`、`.agents/scripts` 软链接到 `.claude/` 同名目录。\n\n## 工厂初始化边界\n\n本项目已完成工程骨架、项目文档、规则与 skills 的初始化。**项目工厂到此结束，不自动开发任何业务功能。** 后续由用户另开 Agent 会话并明确提出需求，再按本文件、rules 和对应 skill 生成详设、进度文档、代码与自测证据。\n\n## 项目结构与模块职责\n\n{}\n\n## 核心约束\n\n1. 改文件前读取目标文件、上游入口、下游调用方、同类实现和命中规则。\n2. 优先复用现有组件、工具、模型、错误处理和测试基座；不存在才新增。\n3. 只改当前任务直接相关内容，不覆盖用户改动，不顺手重构。\n4. 结论必须来自代码、配置、测试、数据或用户材料；证据不足时写“推测”。\n5. 不添加未经需求或项目证据确认的默认值、吞错、模拟成功或降级兜底。\n{}\n\n## 后续会话开发流程\n\n1. 读取“项目需求与技术选型”、业务总览、架构和 `.claude/rules/README.md`。\n2. 新需求先使用 `detail-design-writer` 生成详设与进度；用户确认前不改业务代码。\n3. 用户明确要求开发后才使用 `developer`，先写失败测试，再做最小实现。\n4. 覆盖正常、边界、异常、原 Bug 和相关回归，同步受影响长期文档。\n5. 提交前使用 `doc-sync-review` 审核暂存区并记录当前指纹；是否 commit/push 仍由用户选择。\n\n## 文档索引\n\n{}\n\n## 技能触发\n\n- {}\n\n## 构建与自测\n\n| 用途 | 真实命令 |\n|---|---|\n| 测试 | `{}` |\n| lint | `{}` |\n| 类型检查 | `{}` |\n| 构建 | `{}` |\n",
         request.project_name,
         request.profile.summary,
         stack_summary(request, layers),
@@ -1528,6 +1631,7 @@ fn link_or_copy_shared_dir(root: &Path, dir: &str) -> Result<bool, String> {
 pub fn write_ai_rules(root: &Path, request: &CreateProjectRequest) -> Result<String, String> {
     write_runtime_rules(root, request)?;
     write_runtime_skills(root, request)?;
+    install_doc_sync_review(root, project_layers(root))?;
     validate_generated_materials(root)?;
     write_file(
         &root.join(".claude/scripts/README.md"),

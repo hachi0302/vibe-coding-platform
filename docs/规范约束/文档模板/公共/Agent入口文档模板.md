@@ -19,7 +19,8 @@
 3. 新需求先写详设与进度文档；Bug 先复现并给出证据支持的根因或推测。
 4. 先写失败测试，再做最小实现；覆盖正常、边界、异常、原 Bug 和相关历史回归。
 5. 同步受影响的长期文档，向用户汇报真实命令和结果。
-6. 提交与推送由用户选择；未经授权不执行。
+6. 提交前必须使用 `doc-sync-review` 审核暂存区与长期文档一致性，并记录当前暂存区审核凭证。
+7. 提交与推送由用户选择；未经授权不执行。
 
 ## 文档索引
 
@@ -30,6 +31,8 @@
 - 规则索引：`.claude/rules/README.md`
 - 工作流 skills：`.claude/skills/`
 - 项目脚本：`.claude/scripts/`
+- 提交前文档审核规则：`.claude/rules/code/doc-sync-review.md`
+- 提交前文档审核 skill：`.claude/skills/doc-sync-review/SKILL.md`
 
 {{列出任务关键词到 skill 的实际映射}}
 
