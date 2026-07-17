@@ -680,6 +680,9 @@ function asciiFromBytes(bytes: Uint8Array, start: number, end: number): string {
   return out
 }
 
+type ColorScheme = 'light' | 'dark'
+type Rgb = [number, number, number]
+
 function isDarkAnsiColor(value: string): boolean {
   const n = Number(value)
   if (!Number.isInteger(n)) return false
@@ -708,7 +711,130 @@ function isLightRgb(r: string, g: string, b: string): boolean {
   return rv * 0.299 + gv * 0.587 + bv * 0.114 > 180
 }
 
-function normalizeLightSgrSemicolon(params: string): string {
+const XTERM_CUBE_STEPS = [0, 95, 135, 175, 215, 255]
+
+function toByte(value: string): number | null {
+  if (!/^\d{1,3}$/.test(value)) return null
+  const n = Number(value)
+  return n <= 255 ? n : null
+}
+
+// 只解析 16-255；0-15 由 xterm 主题调色板决定实际颜色，这里看不到也不该猜。
+function ansi256ToRgb(value: string): Rgb | null {
+  const n = toByte(value)
+  if (n === null || n < 16) return null
+  if (n >= 232) {
+    const gray = 8 + (n - 232) * 10
+    return [gray, gray, gray]
+  }
+  const i = n - 16
+  return [
+    XTERM_CUBE_STEPS[Math.floor(i / 36)],
+    XTERM_CUBE_STEPS[Math.floor(i / 6) % 6],
+    XTERM_CUBE_STEPS[i % 6],
+  ]
+}
+
+function parseRgb(r: string, g: string, b: string): Rgb | null {
+  const rgb = [toByte(r), toByte(g), toByte(b)]
+  return rgb.every((v): v is number => v !== null) ? (rgb as Rgb) : null
+}
+
+function rgbToHsl([r, g, b]: Rgb): [number, number, number] {
+  const rn = r / 255
+  const gn = g / 255
+  const bn = b / 255
+  const max = Math.max(rn, gn, bn)
+  const min = Math.min(rn, gn, bn)
+  const l = (max + min) / 2
+  const d = max - min
+  if (d === 0) return [0, 0, l]
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+  const h =
+    max === rn
+      ? ((gn - bn) / d + (gn < bn ? 6 : 0)) / 6
+      : max === gn
+        ? ((bn - rn) / d + 2) / 6
+        : ((rn - gn) / d + 4) / 6
+  return [h, s, l]
+}
+
+function hslToRgb([h, s, l]: [number, number, number]): Rgb {
+  if (s === 0) {
+    const v = Math.round(l * 255)
+    return [v, v, v]
+  }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s
+  const p = 2 * l - q
+  const channel = (t: number): number => {
+    if (t < 0) t += 1
+    if (t > 1) t -= 1
+    if (t < 1 / 6) return p + (q - p) * 6 * t
+    if (t < 1 / 2) return q
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
+    return p
+  }
+  return [
+    Math.round(channel(h + 1 / 3) * 255),
+    Math.round(channel(h) * 255),
+    Math.round(channel(h - 1 / 3) * 255),
+  ]
+}
+
+// codex 的前景永远是一整套「深色主题」调色板 —— 它在 Windows 上既不发 OSC 11 查背景色
+// （codex-cli 0.144.4 实测不查，见 src-tauri/examples/codex_color_probe.rs），也不认
+// COLORFGBG，只能假定背景是深的。实测它只用这些前景：
+//   正文 #cccccc / #bbbbbb、次要 #909090、暗与分隔线 #5a5a5a #2f2f2f #1f1f1f、
+//   accent #abdfa7(浅绿) #f6e2b7(奶油)，外加一个走调色板的 38;5;6。
+//
+// 所以浅色主题要做的是「把这套深色主题翻成它的浅色孪生版」：HSL 里镜像亮度 (L → 1-L)，
+// 色相和饱和度原样保留。整个明暗阶梯被完整翻转而不是压平：
+//   · #cccccc(正文) → #333333，#1f1f1f(分隔线) → #e0e0e0 —— 该重的仍重、该轻的仍轻；
+//   · #abdfa7 → #245820、#f6e2b7 → #483409 —— 只换明暗，不换颜色。
+// 别改成「只把不可读的颜色夹到某个亮度」：那会让深色分隔线原样留成白底上的死黑粗线，
+// 且把亮度不同的 accent 全夹到同一档，颜色互相糊成一片。
+//
+// 深色主题下前景一个都不用动：codex 的假设和真实背景一致，本来就是对的。
+function mirrorLightness(rgb: Rgb): Rgb | null {
+  const [h, s, l] = rgbToHsl(rgb)
+  const mirrored = hslToRgb([h, s, 1 - l])
+  return mirrored.every((c, i) => c === rgb[i]) ? null : mirrored
+}
+
+// 浅色主题抹掉深底，深色主题抹掉浅底。codex 只画一种背景（#292929），且从不用浅底配深字，
+// 所以镜像前景不会把字弄没。
+const BG16_TO_DEFAULT: Record<ColorScheme, string[]> = {
+  light: ['40', '47', '100', '107'],
+  dark: ['47', '107'],
+}
+
+function rewriteExtColor(params: string[], scheme: ColorScheme, mirrorFg: boolean): string[] {
+  const [kind, mode, ...rest] = params
+  if (kind === '48') {
+    const unreadable =
+      mode === '5'
+        ? scheme === 'light'
+          ? isDarkAnsiColor(rest[0])
+          : isLightAnsiColor(rest[0])
+        : scheme === 'light'
+          ? isDarkRgb(rest[0], rest[1], rest[2])
+          : isLightRgb(rest[0], rest[1], rest[2])
+    return unreadable ? ['49'] : params
+  }
+  // 前景 16 色（30-37/90-97、38;5;0-15）交给 xterm 主题调色板 —— 那里已按主题挑过可读值。
+  if (!mirrorFg) return params
+  const rgb = mode === '5' ? ansi256ToRgb(rest[0]) : parseRgb(rest[0], rest[1], rest[2])
+  const mirrored = rgb && mirrorLightness(rgb)
+  return mirrored ? ['38', '2', ...mirrored.map(String)] : params
+}
+
+function readExtColor(parts: string[], i: number): { params: string[]; next: number } | null {
+  const len = parts[i + 1] === '5' ? 3 : parts[i + 1] === '2' ? 5 : 0
+  if (len === 0 || i + len > parts.length) return null
+  return { params: parts.slice(i, i + len), next: i + len }
+}
+
+function normalizeSgrSemicolon(params: string, scheme: ColorScheme, mirrorFg: boolean): string {
   const parts = params === '' ? ['0'] : params.split(';')
   const out: string[] = []
 
@@ -719,42 +845,17 @@ function normalizeLightSgrSemicolon(params: string): string {
       out.push(part)
       continue
     }
-    // Background: dark bg colors → default
-    if (part === '40' || part === '47' || part === '100' || part === '107') {
+    // 扩展色必须整段消费：逐参数匹配会误伤自己的参数（`38;2;40;…` 里的 40 被当成黑底改写）。
+    if (part === '38' || part === '48') {
+      const ext = readExtColor(parts, i)
+      if (ext) {
+        out.push(...rewriteExtColor(ext.params, scheme, mirrorFg))
+        i = ext.next - 1
+        continue
+      }
+    }
+    if (BG16_TO_DEFAULT[scheme].includes(part)) {
       out.push('49')
-      continue
-    }
-    if (part === '48' && parts[i + 1] === '5' && isDarkAnsiColor(parts[i + 2] ?? '')) {
-      out.push('49')
-      i += 2
-      continue
-    }
-    if (
-      part === '48' &&
-      parts[i + 1] === '2' &&
-      isDarkRgb(parts[i + 2] ?? '', parts[i + 3] ?? '', parts[i + 4] ?? '')
-    ) {
-      out.push('49')
-      i += 4
-      continue
-    }
-    // Foreground: light fg colors → default (they're unreadable on white)
-    if (part === '37' || part === '97') {
-      out.push('39')
-      continue
-    }
-    if (part === '38' && parts[i + 1] === '5' && isLightAnsiColor(parts[i + 2] ?? '')) {
-      out.push('39')
-      i += 2
-      continue
-    }
-    if (
-      part === '38' &&
-      parts[i + 1] === '2' &&
-      isLightRgb(parts[i + 2] ?? '', parts[i + 3] ?? '', parts[i + 4] ?? '')
-    ) {
-      out.push('39')
-      i += 4
       continue
     }
 
@@ -764,106 +865,42 @@ function normalizeLightSgrSemicolon(params: string): string {
   return out.join(';')
 }
 
-function normalizeLightSgrColon(params: string): string {
-  return params
-    .replace(/(^|;)48:5:(\d+)(?=;|$)/g, (match, sep: string, color: string) =>
-      isDarkAnsiColor(color) ? `${sep}49` : match,
-    )
-    .replace(
-      /(^|;)48:2:(\d+):(\d+):(\d+)(?=;|$)/g,
-      (match, sep: string, r: string, g: string, b: string) =>
-        isDarkRgb(r, g, b) ? `${sep}49` : match,
-    )
-    .replace(/(^|;)38:5:(\d+)(?=;|$)/g, (match, sep: string, color: string) =>
-      isLightAnsiColor(color) ? `${sep}39` : match,
-    )
-    .replace(
-      /(^|;)38:2:(\d+):(\d+):(\d+)(?=;|$)/g,
-      (match, sep: string, r: string, g: string, b: string) =>
-        isLightRgb(r, g, b) ? `${sep}39` : match,
-    )
+function normalizeSgrColon(params: string, scheme: ColorScheme, mirrorFg: boolean): string {
+  return params.replace(
+    /(^|;)(38|48):(?:5:(\d+)|2:(\d+):(\d+):(\d+))(?=;|$)/g,
+    (match, sep: string, kind: string, idx?: string, r?: string, g?: string, b?: string) => {
+      const ext = idx === undefined ? [kind, '2', r!, g!, b!] : [kind, '5', idx]
+      const rewritten = rewriteExtColor(ext, scheme, mirrorFg)
+      return rewritten === ext ? match : `${sep}${rewritten.join(':')}`
+    },
+  )
 }
 
-function normalizeLightSgr(params: string): string | null {
-  const normalized = normalizeLightSgrColon(normalizeLightSgrSemicolon(params))
-  return normalized === params ? null : normalized
-}
-
-function normalizeDarkSgrSemicolon(params: string): string {
-  const parts = params === '' ? ['0'] : params.split(';')
-  const out: string[] = []
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i] === '' ? '0' : parts[i]
-    if (part === '7') {
-      out.push(part)
-      continue
-    }
-    // Background: light bg colors → default
-    if (part === '47' || part === '107') {
-      out.push('49')
-      continue
-    }
-    if (part === '48' && parts[i + 1] === '5' && isLightAnsiColor(parts[i + 2] ?? '')) {
-      out.push('49')
-      i += 2
-      continue
-    }
-    if (
-      part === '48' &&
-      parts[i + 1] === '2' &&
-      isLightRgb(parts[i + 2] ?? '', parts[i + 3] ?? '', parts[i + 4] ?? '')
-    ) {
-      out.push('49')
-      i += 4
-      continue
-    }
-    // Foreground: dark fg colors → default (invisible on dark bg)
-    if (part === '30') {
-      out.push('39')
-      continue
-    }
-    if (part === '38' && parts[i + 1] === '5' && isDarkAnsiColor(parts[i + 2] ?? '')) {
-      out.push('39')
-      i += 2
-      continue
-    }
-    if (
-      part === '38' &&
-      parts[i + 1] === '2' &&
-      isDarkRgb(parts[i + 2] ?? '', parts[i + 3] ?? '', parts[i + 4] ?? '')
-    ) {
-      out.push('39')
-      i += 4
-      continue
-    }
-    out.push(part)
+/// 造一个 codex PTY 字节流的 SGR 归一化器。
+///
+/// `codexPaintsDarkPalette` 表示「codex 认不出真实背景，正按深色主题出色」—— 只有这时
+/// 才该镜像前景。这个前提是**平台相关**的，不能想当然全开：
+///   · Windows：实测成立（codex-cli 0.144.4 不发 OSC 11、不认 COLORFGBG，
+///     见 src-tauri/examples/codex_color_probe.rs）→ 传 true。
+///   · mac/Linux：未验证。codex 二进制里带着 `ESC]11;?`，只是 Windows 上没发；若它在
+///     这些平台能问出背景色，就会直接出浅色主题的色（深字），此时再镜像一次会把深字翻成
+///     浅字、在白底上彻底看不见 —— 比原 bug 更糟。所以默认传 false 保持原样。
+/// 想给 mac 打开前，先在 mac 上跑 codex_color_probe 确认它到底发的是哪套色。
+///
+/// 背景归一化和这个开关无关，两个平台一直都做（是历史行为）。
+export function codexSgrNormalizer(
+  scheme: ColorScheme,
+  codexPaintsDarkPalette: boolean,
+): (params: string) => string | null {
+  const mirrorFg = scheme === 'light' && codexPaintsDarkPalette
+  return (params: string) => {
+    const normalized = normalizeSgrColon(
+      normalizeSgrSemicolon(params, scheme, mirrorFg),
+      scheme,
+      mirrorFg,
+    )
+    return normalized === params ? null : normalized
   }
-  return out.join(';')
-}
-
-function normalizeDarkSgrColon(params: string): string {
-  return params
-    .replace(/(^|;)48:5:(\d+)(?=;|$)/g, (match, sep: string, color: string) =>
-      isLightAnsiColor(color) ? `${sep}49` : match,
-    )
-    .replace(
-      /(^|;)48:2:(\d+):(\d+):(\d+)(?=;|$)/g,
-      (match, sep: string, r: string, g: string, b: string) =>
-        isLightRgb(r, g, b) ? `${sep}49` : match,
-    )
-    .replace(/(^|;)38:5:(\d+)(?=;|$)/g, (match, sep: string, color: string) =>
-      isDarkAnsiColor(color) ? `${sep}39` : match,
-    )
-    .replace(
-      /(^|;)38:2:(\d+):(\d+):(\d+)(?=;|$)/g,
-      (match, sep: string, r: string, g: string, b: string) =>
-        isDarkRgb(r, g, b) ? `${sep}39` : match,
-    )
-}
-
-function normalizeDarkSgr(params: string): string | null {
-  const normalized = normalizeDarkSgrColon(normalizeDarkSgrSemicolon(params))
-  return normalized === params ? null : normalized
 }
 
 function findIncompleteCsiStart(bytes: Uint8Array): number {
@@ -1332,7 +1369,8 @@ export async function openOrFocusTui(opts: OpenTuiOptions): Promise<void> {
     const bytes = base64ToBytes(e.payload.base64)
     if (tab.agent === 'codex') {
       recentCodexOutput = (recentCodexOutput + hintDecoder.decode(bytes, { stream: true })).slice(-6000)
-      const normalizer = terminalColorScheme() === 'light' ? normalizeLightSgr : normalizeDarkSgr
+      // 只有 Windows 上确认 codex 会误用深色调色板；mac/Linux 未验证，保持原样不镜像。
+      const normalizer = codexSgrNormalizer(terminalColorScheme(), _isWindows)
       const normalized = normalizeAnsiBackground(bytes, tab.pendingAnsiBytes, normalizer)
       tab.pendingAnsiBytes = normalized.pending
       term.write(normalized.bytes, () => syncRepairCodexUserMessageColors(tab))

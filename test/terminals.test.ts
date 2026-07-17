@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { shouldCopyWindowsTerminalSelection } from '../src/terminals'
+import { codexSgrNormalizer, shouldCopyWindowsTerminalSelection } from '../src/terminals'
+
+// Windows：实测 codex 认不出背景、按深色主题出色 → 浅色主题下镜像前景。
+const normalizeLightSgr = codexSgrNormalizer('light', true)
+const normalizeDarkSgr = codexSgrNormalizer('dark', true)
+// mac/Linux：未验证 codex 用哪套调色板 → 前景一律不动。
+const normalizeLightSgrMac = codexSgrNormalizer('light', false)
+
+// 感知亮度，和 src/terminals.ts 里的权重一致。
+function luma(r: number, g: number, b: number) {
+  return r * 0.299 + g * 0.587 + b * 0.114
+}
+
+function fgRgb(sgr: string | null): [number, number, number] {
+  const m = /38;2;(\d+);(\d+);(\d+)/.exec(sgr ?? '')
+  if (!m) throw new Error(`expected a truecolor foreground, got ${sgr}`)
+  return [Number(m[1]), Number(m[2]), Number(m[3])]
+}
 
 function key(over: Partial<KeyboardEvent> = {}) {
   return {
@@ -29,5 +46,135 @@ describe('terminal keyboard handling', () => {
   it('does not intercept modified or unrelated keys', () => {
     expect(shouldCopyWindowsTerminalSelection(key({ shiftKey: true }), true, 'Win32')).toBe(false)
     expect(shouldCopyWindowsTerminalSelection(key({ key: 'v' }), true, 'Win32')).toBe(false)
+  })
+})
+
+// codex-cli 0.144.4 在 Windows 上真实吐出的整套前景色，由
+// src-tauri/examples/codex_color_probe.rs 在真 PTY 里抓下来。
+const CODEX_FG = {
+  body: '204;204;204',
+  text: '187;187;187',
+  secondary: '144;144;144',
+  dim: '90;90;90',
+  rule: '47;47;47',
+  faintRule: '31;31;31',
+  green: '171;223;167',
+  cream: '246;226;183',
+}
+
+describe('SGR foreground normalization (light theme)', () => {
+  it('mirrors codex dark-theme greys into their light-theme twins', () => {
+    expect(fgRgb(normalizeLightSgr(`38;2;${CODEX_FG.body}`))).toEqual([51, 51, 51])
+    expect(fgRgb(normalizeLightSgr(`38;2;${CODEX_FG.secondary}`))).toEqual([111, 111, 111])
+    expect(fgRgb(normalizeLightSgr(`38;2;${CODEX_FG.faintRule}`))).toEqual([224, 224, 224])
+  })
+
+  it('keeps the whole brightness ladder ordered instead of flattening it', () => {
+    // codex 的层级：正文 > 文字 > 次要 > 暗 > 分隔线。翻成浅色后顺序必须整体反过来，
+    // 即正文最深、分隔线最浅 —— 之前的写法把所有 accent 夹到同一亮度，层级就没了。
+    const order = ['body', 'text', 'secondary', 'dim', 'rule', 'faintRule'] as const
+    const lumas = order.map((k) => luma(...fgRgb(normalizeLightSgr(`38;2;${CODEX_FG[k]}`))))
+    for (let i = 1; i < lumas.length; i++) expect(lumas[i]).toBeGreaterThan(lumas[i - 1])
+  })
+
+  it('turns codex faint separators light, not stark black on white', () => {
+    // 回归：分隔线本来是「深色底上的极淡线」，只修浅色会把它原样留成白底上的死黑线。
+    const [r] = fgRgb(normalizeLightSgr(`38;2;${CODEX_FG.faintRule}`))
+    expect(r).toBeGreaterThan(200)
+    expect(luma(...fgRgb(normalizeLightSgr(`38;2;${CODEX_FG.dim}`)))).toBeGreaterThan(128)
+  })
+
+  it('keeps accent hue and saturation, only flipping lightness', () => {
+    const green = fgRgb(normalizeLightSgr(`38;2;${CODEX_FG.green}`))
+    const cream = fgRgb(normalizeLightSgr(`38;2;${CODEX_FG.cream}`))
+    // 浅绿仍是绿（G 最大），奶油仍是暖色（R 最大）——不是糊成一团灰。
+    expect(green[1]).toBeGreaterThan(green[0])
+    expect(green[1]).toBeGreaterThan(green[2])
+    expect(cream[0]).toBeGreaterThan(cream[1])
+    expect(cream[1]).toBeGreaterThan(cream[2])
+    // 两个 accent 的明暗差异要保留，不能被夹到同一档。
+    expect(luma(...green)).not.toBeCloseTo(luma(...cream), 0)
+  })
+
+  it('is an involution: mirroring twice returns the original color', () => {
+    const once = fgRgb(normalizeLightSgr(`38;2;${CODEX_FG.green}`))
+    const twice = fgRgb(normalizeLightSgr(`38;2;${once.join(';')}`))
+    for (let i = 0; i < 3; i++) expect(twice[i]).toBeCloseTo(Number(CODEX_FG.green.split(';')[i]), -0.5)
+  })
+
+  it('leaves 16-color foregrounds to the xterm theme palette', () => {
+    expect(normalizeLightSgr('37')).toBeNull()
+    expect(normalizeLightSgr('97')).toBeNull()
+    expect(normalizeLightSgr('30')).toBeNull()
+    expect(normalizeLightSgr('38;5;6')).toBeNull() // codex 真的会发这个
+    expect(normalizeLightSgr('38;5;15')).toBeNull()
+  })
+
+  it('resolves the 256-color cube through the same path', () => {
+    // 231 = 立方体里的白 (255,255,255) → 镜像成黑。
+    expect(fgRgb(normalizeLightSgr('38;5;231'))).toEqual([0, 0, 0])
+  })
+})
+
+describe('SGR foreground normalization (dark theme)', () => {
+  it('leaves every codex foreground alone — its palette already assumes a dark background', () => {
+    for (const [, rgb] of Object.entries(CODEX_FG)) {
+      expect(normalizeDarkSgr(`38;2;${rgb}`)).toBeNull()
+    }
+    expect(normalizeDarkSgr('30')).toBeNull()
+    expect(normalizeDarkSgr('38;5;0')).toBeNull()
+  })
+})
+
+describe('SGR foreground normalization (platforms other than Windows)', () => {
+  // 只有 Windows 上确认了 codex 会误用深色调色板。mac/Linux 上它可能问得出背景色、
+  // 直接出浅色主题的深色字；那时再镜像就会把深字翻成浅字、在白底上彻底看不见。
+  it('never touches foregrounds, so codex keeps whatever palette it chose', () => {
+    for (const [, rgb] of Object.entries(CODEX_FG)) {
+      expect(normalizeLightSgrMac(`38;2;${rgb}`)).toBeNull()
+    }
+    // 假如 codex 在 mac 上真的出浅色主题（深字配浅底），深字必须原样留着。
+    expect(normalizeLightSgrMac('38;2;23;23;23')).toBeNull()
+    expect(normalizeLightSgrMac('38;5;231')).toBeNull()
+  })
+
+  it('still strips dark backgrounds — that behaviour predates the mirror and stays cross-platform', () => {
+    expect(normalizeLightSgrMac('48;2;41;41;41')).toBe('49')
+    expect(normalizeLightSgrMac('40')).toBe('49')
+  })
+})
+
+describe('SGR background normalization', () => {
+  it('drops codex panel background under the light theme', () => {
+    expect(normalizeLightSgr('48;2;41;41;41')).toBe('49') // codex 唯一用到的背景
+    expect(normalizeLightSgr('40')).toBe('49')
+    expect(normalizeLightSgr('48;5;0')).toBe('49')
+  })
+
+  it('drops light backgrounds under the dark theme', () => {
+    expect(normalizeDarkSgr('107')).toBe('49')
+    expect(normalizeDarkSgr('48;2;255;255;255')).toBe('49')
+  })
+
+  it('does not let extended-color params be mistaken for their own SGR codes', () => {
+    // 回归：`38;2;40;…` 里的 40 曾被当成「黑底」改写成 49（`38;5;40` 里的 40 同理），
+    // 参数被当成独立 SGR 码，颜色被悄悄改坏。深绿 (40,100,47) 应整段当颜色处理。
+    expect(normalizeLightSgr('38;2;40;100;47')).toBe('38;2;155;215;162') // 镜像成浅绿，G 仍最大
+    expect(normalizeLightSgr('38;5;40')).not.toContain('38;5;49')
+    expect(normalizeDarkSgr('38;2;40;100;47')).toBeNull()
+    expect(normalizeDarkSgr('48;2;30;30;30')).toBeNull()
+  })
+})
+
+describe('SGR normalization plumbing', () => {
+  it('normalizes colon-form extended colors', () => {
+    expect(normalizeLightSgr('1;38:2:255:255:255;4')).toBe('1;38:2:0:0:0;4')
+    expect(normalizeLightSgr('48:5:0')).toBe('49')
+  })
+
+  it('preserves surrounding attributes and reports no-ops as null', () => {
+    expect(normalizeLightSgr('0')).toBeNull()
+    expect(normalizeLightSgr('1;3;23')).toBeNull() // codex 真的会发 3 / 23（斜体）
+    expect(normalizeLightSgr('1;38;2;255;255;255;22')).toBe('1;38;2;0;0;0;22')
   })
 })
