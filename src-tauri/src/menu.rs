@@ -48,7 +48,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let about_meta = AboutMetadataBuilder::new()
         .name(Some(pkg.name.clone()))
         .version(Some(pkg.version.to_string()))
-        .copyright(Some("MIT © wuchao".to_string()))
+        .copyright(Some("Copyright © 2026 Vibe Coding Platform".to_string()))
         .build();
     let about =
         PredefinedMenuItem::about(app, Some(&format!("About {}", pkg.name)), Some(about_meta))?;

@@ -795,8 +795,8 @@ fn start_codex_app_server(
             "method": "initialize",
             "params": {
                 "clientInfo": {
-                    "name": "cc-sessions-viewer",
-                    "title": "Claude Session Viewer",
+                    "name": "vibe-coding-platform",
+                    "title": "Vibe Coding Platform",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
                 "capabilities": {

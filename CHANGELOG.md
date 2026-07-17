@@ -12,7 +12,7 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 - Initial private release of Vibe Coding Platform.
 - Adds the Vibe project factory, technology-stack analysis, environment checks, project scaffolding, and existing-project initialization workflows.
-- Includes upstream session viewer fixes synchronized through cc-sessions-viewer v0.3.2.
+- Includes the current session-viewer core baseline through v0.3.2.
 
 ---
 
@@ -484,7 +484,7 @@ Stats accuracy — all numbers now reconcile with codeburn across every range:
 
 ### Changed
 
-- **"Check for updates" wired up to GitHub Releases** — previously a stub that always said "up to date". `api.checkUpdate()` now `fetch`es `/repos/jerrywu001/cc-sessions-viewer/releases/latest`, strips the leading `v` from `tag_name`, and compares against `app_version` with a small `compareVer` helper. 404 (no releases yet) is treated as up-to-date silently; other HTTP errors throw so the Settings modal surfaces "Update check failed". `UpdateInfo` gains an optional `htmlUrl` for a future "View release" link. The Rust `check_update` stub and unused `UpdateInfo` struct were removed.
+- **"Check for updates" wired up to GitHub Releases** — previously a stub that always said "up to date". `api.checkUpdate()` fetches the repository's `/releases/latest` endpoint, strips the leading `v` from `tag_name`, and compares against `app_version` with a small `compareVer` helper. 404 (no releases yet) is treated as up-to-date silently; other HTTP errors throw so the Settings modal surfaces "Update check failed". `UpdateInfo` gains an optional `htmlUrl` for a future "View release" link. The Rust `check_update` stub and unused `UpdateInfo` struct were removed.
 - **Sidebar project toggle is now context-aware** — re-clicking the active project while a chat is open closes the chat and returns to the session list (instead of collapsing the project to the welcome screen). A second click — now on the list view — collapses as before. Two-step toggle matches user mental model: "back, then close".
 - **`lib::agents` / `lib::stats` are now `pub`** so the `examples/test_dedup.rs` verification binary (which links against the lib crate externally) can drive the dedup pipeline directly. CI's `clippy --all-targets -- -D warnings` exercises this on every PR.
 - **Daily activity bucketing fixed** — was bucketing all of a session's cost / calls / tokens into the day of `last_modified` (file mtime), so a Mon→Fri session dumped 5 days of cost on Friday. Now bucketed per-turn by `turn.timestamp_ms`, matching codeburn exactly (verified within 1% on real data).

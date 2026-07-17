@@ -32,7 +32,7 @@ describe('renderCodexApplyPatchHtml', () => {
   it('renders file header plus diff body without patch wrapper lines', () => {
     const input = [
       '*** Begin Patch',
-      '*** Update File: /Users/wuchao/apps/claude-session-viewer/test/format.test.ts',
+      '*** Update File: /Users/example-user/apps/vibe-coding-platform/test/format.test.ts',
       '@@',
       ' it("a", () => {})',
       '+it("b", () => {})',
@@ -41,7 +41,7 @@ describe('renderCodexApplyPatchHtml', () => {
 
     const html = renderCodexApplyPatchHtml(
       input,
-      '/Users/wuchao/apps/claude-session-viewer',
+      '/Users/example-user/apps/vibe-coding-platform',
     )
 
     expect(html).toContain('test/format.test.ts')

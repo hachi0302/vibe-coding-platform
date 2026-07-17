@@ -1,4 +1,4 @@
-use claude_session_viewer_lib::project_factory::{
+use vibe_coding_platform_lib::project_factory::{
     analyze_with_agent, build_analysis_prompt, build_headless_initialization_prompt,
     check_environment, create_project, create_project_with_verification,
     existing_project_init_status, finalize_existing_project_initialization, install_command_for,
@@ -1296,7 +1296,7 @@ fn backend_external_integration_gets_matching_skill_and_rule_without_messaging()
             cache: vec![],
             messaging: vec![],
             decisions: vec![
-                claude_session_viewer_lib::project_factory::TechnologyDecision {
+                vibe_coding_platform_lib::project_factory::TechnologyDecision {
                     category: "integration".to_string(),
                     title: "第三方接口".to_string(),
                     status: "adopt".to_string(),
@@ -1456,7 +1456,7 @@ fn creates_backend_skeletons_for_supported_non_java_runtimes() {
                 cache: vec![],
                 messaging: vec![],
                 decisions: vec![
-                    claude_session_viewer_lib::project_factory::TechnologyDecision {
+                    vibe_coding_platform_lib::project_factory::TechnologyDecision {
                         category: "runtime".to_string(),
                         title: "后端运行时".to_string(),
                         status: "adopt".to_string(),

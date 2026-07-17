@@ -1151,10 +1151,10 @@ mod tests {
 
     #[test]
     fn extract_code_action_file_path() {
-        let content = "The following changes were made by the multi_replace_file_content tool to: /Users/wuchao/apps/project/src/foo.ts. If relevant";
+        let content = "The following changes were made by the multi_replace_file_content tool to: /Users/example-user/apps/project/src/foo.ts. If relevant";
         assert_eq!(
             extract_code_action_file(content),
-            Some("/Users/wuchao/apps/project/src/foo.ts".to_string())
+            Some("/Users/example-user/apps/project/src/foo.ts".to_string())
         );
     }
 

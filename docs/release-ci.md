@@ -84,8 +84,8 @@ publish job (ubuntu-latest)
     generate_release_notes: true        # ← 关键
     body: |                              # ← 可在自动内容之前拼一段静态说明
       ## 下载
-      - macOS: `cc-sessions-viewer_${{ github.ref_name }}_universal.dmg`
-      - Windows: `cc-sessions-viewer_${{ github.ref_name }}_x64-setup.exe`
+      - macOS: `vibe-coding-platform_${{ github.ref_name }}_universal.dmg`
+      - Windows: `vibe-coding-platform_${{ github.ref_name }}_x64-setup.exe`
     files: dist/**/*
 ```
 
@@ -329,7 +329,7 @@ jobs:
   "include-v-in-tag": true,
   "packages": {
     ".": {
-      "package-name": "cc-sessions-viewer",
+      "package-name": "vibe-coding-platform",
       "extra-files": [
         "src-tauri/Cargo.toml",
         "src-tauri/tauri.conf.json"

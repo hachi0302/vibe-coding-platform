@@ -143,12 +143,12 @@ macOS 上 `.app` 是 **ad-hoc 签名、未公证**，首次打开可能弹出「
 - Finder 里右键应用 → **打开** → 弹窗里再确认（一次即可）。
 - 或在终端清掉隔离属性：
   ```bash
-  sudo xattr -dr com.apple.quarantine "/Applications/Sessions Viewer.app"
+  sudo xattr -dr com.apple.quarantine "/Applications/Vibe Coding Platform.app"
   ```
 
 Linux 上 `.AppImage` 是便携格式 —— `chmod +x` 后直接运行。`.deb` 安装：
 ```bash
-sudo apt install ./cc-sessions-viewer_<ver>_amd64.deb
+sudo apt install ./vibe-coding-platform_<ver>_amd64.deb
 ```
 
 ## 开发
@@ -167,16 +167,6 @@ npm run tauri build    # 打包
 
 欢迎 PR。请使用 [Conventional Commits](https://www.conventionalcommits.org/)（`feat:` / `fix:` / `docs:` ...）。
 
-## Star History
-
-<a href="https://www.star-history.com/?type=date&repos=jerrywu001/cc-sessions-viewer">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=jerrywu001/cc-sessions-viewer&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=jerrywu001/cc-sessions-viewer&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=jerrywu001/cc-sessions-viewer&type=date&legend=top-left" />
- </picture>
-</a>
-
 ## 赞助支持
 维护一个开源项目需要投入大量时间与精力。你的赞助将直接用于：
 
@@ -186,25 +176,17 @@ npm run tauri build    # 打包
 
 - 📚 完善文档、补充更多示例
 
-### 赞助方式：
-
-- GitHub Sponsors
+### 支付宝 / 微信
   
-[GitHub Sponsors](https://github.com/sponsors/jerrywu001)（推荐 · 零手续费）
-
-- 支付宝 / 微信
-  
-<table style="display: flex; width: 500px;">
+<table>
   <tr>
-    <td style="margin-right: 16px;">
-      <img style="width: 150px;" src="https://www.js-bridge.com/alipay.jpg" />
+    <td align="center">
+      <img width="190" src="docs/assets/alipay-qr.jpg" alt="支付宝收款码" />
+      <br />支付宝
     </td>
-    <td style="margin-right: 16px;">
-      <img style="width: 150px;" src="https://www.js-bridge.com/wechat.jpg" />
+    <td align="center">
+      <img width="190" src="docs/assets/wechat-pay-qr.jpg" alt="微信收款码" />
+      <br />微信支付
     </td>
   </tr>
 </table>
-
-## License
-
-[MIT](LICENSE) © jerrywu001 · [@jerrywu185](https://x.com/jerrywu185)

@@ -2,7 +2,7 @@
 // (`https://models.dev/api.json`，开源模型目录，sst 维护、opencode 同源)：
 //
 //   - 启动期 `init()` 后台线程拉一份，落盘到
-//     `~/Library/Caches/cc-sessions-viewer/models-dev-pricing.json`（24h TTL）。
+//     `~/Library/Caches/vibe-coding-platform/models-dev-pricing.json`（24h TTL）。
 //   - `lookup()` 只查这一份内存表 —— 没拉到 / 没命中就返回 None（成本按 $0 计）。
 //   - 前端通过 `pricing_status` Tauri 命令读 `status()`，决定显示
 //     正常 / loading / error placeholder。
@@ -504,11 +504,11 @@ fn set_last_error(err: Option<String>) {
     }
 }
 
-/// 磁盘缓存路径：`<cache_dir>/cc-sessions-viewer/models-dev-pricing.json`。
+/// 磁盘缓存路径：`<cache_dir>/vibe-coding-platform/models-dev-pricing.json`。
 /// macOS: `~/Library/Caches/...`；Linux: `~/.cache/...`；Windows: `%LOCALAPPDATA%\...`。
 fn cache_path() -> Option<std::path::PathBuf> {
     let base = dirs::cache_dir()?;
-    Some(base.join("cc-sessions-viewer").join(CACHE_FILE_NAME))
+    Some(base.join("vibe-coding-platform").join(CACHE_FILE_NAME))
 }
 
 /// 从磁盘读 cache。返回 `(is_fresh, table)`；过期但能解出的 table 也返回（启动期兜底）。

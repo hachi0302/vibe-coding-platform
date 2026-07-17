@@ -24,8 +24,8 @@ const REAL = `## Context Usage
 
 | Type | Path | Tokens |
 |------|------|--------|
-| User | /Users/wuchao/.claude/CLAUDE.md | 372 |
-| User | /Users/wuchao/.claude/RTK.md | 369 |
+| User | /Users/example-user/.claude/CLAUDE.md | 372 |
+| User | /Users/example-user/.claude/RTK.md | 369 |
 
 ### Skills
 
@@ -75,7 +75,7 @@ describe('parseContextUsage', () => {
     const mem = u.details[0]
     expect(mem.columns).toEqual(['Type', 'Path', 'Tokens'])
     expect(mem.rows).toHaveLength(2)
-    expect(mem.rows[0]).toEqual(['User', '/Users/wuchao/.claude/CLAUDE.md', '372'])
+    expect(mem.rows[0]).toEqual(['User', '/Users/example-user/.claude/CLAUDE.md', '372'])
     expect(mem.count).toBe(2)
   })
 

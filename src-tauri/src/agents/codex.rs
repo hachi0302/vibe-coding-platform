@@ -341,7 +341,7 @@ fn query_codex_app_thread_list() -> CodexAppListSnapshot {
                     "method": "initialize",
                     "params": {
                         "clientInfo": {
-                            "name": "cc-sessions-viewer",
+                            "name": "vibe-coding-platform",
                             "version": env!("CARGO_PKG_VERSION"),
                         },
                         "capabilities": { "experimentalApi": true },
@@ -2170,13 +2170,13 @@ mod tests {
 
     #[test]
     fn codex_files_mentioned_block_extracts_files_and_request() {
-        let text = "\n# Files mentioned by the user:\n\n## devtools_options.yaml: /Users/wuchao/develop/flutter/sales-app/devtools_options.yaml\n\n## My request for Codex:\nhi\n";
+        let text = "\n# Files mentioned by the user:\n\n## devtools_options.yaml: /Users/example-user/develop/flutter/sales-app/devtools_options.yaml\n\n## My request for Codex:\nhi\n";
         let (files, body) = extract_codex_files(text);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].kind, "file");
         assert_eq!(
             files[0].file_path.as_deref(),
-            Some("/Users/wuchao/develop/flutter/sales-app/devtools_options.yaml")
+            Some("/Users/example-user/develop/flutter/sales-app/devtools_options.yaml")
         );
         assert_eq!(body, "hi");
     }

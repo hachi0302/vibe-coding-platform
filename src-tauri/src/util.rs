@@ -1158,7 +1158,7 @@ mod path_lifting_tests {
     #[test]
     fn test_lift_paths_from_text() {
         let text =
-            "/var/folders/some_image.png\n\nSome normal message\n/Users/jerry/document.pdf\nDone.";
+            "/var/folders/some_image.png\n\nSome normal message\n/Users/example-user/document.pdf\nDone.";
         let (blocks, remaining) = lift_paths_from_text(text);
         assert_eq!(blocks.len(), 2);
         // 文件不存在时一律 file chip（不渲染破碎图片）
@@ -1170,7 +1170,7 @@ mod path_lifting_tests {
         assert_eq!(blocks[1].kind, "file");
         assert_eq!(
             blocks[1].file_path.as_deref().unwrap(),
-            "/Users/jerry/document.pdf"
+            "/Users/example-user/document.pdf"
         );
         assert_eq!(remaining, "Some normal message\n\nDone.");
     }

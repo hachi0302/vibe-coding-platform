@@ -45,7 +45,7 @@ fn data_dir() -> Result<PathBuf, String> {
     let base = dirs::data_local_dir()
         .or_else(dirs::data_dir)
         .ok_or_else(|| "Cannot locate local data directory".to_string())?;
-    Ok(base.join("cc-sessions-viewer"))
+    Ok(base.join("vibe-coding-platform"))
 }
 
 pub fn signal_file_path() -> Result<PathBuf, String> {

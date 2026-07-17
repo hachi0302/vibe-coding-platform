@@ -143,12 +143,12 @@ On macOS the `.app` is **ad-hoc signed but not notarized**, so first launch may 
 - Right-click the app in Finder → **Open** → confirm in the dialog (one-time).
 - Or strip the quarantine attribute in Terminal:
   ```bash
-  sudo xattr -dr com.apple.quarantine "/Applications/Sessions Viewer.app"
+  sudo xattr -dr com.apple.quarantine "/Applications/Vibe Coding Platform.app"
   ```
 
 On Linux the `.AppImage` is portable — `chmod +x` and run. The `.deb` installs with:
 ```bash
-sudo apt install ./cc-sessions-viewer_<ver>_amd64.deb
+sudo apt install ./vibe-coding-platform_<ver>_amd64.deb
 ```
 
 ## Development
@@ -167,17 +167,7 @@ Prereqs: Node 20+, Rust stable. See [`CLAUDE.md`](CLAUDE.md) for architecture no
 
 PRs welcome. Please use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, ...).
 
-## Star History
-
-<a href="https://www.star-history.com/?type=date&repos=jerrywu001/cc-sessions-viewer">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=jerrywu001/cc-sessions-viewer&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=jerrywu001/cc-sessions-viewer&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=jerrywu001/cc-sessions-viewer&type=date&legend=top-left" />
- </picture>
-</a>
-
-## Sponsorship Support
+## Support the Project
 Maintaining an open-source project requires significant time and resources. Your sponsorship will directly support:
 
 - 🛠️ Continuous development and updates
@@ -186,27 +176,17 @@ Maintaining an open-source project requires significant time and resources. Your
 
 - 📚 Documentation improvements and expanded examples
 
-### Ways to contribute:
-
-- GitHub Sponsors
+### Alipay / WeChat Pay
   
-[GitHub Sponsors](https://github.com/sponsors/jerrywu001) (Recommended · Zero fees)
-
-- Alipay/Wechat
-  
-<table style="display: flex; width: 500px;">
+<table>
   <tr>
-    <td style="margin-right: 16px;">
-      <img style="width: 150px;" src="https://www.js-bridge.com/alipay.jpg" />
+    <td align="center">
+      <img width="190" src="docs/assets/alipay-qr.jpg" alt="Alipay QR code" />
+      <br />Alipay
     </td>
-    <td style="margin-right: 16px;">
-      <img style="width: 150px;" src="https://www.js-bridge.com/wechat.jpg" />
+    <td align="center">
+      <img width="190" src="docs/assets/wechat-pay-qr.jpg" alt="WeChat Pay QR code" />
+      <br />WeChat Pay
     </td>
   </tr>
 </table>
-
-## License
-
-[MIT](LICENSE) © jerrywu001 · [@jerrywu185](https://x.com/jerrywu185)
-
-> Friend link: [linux.do](https://linux.do/)

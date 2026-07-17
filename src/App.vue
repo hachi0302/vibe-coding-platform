@@ -3325,7 +3325,7 @@ async function openGitChangesTab() {
 }
 
 // 顶栏右上角的仓库入口
-const REPO_URL = 'https://github.com/jerrywu001/cc-sessions-viewer'
+const REPO_URL = 'https://github.com/wangaixin0302-hachi/vibe-coding-platform'
 function openRepo() {
   api.openUrl(REPO_URL).catch((e) => notify(`${e}`, true))
 }

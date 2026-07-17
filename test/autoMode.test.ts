@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { isAutoModeConfirmed, rememberAutoModeConfirmed } from '../src/autoMode'
 
-const CWD_A = '/Users/wuchao/develop/flutter/sales-app'
-const CWD_B = '/Users/wuchao/apps/claude-session-viewer'
+const CWD_A = '/Users/example-user/develop/flutter/sales-app'
+const CWD_B = '/Users/example-user/apps/vibe-coding-platform'
 
 afterEach(() => {
   localStorage.clear()

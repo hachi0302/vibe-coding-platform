@@ -1036,7 +1036,7 @@ fn resolve_bin(name: &str) -> Result<PathBuf, String> {
 #[cfg(target_os = "macos")]
 fn create_terminal_script(tab_name: &str, shell_cmd: &str) -> Result<String, String> {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join("cc-sessions-viewer");
+    let dir = std::env::temp_dir().join("vibe-coding-platform");
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create temp dir: {e}"))?;
     let path = dir.join(format!("resume-{}.command", std::process::id()));
     let content = format!(
@@ -1790,7 +1790,7 @@ fn save_temp_image(base64: String, media_type: String) -> Result<String, String>
     } else {
         "jpg"
     };
-    let dir = std::env::temp_dir().join("cc-sessions-viewer-images");
+    let dir = std::env::temp_dir().join("vibe-coding-platform-images");
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
     let name = format!(
         "chat-img-{}.{ext}",

@@ -1,6 +1,6 @@
 // 直接调用 lib 函数 verify 真实 Claude JSONL 的 dedup 效果
-use claude_session_viewer_lib::agents;
-use claude_session_viewer_lib::stats::aggregate::{Aggregator, SessionFeed};
+use vibe_coding_platform_lib::agents;
+use vibe_coding_platform_lib::stats::aggregate::{Aggregator, SessionFeed};
 
 fn main() {
     let path = std::env::args().nth(1).expect("path arg");

@@ -201,11 +201,11 @@ describe('renderText', () => {
 
   it('renders absolute local markdown links as clickable file links', () => {
     const html = renderText(
-      'See [src/views/ChatView.vue](/Users/wuchao/apps/claude-session-viewer/src/views/ChatView.vue:97).',
+      'See [src/views/ChatView.vue](/Users/example-user/apps/vibe-coding-platform/src/views/ChatView.vue:97).',
     )
     expect(html).toContain('class="local-file-link"')
     expect(html).toContain(
-      'data-local-target="/Users/wuchao/apps/claude-session-viewer/src/views/ChatView.vue:97"',
+      'data-local-target="/Users/example-user/apps/vibe-coding-platform/src/views/ChatView.vue:97"',
     )
     expect(html).toContain('>src/views/ChatView.vue<')
   })

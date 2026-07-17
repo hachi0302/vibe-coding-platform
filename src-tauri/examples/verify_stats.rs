@@ -7,9 +7,9 @@
 // 用于和 codeburn export 的对账。
 
 use chrono::{Datelike, Duration as CDuration, Local, Months, TimeZone};
-use claude_session_viewer_lib::agents;
-use claude_session_viewer_lib::stats::aggregate::{Aggregator, SessionFeed};
-use claude_session_viewer_lib::stats::pricing;
+use vibe_coding_platform_lib::agents;
+use vibe_coding_platform_lib::stats::aggregate::{Aggregator, SessionFeed};
+use vibe_coding_platform_lib::stats::pricing;
 
 fn parse_range(range: &str) -> (Option<u64>, Option<u64>) {
     let now = Local::now();

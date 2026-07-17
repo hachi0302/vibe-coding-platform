@@ -15,9 +15,9 @@
 
 ## 正文
 
-![Claude Session Viewer 演示](screenshots/session.gif)
+![Vibe Coding Platform 演示](screenshots/project-factory-create.png)
 
-各位，安利个我自己天天在用、也是我自己写的小工具：Claude Session Viewer。开源免费，Win / Mac / Linux 都有，原生 Tauri 写的，不是 Electron 套壳，所以开起来很快、也不吃内存。
+Vibe Coding Platform 是一个跨平台桌面开发工作台，保留会话查看能力，并新增项目选型、初始化和项目工厂工作流。原生 Tauri 构建，不依赖 Electron 运行时。
 
 起因挺简单的。我同时在用 Claude Code、Codex、Gemini CLI，跑着跑着就烦：想回头看某次会话到底改了啥、当时怎么想的，特别费劲。Claude 的记录在 `~/.claude/projects` 底下一堆 JSONL，Codex 和 Gemini 又各存各的、格式还不一样。要么在终端里 `--resume` 一个个碰运气，要么自己写脚本扒。忍了一阵，干脆做了这个。
 
@@ -79,8 +79,8 @@
 
 ### 下载 & 仓库
 
-- 仓库在这：https://github.com/jerrywu001/cc-sessions-viewer 觉得有用的话点个 star，对我真的是很大的鼓励
-- 安装包：[Releases](https://github.com/jerrywu001/cc-sessions-viewer/releases)
+- 仓库：https://github.com/wangaixin0302-hachi/vibe-coding-platform
+- 安装包：[Releases](https://github.com/wangaixin0302-hachi/vibe-coding-platform/releases)
   - macOS（M 系 + Intel）：`.dmg`
   - Windows x64：`.exe` / `.msi`
   - Linux x86_64：`.deb` / `.AppImage`
