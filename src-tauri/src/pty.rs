@@ -205,6 +205,7 @@ fn build_interactive_shell(cwd: &str, color_scheme: PtyColorScheme) -> CommandBu
     cmd.arg("-Command");
     // shell_init = 静默写一份 PATH 诊断快照到 %TEMP%\sv-pathdiag.txt + 刷新 PATH。
     cmd.arg(crate::agent_command::powershell_shell_init());
+    cmd
 }
 
 /// 拉起 PTY 跑 OS 对应的 shell 调用（详见 [`build_shell_command`]）。
