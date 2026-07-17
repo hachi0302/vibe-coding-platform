@@ -114,7 +114,7 @@ pub fn read_requirement_materials(path: &str) -> Result<RequirementMaterialBundl
     } else {
         vec![selected.clone()]
     };
-    paths.sort_by(|left, right| relative_display(left, &root).cmp(&relative_display(right, &root)));
+    paths.sort_by_key(|path| relative_display(path, &root));
 
     let mut warnings = Vec::new();
     if paths.len() > MAX_FILES {

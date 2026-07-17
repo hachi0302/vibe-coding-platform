@@ -652,7 +652,7 @@ fn validate_project_rule_evidence(root: &Path, layers: ProjectLayers) -> Result<
                         let components = fact.relative.split('/').collect::<Vec<_>>();
                         components.len() > 3
                             && components[0] != "src"
-                            && components.iter().any(|component| *component == "src")
+                            && components.contains(&"src")
                     },
                     &mut errors,
                 );

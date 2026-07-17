@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Value};
@@ -408,8 +408,8 @@ fn parse_analysis(provider: &str, text: &str) -> Result<AgentAnalysisResult, Str
 
 fn run_codex(
     prompt: &str,
-    schema_path: &PathBuf,
-    output_path: &PathBuf,
+    schema_path: &Path,
+    output_path: &Path,
 ) -> Result<AgentAnalysisResult, String> {
     let output = Command::new("codex")
         .args([
