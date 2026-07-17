@@ -14,7 +14,7 @@ import { appVersion, checkUpdate, openUrl, type UpdateInfo } from './api'
 // 没拿到具体 release 的 html_url 时的兜底地址。和 App.vue 的 REPO_URL 同源；
 // /releases/latest 永远会重定向到当前最新 release 页面，等价于"先点 Latest"。
 const RELEASES_LATEST_PAGE =
-  'https://github.com/wangaixin0302-hachi/vibe-coding-platform/releases/latest'
+  'https://github.com/HACHI0302/vibe-coding-platform/releases/latest'
 
 const CACHE_KEY = 'updateCheck:v1'
 const TTL_MS = 24 * 60 * 60 * 1000 // 一天 —— GitHub 未授权 API 是 60 次/小时/IP，足够安全

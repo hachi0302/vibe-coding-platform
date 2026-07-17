@@ -12,7 +12,10 @@
     "test:coverage": "vitest run --coverage",
     "tauri": "tauri",
     "prepare": "husky",
-    "release": "bumpp package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml --commit \"release: v%s\" --tag \"v%s\" --push"
+    "release": "bumpp --git-check package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml --commit \"release: v%s\" --tag \"v%s\" --push",
+    "release:patch": "bumpp --release patch --yes --git-check package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml --commit \"release: v%s\" --tag \"v%s\" --push",
+    "release:minor": "bumpp --release minor --yes --git-check package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml --commit \"release: v%s\" --tag \"v%s\" --push",
+    "release:major": "bumpp --release major --yes --git-check package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml --commit \"release: v%s\" --tag \"v%s\" --push"
   },
   "changelogithub": {
     "types": {

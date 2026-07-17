@@ -194,7 +194,7 @@ describe('checkUpdate', () => {
     vi.stubGlobal('fetch', vi.fn(impl))
   }
 
-  function releaseJson(version: string, htmlUrl = `https://github.com/wangaixin0302-hachi/vibe-coding-platform/releases/tag/v${version}`) {
+  function releaseJson(version: string, htmlUrl = `https://github.com/HACHI0302/vibe-coding-platform/releases/tag/v${version}`) {
     return { tag_name: `v${version}`, html_url: htmlUrl }
   }
 
@@ -214,7 +214,7 @@ describe('checkUpdate', () => {
       current: '0.1.1',
       latest: '0.2.0',
       hasUpdate: true,
-      htmlUrl: 'https://github.com/wangaixin0302-hachi/vibe-coding-platform/releases/tag/v0.2.0',
+      htmlUrl: 'https://github.com/HACHI0302/vibe-coding-platform/releases/tag/v0.2.0',
     })
   })
 

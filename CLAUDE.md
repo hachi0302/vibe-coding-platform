@@ -22,7 +22,16 @@ npm run build            # vue-tsc --noEmit + vite build
 npm test                 # vitest watch mode
 npm run test:run         # vitest single run (CI)
 npm run test:coverage    # vitest single run + v8 coverage report
+npm run release:patch    # existing behavior fix: bump x.y.Z, commit, tag and push
+npm run release:minor    # approved new feature: bump x.Y.0, commit, tag and push
+npm run release:major    # approved breaking/stable release: bump X.0.0, commit, tag and push
 ```
+
+## Release version rule
+
+- Existing behavior fixes or adjustments use a patch release by default (for example, `1.0.0` to `1.0.1`).
+- Any new user-facing feature, regardless of size, requires asking the user whether this release should use `patch`, `minor`, or `major` before changing the version or publishing.
+- `release:*` commands require a clean working tree, update `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` together, then push a `vX.Y.Z` tag. GitHub Actions builds and publishes the platform installers from that tag.
 
 There is no linter wired up — `npm run build` (which runs `vue-tsc --noEmit`
 first) is the typecheck step.
