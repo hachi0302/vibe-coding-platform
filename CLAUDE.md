@@ -29,7 +29,8 @@ npm run release:major    # approved breaking/stable release: bump X.0.0, commit,
 
 ## Release version rule
 
-- Existing behavior fixes or adjustments use a patch release by default (for example, `1.0.0` to `1.0.1`).
+- During private testing, keep versions in the `0.x` line. The first externally stable release is `1.0.0`.
+- After `1.0.0`, existing behavior fixes or adjustments use a patch release by default (for example, `1.0.0` to `1.0.1`).
 - Any new user-facing feature, regardless of size, requires asking the user whether this release should use `patch`, `minor`, or `major` before changing the version or publishing.
 - `release:*` commands require a clean working tree, update `package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` together, then push a `vX.Y.Z` tag. GitHub Actions builds and publishes the platform installers from that tag.
 
