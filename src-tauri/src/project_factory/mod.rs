@@ -5,6 +5,7 @@ mod env;
 mod existing;
 mod initialization;
 mod install;
+mod inventory;
 mod materials;
 mod path_guard;
 mod scaffold;
@@ -20,6 +21,7 @@ pub use initialization::{
     build_headless_initialization_prompt, initialize_existing_project_with_agent_progress,
 };
 pub use install::{install_command_for, install_tool};
+pub use inventory::{content_sha256, create_filtered_workspace, inspect_project};
 pub use materials::read_requirement_materials;
 pub use path_guard::{preview_target_path, validate_target_dir};
 pub use scaffold::{
@@ -29,7 +31,8 @@ pub use types::{
     AgentAnalysisProgress, AgentAnalysisResult, AnalyzeProjectRequest, ClarificationAnswer,
     ClarifyingOption, ClarifyingQuestion, CreateProjectRequest, CreateProjectResult, EnvCheckItem,
     ExistingProjectInitPreparation, ExistingProjectInitResult, ExistingProjectInitStatus,
-    ExistingProjectInitializationProgress, ProjectProfilePayload, ProjectVerificationResult,
-    RecognizedConstraint, RequirementMaterialBundle, RequirementMaterialFile,
+    ExistingProjectInitializationProgress, InventoryFile, ProjectCommand, ProjectInventory,
+    ProjectModule, ProjectProfilePayload, ProjectVerificationResult, RecognizedConstraint,
+    RequirementMaterialBundle, RequirementMaterialFile, SensitiveFinding,
     StackRecommendationPayload, TechnologyDecision,
 };

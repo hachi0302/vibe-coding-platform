@@ -185,6 +185,55 @@ pub struct CreateProjectResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectInventory {
+    pub schema_version: u32,
+    pub project_name: String,
+    pub layers: super::docs::ProjectLayers,
+    pub modules: Vec<ProjectModule>,
+    pub source_roots: Vec<String>,
+    pub files: Vec<InventoryFile>,
+    pub commands: Vec<ProjectCommand>,
+    pub risk_keys: Vec<SensitiveFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectModule {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub manifests: Vec<String>,
+    pub source_roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InventoryFile {
+    pub path: String,
+    pub kind: String,
+    pub size: u64,
+    pub sha256: String,
+    pub module: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCommand {
+    pub name: String,
+    pub command: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SensitiveFinding {
+    pub path: String,
+    pub key: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExistingProjectInitResult {
     pub project_path: String,
     pub layers: super::docs::ProjectLayers,

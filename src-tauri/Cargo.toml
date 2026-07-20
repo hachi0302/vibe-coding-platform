@@ -23,6 +23,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2.3.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 # 仅开发期用：MCP Bridge 让 AI 经 WebSocket 看/控窗口。
 # optional = true + feature "dev-mcp" 保证 release 不链接，
 # 同时 rust-analyzer 能正常解析（dev-dependencies 做不到）。
