@@ -5,6 +5,7 @@ mod docs;
 mod env;
 mod existing;
 mod initialization;
+mod initialization_state;
 mod install;
 mod inventory;
 mod materials;
@@ -24,6 +25,11 @@ pub use existing::{
 pub use initialization::{
     build_headless_initialization_prompt, initialize_existing_project_with_agent_progress,
 };
+pub use initialization_state::{
+    install_managed_entries, install_planned_artifacts, load_initialization_state,
+    load_ownership_manifest, save_initialization_state, save_ownership_manifest,
+    share_agent_assets, state_directory, verify_ownership_manifest,
+};
 pub use install::{install_command_for, install_tool};
 pub use inventory::{content_sha256, create_filtered_workspace, inspect_project};
 pub use materials::read_requirement_materials;
@@ -32,12 +38,14 @@ pub use scaffold::{
     create_project, create_project_with_verification, spring_initializr_dependencies,
 };
 pub use types::{
-    AgentAnalysisProgress, AgentAnalysisResult, AnalyzeProjectRequest, ArtifactKind, ArtifactPlan,
-    ArtifactPlanItem, ArtifactTotals, ClarificationAnswer, ClarifyingOption, ClarifyingQuestion,
-    CoverageExclusion, CreateProjectRequest, CreateProjectResult, EnvCheckItem, EvidenceReference,
-    ExistingProjectInitPreparation, ExistingProjectInitResult, ExistingProjectInitStatus,
-    ExistingProjectInitializationProgress, InventoryFile, ProjectCommand, ProjectInventory,
-    ProjectModule, ProjectProfilePayload, ProjectVerificationResult, RecognizedConstraint,
-    RequirementMaterialBundle, RequirementMaterialFile, SensitiveFinding,
+    AgentAnalysisProgress, AgentAnalysisResult, AgentAssetMode, AnalyzeProjectRequest,
+    ArtifactKind, ArtifactPlan, ArtifactPlanItem, ArtifactTotals, ClarificationAnswer,
+    ClarifyingOption, ClarifyingQuestion, CoverageExclusion, CreateProjectRequest,
+    CreateProjectResult, EnvCheckItem, EvidenceReference, ExistingProjectInitPreparation,
+    ExistingProjectInitResult, ExistingProjectInitStatus, ExistingProjectInitializationProgress,
+    InitializationCheckpoint, InitializationRunState, InitializationState, InventoryFile,
+    ManagedAgentAsset, ManagedEntryOwnership, OwnedArtifact, OwnershipManifest, ProjectCommand,
+    ProjectInventory, ProjectModule, ProjectProfilePayload, ProjectVerificationResult,
+    RecognizedConstraint, RequirementMaterialBundle, RequirementMaterialFile, SensitiveFinding,
     StackRecommendationPayload, TechnologyDecision, ValidationIssue,
 };

@@ -301,6 +301,143 @@ pub struct ArtifactTotals {
     pub total: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InitializationRunState {
+    #[default]
+    Preflight,
+    SnapshotReady,
+    PlanReady,
+    DocumentsReady,
+    RulesReady,
+    SkillsReady,
+    Installing,
+    Verifying,
+    Completed,
+    Failed,
+    Interrupted,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializationCheckpoint {
+    pub state: InitializationRunState,
+    #[serde(default)]
+    pub artifact_totals: ArtifactTotals,
+    pub completed_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializationState {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub state: InitializationRunState,
+    #[serde(default)]
+    pub workspace_path: String,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default)]
+    pub process_id: Option<u32>,
+    #[serde(default)]
+    pub inventory_sha256: Option<String>,
+    #[serde(default)]
+    pub plan_sha256: Option<String>,
+    #[serde(default)]
+    pub artifact_totals: ArtifactTotals,
+    #[serde(default)]
+    pub checkpoints: Vec<InitializationCheckpoint>,
+    #[serde(default)]
+    pub issues: Vec<ValidationIssue>,
+    #[serde(default)]
+    pub conflicts: Vec<ValidationIssue>,
+    #[serde(default)]
+    pub warnings: Vec<ValidationIssue>,
+    #[serde(default)]
+    pub started_at_unix_ms: u64,
+    #[serde(default)]
+    pub updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnedArtifact {
+    pub path: String,
+    pub sha256: String,
+    pub kind: ArtifactKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedEntryOwnership {
+    pub path: String,
+    pub block_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedAgentAsset {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentAssetMode {
+    RelativeSymlink,
+    ManagedCopy,
+    Preserved,
+    Mixed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnershipManifest {
+    pub schema_version: u32,
+    pub platform_version: String,
+    pub run_id: String,
+    pub state: InitializationRunState,
+    #[serde(default)]
+    pub plan_sha256: String,
+    #[serde(default)]
+    pub artifact_totals: ArtifactTotals,
+    #[serde(default)]
+    pub artifacts: Vec<OwnedArtifact>,
+    #[serde(default)]
+    pub managed_entries: Vec<ManagedEntryOwnership>,
+    #[serde(default)]
+    pub agent_assets: Vec<ManagedAgentAsset>,
+    #[serde(default)]
+    pub agent_asset_mode: Option<AgentAssetMode>,
+    #[serde(default)]
+    pub conflicts: Vec<ValidationIssue>,
+    #[serde(default)]
+    pub diagnostics: Vec<ValidationIssue>,
+    #[serde(default)]
+    pub installed_at_unix_ms: u64,
+}
+
+impl Default for OwnershipManifest {
+    fn default() -> Self {
+        Self {
+            schema_version: 4,
+            platform_version: env!("CARGO_PKG_VERSION").to_string(),
+            run_id: String::new(),
+            state: InitializationRunState::Preflight,
+            plan_sha256: String::new(),
+            artifact_totals: ArtifactTotals::default(),
+            artifacts: Vec::new(),
+            managed_entries: Vec::new(),
+            agent_assets: Vec::new(),
+            agent_asset_mode: None,
+            conflicts: Vec::new(),
+            diagnostics: Vec::new(),
+            installed_at_unix_ms: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExistingProjectInitResult {
