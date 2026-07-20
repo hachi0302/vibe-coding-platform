@@ -216,6 +216,7 @@ const initializationProgressMinimized = ref(false)
 let initializationElapsedTimer = 0
 let initializationCompleteTimer = 0
 let initializationProgressUnlisten: UnlistenFn | null = null
+let initializationInvocationToken = 0
 
 function setInitializationProgress(
   project: ProjectInfo,
@@ -316,7 +317,10 @@ function updateProjectFactoryTask(task: BackgroundTaskSummary) {
   projectFactoryTask.value = task
 }
 
-function applyInitializationProgress(progress: ExistingProjectInitializationProgress): boolean {
+function applyInitializationProgress(
+  progress: ExistingProjectInitializationProgress,
+  allowSameSequencePhaseChange = false,
+): boolean {
   const current = initializationProgress.value
   if (!current || current.projectPath !== progress.projectPath) return false
   const allowed: ProjectInitializationPhase[] = [
@@ -339,7 +343,11 @@ function applyInitializationProgress(progress: ExistingProjectInitializationProg
     && current.sequence !== undefined
     && (
       progress.sequence < current.sequence
-      || (progress.sequence === current.sequence && progress.phase !== current.phase)
+      || (
+        progress.sequence === current.sequence
+        && progress.phase !== current.phase
+        && !allowSameSequencePhaseChange
+      )
     )
   ) return false
   let nextProgress = progress
@@ -948,8 +956,11 @@ async function initializeProject(project: ProjectInfo) {
     notify(agentGuardMessage ?? '当前 Agent 不支持项目初始化。', true)
     return
   }
+  const invocationToken = ++initializationInvocationToken
+  const isCurrentInvocation = () => invocationToken === initializationInvocationToken
   try {
     const status = await existingProjectInitStatus(project.displayPath)
+    if (!isCurrentInvocation()) return
     const action = initializationActionForStatus(status)
     if (action === 'complete') {
       notify('该项目已完成平台初始化，无需重复执行。')
@@ -974,8 +985,26 @@ async function initializeProject(project: ProjectInfo) {
         path: project.displayPath,
       }),
     )
+    if (!isCurrentInvocation()) return
     const resultProgress = initializationProgressFromResult(result)
     if (isSuccessfulInitializationResult(result)) {
+      if (!result.artifactTotals) {
+        let contractDetail = '初始化完成结果缺少 artifactTotals，无法确认产物数量。'
+        try {
+          initializationCompletionDetail(result.artifactTotals)
+        } catch (error) {
+          contractDetail = error instanceof Error ? error.message : String(error)
+        }
+        const applied = applyInitializationProgress({
+          ...resultProgress,
+          projectPath: project.displayPath,
+          phase: 'failed',
+          detail: contractDetail,
+          recoverable: true,
+        }, true)
+        if (applied) notify(contractDetail, true)
+        return
+      }
       const completionDetail = initializationCompletionDetail(result.artifactTotals)
       const applied = applyInitializationProgress({
         ...resultProgress,
@@ -983,7 +1012,7 @@ async function initializeProject(project: ProjectInfo) {
         phase: 'complete',
         percent: 100,
         detail: completionDetail,
-      })
+      }, true)
       if (!applied) return
       window.dispatchEvent(new CustomEvent<string>('vibe-project-initialized', { detail: project.displayPath }))
       notify(completionDetail)
@@ -993,9 +1022,10 @@ async function initializeProject(project: ProjectInfo) {
     const applied = applyInitializationProgress({
       ...resultProgress,
       projectPath: project.displayPath,
-    })
+    }, true)
     if (applied) notify(resultProgress.detail, true)
   } catch (error) {
+    if (!isCurrentInvocation()) return
     const detail = error instanceof Error ? error.message : String(error)
     const current = initializationProgress.value
     if (

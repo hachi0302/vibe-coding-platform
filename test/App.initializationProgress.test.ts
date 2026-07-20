@@ -398,9 +398,9 @@ describe('App existing-project initialization progress', () => {
       attempt: 1,
       sequence: 7,
       recoverable: false,
-      issues: [],
+      issues: [{ code: 'report.totals.missing', detail: '完成报告缺少产物计数' }],
       conflicts: [],
-      warnings: [],
+      warnings: ['保留 run 诊断以便重试'],
       generated: [],
     })
 
@@ -409,6 +409,13 @@ describe('App existing-project initialization progress', () => {
     expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
       phase: 'failed',
       detail: '初始化完成结果缺少 artifactTotals，无法确认产物数量。',
+      runId: 'run-no-totals',
+      attempt: 1,
+      sequence: 7,
+      recoverable: true,
+      issues: [{ code: 'report.totals.missing', detail: '完成报告缺少产物计数' }],
+      conflicts: [],
+      warnings: ['保留 run 诊断以便重试'],
     })
     await vi.advanceTimersByTimeAsync(2_200)
     expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(true)
@@ -544,6 +551,77 @@ describe('App existing-project initialization progress', () => {
       phase: 'plan',
       sequence: 1,
       detail: '新运行从低 sequence 开始',
+    })
+    wrapper.unmount()
+  })
+
+  it('ignores an old invoke rejection after dismissal and a new run has started', async () => {
+    existingProjectInitStatusMock.mockReset()
+      .mockResolvedValueOnce({ initialized: false, status: 'not-initialized', recoverable: false })
+      .mockResolvedValueOnce({
+        initialized: false,
+        status: 'incomplete',
+        runId: 'run-new',
+        phase: 'scan',
+        percent: 5,
+        detail: '新运行开始',
+        attempt: 1,
+        sequence: 0,
+        recoverable: true,
+        issues: [],
+        conflicts: [],
+        warnings: [],
+      })
+    const oldInvocation = deferred<ExistingProjectInitResult>()
+    const newInvocation = deferred<ExistingProjectInitResult>()
+    initializeExistingProjectMock
+      .mockReturnValueOnce(oldInvocation.promise)
+      .mockReturnValueOnce(newInvocation.promise)
+    const wrapper = await mountAndStartInitialization()
+    const progressHandler = listenInitializationProgressMock.mock.calls[0]?.[0]
+
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-old',
+      phase: 'failed',
+      percent: 60,
+      detail: '旧运行已失败，等待 invoke 退出',
+      attempt: 2,
+      sequence: 8,
+      recoverable: true,
+      issues: [{ code: 'old.failed', detail: '旧运行失败' }],
+      conflicts: [],
+      warnings: [],
+    })
+    await nextTick()
+    wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).vm.$emit('minimize')
+    await nextTick()
+
+    await wrapper.get('[data-start-initialization]').trigger('click')
+    await settle()
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-new',
+      phase: 'plan',
+      percent: 19,
+      detail: '新运行正在规划产物',
+      attempt: 1,
+      sequence: 1,
+      recoverable: true,
+      issues: [],
+      conflicts: [],
+      warnings: [],
+    })
+    await nextTick()
+
+    oldInvocation.reject(new Error('旧 invoke 最终退出'))
+    await settle()
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
+      runId: 'run-new',
+      phase: 'plan',
+      percent: 19,
+      sequence: 1,
+      detail: '新运行正在规划产物',
     })
     wrapper.unmount()
   })
