@@ -36,7 +36,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::agent_command::AgentCommand;
+use crate::agent_command::{build_agent_process, AgentCommand};
 use crate::agents::{self, ChatEvent, ChatProcessModel};
 use crate::types::{ChatImageInput, UsageSummary};
 
@@ -244,58 +244,6 @@ struct QuestionPayload {
     request: crate::types::ChatQuestionRequest,
 }
 
-/// 按 OS 组装管道子进程命令。与 `pty.rs::build_shell_command` 同款 PATH 策略，只是
-/// 改用 `std::process::Command` + 三路管道（无 PTY）。
-///
-/// `use_reclaude`：用 reclaude 做进程包装器（`reclaude claude --print ...`），
-/// 走 reclaude 守护进程的鉴权 + 代理链路。与 IDE 插件的 "Claude Process Wrapper" 同理。
-#[cfg(unix)]
-fn build_piped_command(
-    cwd: &str,
-    command: &AgentCommand,
-    use_reclaude: bool,
-) -> std::process::Command {
-    #[cfg(target_os = "macos")]
-    const DEFAULT_SHELL: &str = "/bin/zsh";
-    #[cfg(not(target_os = "macos"))]
-    const DEFAULT_SHELL: &str = "/bin/bash";
-
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| DEFAULT_SHELL.to_string());
-    let cli = if use_reclaude {
-        format!("'reclaude' {}", command.to_posix_shell())
-    } else {
-        command.to_posix_shell()
-    };
-    let inner = format!("cd {} && {}", crate::agent_command::posix_quote(cwd), cli);
-    let mut cmd = std::process::Command::new(&shell);
-    cmd.arg("-l").arg("-i").arg("-c").arg(&inner);
-    cmd.env_remove("npm_config_prefix");
-    cmd.current_dir(cwd);
-    cmd
-}
-
-#[cfg(windows)]
-fn build_piped_command(
-    cwd: &str,
-    command: &AgentCommand,
-    use_reclaude: bool,
-) -> std::process::Command {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let mut cmd = std::process::Command::new("powershell.exe");
-    cmd.arg("-NoLogo")
-        .arg("-Command")
-        .arg(crate::agent_command::powershell_set_location_and_run(
-            cwd,
-            command,
-            use_reclaude,
-        ));
-    cmd.current_dir(cwd);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd
-}
-
 #[cfg(unix)]
 fn command_exists_in_login_shell(cwd: &str, program: &str) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
@@ -446,7 +394,7 @@ pub fn start(
                 )
                 .ok_or_else(|| format!("{agent} 暂不支持 GUI 聊天模式"))?;
 
-            let mut cmd = build_piped_command(&cwd, &command, use_reclaude);
+            let mut cmd = build_agent_process(&cwd, &command, use_reclaude);
             cmd.stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -755,7 +703,7 @@ fn start_codex_app_server(
 ) -> Result<Arc<ChatHandle>, String> {
     ensure_codex_cli_available(&cwd)?;
     let command = AgentCommand::new("codex").arg("app-server").arg("--stdio");
-    let mut cmd = build_piped_command(&cwd, &command, false);
+    let mut cmd = build_agent_process(&cwd, &command, false);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1469,7 +1417,7 @@ fn spawn_oneshot_turn(id: u64, arc: Arc<ChatHandle>, spec: OneShotTurnSpec) -> R
         )
         .ok_or_else(|| format!("{agent} 暂不支持 GUI 聊天模式"))?;
 
-    let mut cmd = build_piped_command(cwd, &command, *use_reclaude);
+    let mut cmd = build_agent_process(cwd, &command, *use_reclaude);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

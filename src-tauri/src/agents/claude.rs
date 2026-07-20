@@ -2406,8 +2406,9 @@ mod tests {
 
     #[test]
     fn file_ref_quoted_path_becomes_file_block() {
-        let (files, body) =
-            extract_file_refs("@\"/Users/example-user/Downloads/仓库管理列表20260409163454.xlsx\"\nhi");
+        let (files, body) = extract_file_refs(
+            "@\"/Users/example-user/Downloads/仓库管理列表20260409163454.xlsx\"\nhi",
+        );
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].kind, "file");
         assert_eq!(

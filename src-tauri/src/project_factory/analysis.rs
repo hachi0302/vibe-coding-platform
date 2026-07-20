@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{json, Value};
 use tauri::Emitter;
 use uuid::Uuid;
+
+use crate::agent_command::{build_agent_process, AgentCommand};
 
 use super::types::{
     AgentAnalysisProgress, AgentAnalysisResult, AgentStackRecommendation, AnalyzeProjectRequest,
@@ -406,26 +407,34 @@ fn parse_analysis(provider: &str, text: &str) -> Result<AgentAnalysisResult, Str
     Ok(result)
 }
 
+fn build_codex_process(
+    prompt: &str,
+    schema_path: &Path,
+    output_path: &Path,
+) -> std::process::Command {
+    let cwd = env!("CARGO_MANIFEST_DIR").trim_end_matches("/src-tauri");
+    let command = AgentCommand::new("codex")
+        .arg("exec")
+        .arg("--sandbox")
+        .arg("read-only")
+        .arg("--ephemeral")
+        .arg("--skip-git-repo-check")
+        .arg("--output-schema")
+        .arg(schema_path.to_string_lossy().into_owned())
+        .arg("--output-last-message")
+        .arg(output_path.to_string_lossy().into_owned())
+        .arg("-C")
+        .arg(cwd)
+        .arg(prompt);
+    build_agent_process(cwd, &command, false)
+}
+
 fn run_codex(
     prompt: &str,
     schema_path: &Path,
     output_path: &Path,
 ) -> Result<AgentAnalysisResult, String> {
-    let output = Command::new("codex")
-        .args([
-            "exec",
-            "--sandbox",
-            "read-only",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--output-schema",
-            schema_path.to_string_lossy().as_ref(),
-            "--output-last-message",
-            output_path.to_string_lossy().as_ref(),
-            "-C",
-            env!("CARGO_MANIFEST_DIR").trim_end_matches("/src-tauri"),
-        ])
-        .arg(prompt)
+    let output = build_codex_process(prompt, schema_path, output_path)
         .output()
         .map_err(|error| format!("无法启动 Codex CLI：{error}"))?;
     if !output.status.success() {
@@ -439,22 +448,25 @@ fn run_codex(
     parse_analysis("codex", &content)
 }
 
+fn build_claude_process(prompt: &str, schema: &str) -> std::process::Command {
+    let cwd = env!("CARGO_MANIFEST_DIR").trim_end_matches("/src-tauri");
+    let command = AgentCommand::new("claude")
+        .arg("--print")
+        .arg("--no-session-persistence")
+        .arg("--permission-mode")
+        .arg("plan")
+        .arg("--tools")
+        .arg("Read")
+        .arg("--output-format")
+        .arg("json")
+        .arg("--json-schema")
+        .arg(schema)
+        .arg(prompt);
+    build_agent_process(cwd, &command, false)
+}
+
 fn run_claude(prompt: &str, schema: &str) -> Result<AgentAnalysisResult, String> {
-    let output = Command::new("claude")
-        .args([
-            "--print",
-            "--no-session-persistence",
-            "--permission-mode",
-            "plan",
-            "--tools",
-            "Read",
-            "--output-format",
-            "json",
-            "--json-schema",
-            schema,
-        ])
-        .arg(prompt)
-        .current_dir(env!("CARGO_MANIFEST_DIR").trim_end_matches("/src-tauri"))
+    let output = build_claude_process(prompt, schema)
         .output()
         .map_err(|error| format!("无法启动 Claude Code：{error}"))?;
     if !output.status.success() {
@@ -558,6 +570,39 @@ pub fn analyze_with_agent_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rendered_process(process: &std::process::Command) -> String {
+        process
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn analysis_agents_use_packaged_gui_path_resolution() {
+        let codex = build_codex_process(
+            "analyze it",
+            Path::new("/tmp/schema path.json"),
+            Path::new("/tmp/output path.json"),
+        );
+        let claude = build_claude_process("analyze it", "{}");
+        let codex_rendered = rendered_process(&codex);
+        let claude_rendered = rendered_process(&claude);
+
+        assert!(codex_rendered.contains("codex"));
+        assert!(claude_rendered.contains("claude"));
+        #[cfg(unix)]
+        {
+            assert!(codex_rendered.starts_with("-l -i -c "));
+            assert!(claude_rendered.starts_with("-l -i -c "));
+        }
+        #[cfg(windows)]
+        {
+            assert!(codex_rendered.contains("GetEnvironmentVariable('Path', 'Machine')"));
+            assert!(claude_rendered.contains("GetEnvironmentVariable('Path', 'Machine')"));
+        }
+    }
 
     fn analysis_with_questions(count: usize) -> AgentAnalysisResult {
         let question = ClarifyingQuestion {

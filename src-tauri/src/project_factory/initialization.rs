@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use tauri::Emitter;
+
+use crate::agent_command::{build_agent_process, AgentCommand};
 
 use super::existing::{
     finalize_existing_project_initialization, prepare_existing_project_initialization,
@@ -89,18 +90,21 @@ fn concise_cli_error(output: &[u8]) -> String {
     lines[lines.len().saturating_sub(16)..].join("\n")
 }
 
+fn build_codex_process(project_path: &str, prompt: &str) -> std::process::Command {
+    let command = AgentCommand::new("codex")
+        .arg("exec")
+        .arg("--sandbox")
+        .arg("workspace-write")
+        .arg("--ephemeral")
+        .arg("--skip-git-repo-check")
+        .arg("-C")
+        .arg(project_path)
+        .arg(prompt);
+    build_agent_process(project_path, &command, false)
+}
+
 fn run_codex(project_path: &str, prompt: &str) -> Result<(), String> {
-    let output = Command::new("codex")
-        .args([
-            "exec",
-            "--sandbox",
-            "workspace-write",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "-C",
-            project_path,
-        ])
-        .arg(prompt)
+    let output = build_codex_process(project_path, prompt)
         .output()
         .map_err(|error| format!("无法启动 Codex CLI：{error}"))?;
     if output.status.success() {
@@ -113,17 +117,19 @@ fn run_codex(project_path: &str, prompt: &str) -> Result<(), String> {
     }
 }
 
+fn build_claude_process(project_path: &str, prompt: &str) -> std::process::Command {
+    let command = AgentCommand::new("claude")
+        .arg("--print")
+        .arg("--no-session-persistence")
+        .arg("--dangerously-skip-permissions")
+        .arg("--output-format")
+        .arg("text")
+        .arg(prompt);
+    build_agent_process(project_path, &command, false)
+}
+
 fn run_claude(project_path: &str, prompt: &str) -> Result<(), String> {
-    let output = Command::new("claude")
-        .args([
-            "--print",
-            "--no-session-persistence",
-            "--dangerously-skip-permissions",
-            "--output-format",
-            "text",
-        ])
-        .arg(prompt)
-        .current_dir(project_path)
+    let output = build_claude_process(project_path, prompt)
         .output()
         .map_err(|error| format!("无法启动 Claude Code：{error}"))?;
     if output.status.success() {
@@ -384,9 +390,38 @@ pub fn initialize_existing_project_with_agent_progress(
 #[cfg(test)]
 mod tests {
     use super::{
-        progress_for_artifact_changes, progress_for_stage_activity, stage_start_progress,
-        InitializationStage,
+        build_claude_process, build_codex_process, progress_for_artifact_changes,
+        progress_for_stage_activity, stage_start_progress, InitializationStage,
     };
+
+    fn rendered_process(process: &std::process::Command) -> String {
+        process
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn initialization_agents_use_packaged_gui_path_resolution() {
+        let codex = build_codex_process("/tmp/project path", "initialize it");
+        let claude = build_claude_process("/tmp/project path", "initialize it");
+        let codex_rendered = rendered_process(&codex);
+        let claude_rendered = rendered_process(&claude);
+
+        assert!(codex_rendered.contains("codex"));
+        assert!(claude_rendered.contains("claude"));
+        #[cfg(unix)]
+        {
+            assert!(codex_rendered.starts_with("-l -i -c "));
+            assert!(claude_rendered.starts_with("-l -i -c "));
+        }
+        #[cfg(windows)]
+        {
+            assert!(codex_rendered.contains("GetEnvironmentVariable('Path', 'Machine')"));
+            assert!(claude_rendered.contains("GetEnvironmentVariable('Path', 'Machine')"));
+        }
+    }
 
     #[test]
     fn stage_is_reported_when_work_starts_instead_of_after_agent_finishes() {

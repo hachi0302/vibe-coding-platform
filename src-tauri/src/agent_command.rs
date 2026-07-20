@@ -62,6 +62,54 @@ impl AgentCommand {
     }
 }
 
+/// 为打包后的 GUI 应用构造 Agent CLI 子进程。
+///
+/// GUI 进程通常拿不到用户终端里的完整 PATH：POSIX 平台通过登录交互 shell 加载用户
+/// 配置；Windows 通过 PowerShell 合并进程、用户与系统 PATH，并复用 NVM 符号链接解析。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn build_agent_process(
+    cwd: &str,
+    command: &AgentCommand,
+    use_reclaude: bool,
+) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    const DEFAULT_SHELL: &str = "/bin/zsh";
+    #[cfg(target_os = "linux")]
+    const DEFAULT_SHELL: &str = "/bin/bash";
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| DEFAULT_SHELL.to_string());
+    let cli = if use_reclaude {
+        format!("'reclaude' {}", command.to_posix_shell())
+    } else {
+        command.to_posix_shell()
+    };
+    let inner = format!("cd {} && {}", posix_quote(cwd), cli);
+    let mut process = std::process::Command::new(shell);
+    process.arg("-l").arg("-i").arg("-c").arg(inner);
+    process.env_remove("npm_config_prefix");
+    process.current_dir(cwd);
+    process
+}
+
+#[cfg(target_os = "windows")]
+pub fn build_agent_process(
+    cwd: &str,
+    command: &AgentCommand,
+    use_reclaude: bool,
+) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut process = std::process::Command::new(windows_powershell_exe());
+    process
+        .arg("-NoLogo")
+        .arg("-Command")
+        .arg(powershell_set_location_and_run(cwd, command, use_reclaude));
+    process.current_dir(cwd);
+    process.creation_flags(CREATE_NO_WINDOW);
+    process
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn posix_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -155,4 +203,62 @@ pub fn powershell_encoded_command(ps_cmd: &str) -> String {
         .flat_map(|c| c.to_le_bytes())
         .collect();
     B64.encode(utf16le)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_agent_process, AgentCommand};
+
+    #[cfg(unix)]
+    #[test]
+    fn packaged_gui_agent_process_uses_login_shell_path_resolution() {
+        let cwd = "/tmp/project path";
+        let command = AgentCommand::new("codex")
+            .arg("exec")
+            .arg("prompt with ' quote");
+
+        let process = build_agent_process(cwd, &command, false);
+        let args = process
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(&args[..3], ["-l", "-i", "-c"]);
+        assert_eq!(
+            args[3],
+            "cd '/tmp/project path' && 'codex' 'exec' 'prompt with '\\'' quote'"
+        );
+        assert_eq!(
+            process.get_current_dir().and_then(|path| path.to_str()),
+            Some(cwd)
+        );
+        assert!(process
+            .get_envs()
+            .any(|(key, value)| { key == "npm_config_prefix" && value.is_none() }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn packaged_gui_agent_process_refreshes_windows_path_before_launch() {
+        let cwd = r"C:\work\project path";
+        let command = AgentCommand::new("codex")
+            .arg("exec")
+            .arg("prompt with ' quote");
+
+        let process = build_agent_process(cwd, &command, false);
+        let args = process
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let script = args.last().expect("PowerShell command argument");
+
+        assert!(script.contains("GetEnvironmentVariable('Path', 'Machine')"));
+        assert!(script.contains("GetEnvironmentVariable('Path', 'User')"));
+        assert!(script.contains("Set-Location -LiteralPath 'C:\\work\\project path'"));
+        assert!(script.contains("& 'codex' 'exec' 'prompt with '' quote'"));
+        assert_eq!(
+            process.get_current_dir().and_then(|path| path.to_str()),
+            Some(cwd)
+        );
+    }
 }
