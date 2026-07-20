@@ -1745,14 +1745,11 @@ fn required_section_state(content: &str, required: &str) -> SectionState {
                 .chars()
                 .filter(|character| !character.is_whitespace())
                 .collect::<String>();
+            let mut characters = compact.chars();
+            let marker = characters.next();
             compact.len() >= 3
-                && compact
-                    .chars()
-                    .next()
-                    .is_some_and(|marker| matches!(marker, '-' | '*' | '_'))
-                && compact
-                    .chars()
-                    .all(|character| Some(character) == compact.chars().next())
+                && marker.is_some_and(|marker| matches!(marker, '-' | '*' | '_'))
+                && characters.all(|character| Some(character) == marker)
         };
         if !line.is_empty()
             && !line.starts_with('#')
