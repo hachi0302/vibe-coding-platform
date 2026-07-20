@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use super::types::{
     ArtifactKind, ArtifactPlan, ArtifactPlanItem, ArtifactTotals, ProjectInventory, ValidationIssue,
@@ -14,30 +14,106 @@ const COMMON_DOCUMENT_IDS: &[&str] = &[
     "verification-playbook",
     "known-risks",
 ];
-const GENERIC_SKILLS: &[&str] = &[
+const GENERIC_SKILL_PHRASES: &[&str] = &[
     "developer",
+    "development-workflow",
     "problem-diagnose",
     "code-review",
     "review-feedback-handler",
     "worktree",
     "skill-designer",
 ];
-const GENERIC_RULE_TOPICS: &[&str] = &[
+const GENERIC_SKILL_WORDS: &[&str] = &[
+    "code",
+    "coding",
+    "debug",
+    "debugger",
+    "debugging",
+    "designer",
+    "development",
+    "diagnose",
+    "diagnosis",
+    "feedback",
+    "general",
+    "generic",
+    "handler",
+    "problem",
+    "review",
+    "skill",
+    "troubleshooting",
+    "workflow",
+];
+const GENERIC_RULE_PHRASES: &[&str] = &[
     "backend-engineering",
     "frontend-engineering",
+    "backend-development",
+    "frontend-development",
     "development-baseline",
+    "coding-guidelines",
     "coding-rules",
+    "engineering-standards",
     "general-rules",
+    "general-best-practices",
+];
+const GENERIC_RULE_WORDS: &[&str] = &[
+    "backend",
+    "baseline",
+    "best",
+    "code",
+    "coding",
+    "development",
+    "engineering",
+    "frontend",
+    "general",
+    "guideline",
+    "guidelines",
+    "practice",
+    "practices",
+    "rule",
+    "rules",
+    "standard",
+    "standards",
+];
+const FRONTEND_TOPIC_WORDS: &[&str] = &[
+    "angular",
+    "component",
+    "components",
+    "composable",
+    "composables",
+    "directive",
+    "directives",
+    "frontend",
+    "layout",
+    "layouts",
+    "nextjs",
+    "nuxt",
+    "react",
+    "svelte",
+    "ui",
+    "vue",
+];
+const FRONTEND_TOPIC_PHRASES: &[&str] = &["design-system", "state-flow"];
+const BACKEND_TOPIC_WORDS: &[&str] = &[
+    "backend",
+    "controller",
+    "database",
+    "flyway",
+    "migration",
+    "migrations",
+    "persistence",
+    "repository",
+    "server",
+    "spring",
 ];
 
 fn issue(
-    code: &str,
+    code: impl Into<String>,
     detail: impl Into<String>,
     path: Option<&str>,
     stage: &str,
 ) -> ValidationIssue {
     ValidationIssue {
-        code: code.to_string(),
+        code: code.into(),
         detail: detail.into(),
         path: path.map(str::to_string),
         stage: Some(stage.to_string()),
@@ -106,6 +182,196 @@ fn evidence_symbol_exists(workspace: &Path, path: &str, symbol: &str) -> bool {
         .and_then(|relative| fs::read_to_string(workspace.join(relative)).ok())
         .map(|content| content.contains(symbol))
         .unwrap_or(false)
+}
+
+fn validate_evidence_reference(
+    workspace: &Path,
+    inventory: &ProjectInventory,
+    evidence: &super::types::EvidenceReference,
+    code_prefix: &str,
+    target_path: Option<&str>,
+    issues: &mut Vec<ValidationIssue>,
+) -> bool {
+    let mut valid = true;
+    if evidence.path.trim().is_empty() {
+        issues.push(issue(
+            format!("{code_prefix}.path-empty"),
+            "证据路径不能为空",
+            target_path,
+            "plan",
+        ));
+        valid = false;
+    } else if !evidence_path_exists(workspace, inventory, &evidence.path) {
+        issues.push(issue(
+            format!("{code_prefix}.missing"),
+            format!("证据路径不存在：{}", evidence.path),
+            target_path,
+            "plan",
+        ));
+        valid = false;
+    }
+
+    let symbol = evidence
+        .symbol
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if symbol.is_empty() {
+        issues.push(issue(
+            format!("{code_prefix}.symbol-empty"),
+            "证据必须声明非空源码符号或配置键",
+            target_path,
+            "plan",
+        ));
+        valid = false;
+    } else if !evidence.path.trim().is_empty()
+        && evidence_path_exists(workspace, inventory, &evidence.path)
+        && !evidence_symbol_exists(workspace, &evidence.path, symbol)
+    {
+        issues.push(issue(
+            format!("{code_prefix}.symbol-missing"),
+            format!("证据符号不存在：{}#{symbol}", evidence.path),
+            target_path,
+            "plan",
+        ));
+        valid = false;
+    }
+    valid
+}
+
+fn path_is_within(parent: &str, child: &str) -> bool {
+    parent == "." || child == parent || child.starts_with(&format!("{parent}/"))
+}
+
+fn coverage_target_known(inventory: &ProjectInventory, target: &str) -> bool {
+    inventory
+        .modules
+        .iter()
+        .any(|module| module.name == target || module.path == target)
+        || inventory.source_roots.iter().any(|root| root == target)
+}
+
+fn evidence_relates_to_coverage(
+    inventory: &ProjectInventory,
+    evidence_path: &str,
+    target: &str,
+) -> bool {
+    let module_match = inventory.modules.iter().any(|module| {
+        if module.name != target && module.path != target {
+            return false;
+        }
+        path_is_within(&module.path, evidence_path)
+            || inventory.files.iter().any(|file| {
+                file.path == evidence_path
+                    && file
+                        .module
+                        .as_deref()
+                        .is_some_and(|owner| owner == module.path || owner == module.name)
+            })
+    });
+    module_match
+        || inventory
+            .source_roots
+            .iter()
+            .any(|root| root == target && path_is_within(root, evidence_path))
+}
+
+fn identifier_words(value: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut previous_lowercase = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            if character.is_ascii_uppercase() && previous_lowercase && !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            current.push(character.to_ascii_lowercase());
+            previous_lowercase = character.is_ascii_lowercase();
+        } else {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            previous_lowercase = false;
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn normalized_identifier(value: &str) -> String {
+    identifier_words(value).join("-")
+}
+
+fn contains_identifier_phrase(value: &str, phrase: &str) -> bool {
+    let normalized = normalized_identifier(value);
+    normalized == phrase
+        || normalized.starts_with(&format!("{phrase}-"))
+        || normalized.ends_with(&format!("-{phrase}"))
+        || normalized.contains(&format!("-{phrase}-"))
+}
+
+fn artifact_mentions_any(item: &ArtifactPlanItem, words: &[&str]) -> bool {
+    [&item.id, &item.topic, &item.target_path]
+        .into_iter()
+        .flat_map(|value| identifier_words(value))
+        .any(|word| words.contains(&word.as_str()))
+}
+
+fn artifact_mentions_phrase(item: &ArtifactPlanItem, phrases: &[&str]) -> bool {
+    [
+        item.id.as_str(),
+        item.topic.as_str(),
+        item.target_path.as_str(),
+    ]
+    .into_iter()
+    .any(|value| {
+        phrases
+            .iter()
+            .any(|phrase| contains_identifier_phrase(value, phrase))
+    })
+}
+
+fn generic_rule(item: &ArtifactPlanItem) -> bool {
+    let values = [item.id.as_str(), item.topic.as_str()];
+    values.iter().any(|value| {
+        GENERIC_RULE_PHRASES
+            .iter()
+            .any(|phrase| contains_identifier_phrase(value, phrase))
+    }) || {
+        let words = values
+            .into_iter()
+            .flat_map(identifier_words)
+            .collect::<Vec<_>>();
+        !words.is_empty()
+            && words
+                .iter()
+                .all(|word| GENERIC_RULE_WORDS.contains(&word.as_str()))
+    }
+}
+
+fn generic_skill(item: &ArtifactPlanItem) -> bool {
+    let skill_name = item
+        .target_path
+        .strip_prefix(".claude/skills/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default();
+    let values = [item.id.as_str(), item.topic.as_str(), skill_name];
+    values.into_iter().any(|value| {
+        GENERIC_SKILL_PHRASES
+            .iter()
+            .any(|phrase| contains_identifier_phrase(value, phrase))
+    }) || {
+        let words = values
+            .into_iter()
+            .flat_map(identifier_words)
+            .collect::<Vec<_>>();
+        !words.is_empty()
+            && words
+                .iter()
+                .all(|word| GENERIC_SKILL_WORDS.contains(&word.as_str()))
+    }
 }
 
 pub fn read_artifact_plan(workspace: &Path) -> Result<ArtifactPlan, Vec<ValidationIssue>> {
@@ -238,34 +504,54 @@ pub fn validate_artifact_plan(
                 "plan",
             ));
         }
-        for evidence in &item.evidence {
-            if !evidence_path_exists(workspace, inventory, &evidence.path) {
+        let valid_evidence = item
+            .evidence
+            .iter()
+            .filter(|evidence| {
+                validate_evidence_reference(
+                    workspace,
+                    inventory,
+                    evidence,
+                    "plan.evidence",
+                    Some(&item.target_path),
+                    &mut issues,
+                )
+            })
+            .collect::<Vec<_>>();
+        for target in &item.covers {
+            if !coverage_target_known(inventory, target) {
                 issues.push(issue(
-                    "plan.evidence.missing",
-                    format!("证据路径不存在：{}", evidence.path),
+                    "plan.coverage.target.invalid",
+                    format!("覆盖目标不在项目清单中：{target}"),
                     Some(&item.target_path),
                     "plan",
                 ));
-            } else if let Some(symbol) = evidence.symbol.as_deref() {
-                if !evidence_symbol_exists(workspace, &evidence.path, symbol) {
-                    issues.push(issue(
-                        "plan.evidence.symbol-missing",
-                        format!("证据符号不存在：{}#{}", evidence.path, symbol),
-                        Some(&item.target_path),
-                        "plan",
-                    ));
-                }
+            } else if valid_evidence
+                .iter()
+                .any(|evidence| evidence_relates_to_coverage(inventory, &evidence.path, target))
+            {
+                covered.insert(target.clone());
+            } else {
+                issues.push(issue(
+                    "plan.coverage.evidence-unrelated",
+                    format!("覆盖目标缺少同模块或源码根证据：{target}"),
+                    Some(&item.target_path),
+                    "plan",
+                ));
             }
         }
-        covered.extend(item.covers.iter().cloned());
 
-        let layer_valid = match item.layer.as_str() {
+        let declared_layer_valid = match item.layer.as_str() {
             "common" | "contract" => true,
             "frontend" => inventory.layers.frontend,
             "backend" | "database" | "integration" => inventory.layers.backend,
             _ => false,
         };
-        if !layer_valid {
+        let frontend_topic = artifact_mentions_any(item, FRONTEND_TOPIC_WORDS)
+            || artifact_mentions_phrase(item, FRONTEND_TOPIC_PHRASES);
+        let topic_valid = (!frontend_topic || inventory.layers.frontend)
+            && (!artifact_mentions_any(item, BACKEND_TOPIC_WORDS) || inventory.layers.backend);
+        if !declared_layer_valid || !topic_valid {
             issues.push(issue(
                 "plan.layer.mismatch",
                 format!("产物层级与项目不匹配：{}", item.layer),
@@ -273,11 +559,7 @@ pub fn validate_artifact_plan(
                 "plan",
             ));
         }
-        if item.kind == ArtifactKind::Rule
-            && GENERIC_RULE_TOPICS
-                .iter()
-                .any(|generic| item.topic == *generic || item.id == *generic)
-        {
+        if item.kind == ArtifactKind::Rule && generic_rule(item) {
             issues.push(issue(
                 "plan.rule.generic",
                 "规则主题过于泛化，必须绑定真实项目责任或工作流",
@@ -285,31 +567,80 @@ pub fn validate_artifact_plan(
                 "plan",
             ));
         }
-        if item.kind == ArtifactKind::Skill {
-            let skill_name = item
-                .target_path
-                .strip_prefix(".claude/skills/")
-                .and_then(|rest| rest.split('/').next())
-                .unwrap_or_default();
-            if GENERIC_SKILLS.iter().any(|generic| {
-                skill_name == *generic || item.id == *generic || item.topic == *generic
-            }) {
-                issues.push(issue(
-                    "plan.skill.generic",
-                    "通用平台能力不得复制为项目 skill",
-                    Some(&item.target_path),
-                    "plan",
-                ));
-            }
+        if item.kind == ArtifactKind::Skill && generic_skill(item) {
+            issues.push(issue(
+                "plan.skill.generic",
+                "通用平台能力不得复制为项目 skill",
+                Some(&item.target_path),
+                "plan",
+            ));
         }
     }
 
-    let exclusions = plan
-        .exclusions
-        .iter()
-        .filter(|exclusion| exclusion.reason.trim().chars().count() >= 8)
-        .map(|exclusion| exclusion.target.as_str())
-        .collect::<BTreeSet<_>>();
+    let mut exclusions = BTreeSet::new();
+    for exclusion in &plan.exclusions {
+        let mut valid = true;
+        if !coverage_target_known(inventory, &exclusion.target) {
+            issues.push(issue(
+                "plan.exclusion.target.invalid",
+                format!("排除目标不在项目清单中：{}", exclusion.target),
+                None,
+                "plan",
+            ));
+            valid = false;
+        }
+        if exclusion.reason.trim().chars().count() < 8 {
+            issues.push(issue(
+                "plan.exclusion.reason.insufficient",
+                "覆盖排除必须说明可审查的项目化原因",
+                None,
+                "plan",
+            ));
+            valid = false;
+        }
+        if exclusion.evidence.is_empty() {
+            issues.push(issue(
+                "plan.exclusion.evidence.empty",
+                "覆盖排除必须提供真实路径和符号证据",
+                None,
+                "plan",
+            ));
+            valid = false;
+        }
+        let valid_evidence = exclusion
+            .evidence
+            .iter()
+            .filter(|evidence| {
+                validate_evidence_reference(
+                    workspace,
+                    inventory,
+                    evidence,
+                    "plan.exclusion.evidence",
+                    None,
+                    &mut issues,
+                )
+            })
+            .collect::<Vec<_>>();
+        if valid_evidence.len() != exclusion.evidence.len() {
+            valid = false;
+        }
+        if valid
+            && !valid_evidence.iter().all(|evidence| {
+                evidence_relates_to_coverage(inventory, &evidence.path, &exclusion.target)
+            })
+        {
+            issues.push(issue(
+                "plan.exclusion.evidence.unrelated",
+                "覆盖排除证据不属于被排除的模块或源码根",
+                None,
+                "plan",
+            ));
+            valid = false;
+        }
+        if valid {
+            exclusions.insert(exclusion.target.as_str());
+        }
+    }
     for module in &inventory.modules {
         if !covered.contains(&module.name)
             && !covered.contains(&module.path)
@@ -397,26 +728,61 @@ fn markdown_links(content: &str) -> Vec<&str> {
     links
 }
 
-fn link_exists(workspace: &Path, artifact_path: &str, link: &str) -> bool {
-    let link = link.split('#').next().unwrap_or_default();
-    if link.is_empty()
-        || link.starts_with('#')
+fn local_markdown_link(link: &str) -> Option<&str> {
+    let link = link.trim().trim_matches(['<', '>']);
+    if link.starts_with('#')
         || link.starts_with("http://")
         || link.starts_with("https://")
         || link.starts_with("mailto:")
     {
-        return true;
+        return None;
     }
-    let Ok(relative) = normalized_relative_path(link) else {
+    let path = link.split(['#', '?']).next().unwrap_or_default().trim();
+    (!path.is_empty() && path.ends_with(".md")).then_some(path)
+}
+
+fn resolve_artifact_relative_path(artifact_path: &str, target: &str) -> Option<PathBuf> {
+    if target.contains('\\') || Path::new(target).is_absolute() {
+        return None;
+    }
+    let mut resolved = PathBuf::new();
+    for component in Path::new(artifact_path).parent()?.components() {
+        let Component::Normal(component) = component else {
+            return None;
+        };
+        resolved.push(component);
+    }
+    for component in Path::new(target).components() {
+        match component {
+            Component::Normal(component) => resolved.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !resolved.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(resolved)
+}
+
+fn link_exists(
+    workspace: &Path,
+    artifact_path: &str,
+    link: &str,
+    planned_paths: &BTreeSet<&str>,
+) -> bool {
+    let Some(link) = local_markdown_link(link) else {
+        return true;
+    };
+    let Some(relative) = resolve_artifact_relative_path(artifact_path, link) else {
         return false;
     };
-    if workspace.join(relative).is_file() {
-        return true;
-    }
-    Path::new(artifact_path)
-        .parent()
-        .map(|parent| workspace.join(parent).join(relative).is_file())
-        .unwrap_or(false)
+    workspace.join(&relative).is_file()
+        || relative
+            .to_str()
+            .is_some_and(|path| planned_paths.contains(path))
 }
 
 fn contains_secret_assignment(content: &str) -> bool {
@@ -451,26 +817,89 @@ fn contains_secret_assignment(content: &str) -> bool {
     })
 }
 
-fn command_candidates(content: &str) -> Vec<&str> {
-    let mut commands = Vec::new();
-    let mut remaining = content;
+fn command_candidate(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("$ ")
+        .or_else(|| value.strip_prefix("> "))
+        .unwrap_or(value)
+        .trim();
+    [
+        "npm ", "pnpm ", "yarn ", "cargo ", "mvn ", "gradle ", "go ", "pytest", "python ",
+    ]
+    .iter()
+    .any(|prefix| value.starts_with(prefix))
+    .then_some(value)
+}
+
+fn inline_command_candidates<'a>(line: &'a str, commands: &mut Vec<&'a str>) {
+    let mut remaining = line;
     while let Some(start) = remaining.find('`') {
         remaining = &remaining[start + 1..];
         let Some(end) = remaining.find('`') else {
             break;
         };
-        let candidate = remaining[..end].trim();
-        if [
-            "npm ", "pnpm ", "yarn ", "cargo ", "mvn ", "gradle ", "go ", "pytest", "python ",
-        ]
-        .iter()
-        .any(|prefix| candidate.starts_with(prefix))
-        {
+        if let Some(candidate) = command_candidate(&remaining[..end]) {
             commands.push(candidate);
         }
         remaining = &remaining[end + 1..];
     }
+}
+
+fn command_candidates(content: &str) -> Vec<&str> {
+    let mut commands = Vec::new();
+    let mut shell_fence = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if shell_fence.is_some() {
+                shell_fence = None;
+            } else {
+                let language = trimmed.trim_start_matches('`').trim().to_ascii_lowercase();
+                shell_fence = Some(matches!(
+                    language.as_str(),
+                    "" | "bash"
+                        | "sh"
+                        | "shell"
+                        | "zsh"
+                        | "console"
+                        | "terminal"
+                        | "powershell"
+                        | "ps1"
+                        | "cmd"
+                ));
+            }
+            continue;
+        }
+        if let Some(is_shell) = shell_fence {
+            if is_shell {
+                if let Some(candidate) = command_candidate(trimmed) {
+                    commands.push(candidate);
+                }
+            }
+        } else {
+            inline_command_candidates(line, &mut commands);
+        }
+    }
     commands
+}
+
+fn evidence_is_cited_together(content: &str, path: &str, symbol: &str) -> bool {
+    let mut path_seen = false;
+    let mut symbol_seen = false;
+    for line in content.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if path_seen && symbol_seen {
+                return true;
+            }
+            path_seen = false;
+            symbol_seen = false;
+        } else {
+            path_seen |= line.contains(path);
+            symbol_seen |= line.replace(path, "").contains(symbol);
+        }
+    }
+    false
 }
 
 fn content_has_rule_contract(content: &str) -> bool {
@@ -490,6 +919,21 @@ fn content_has_skill_contract(content: &str) -> bool {
         && content.contains("执行流程")
         && content.contains("完成 Gate")
         && content.contains("失败处理")
+}
+
+fn content_claims_to_be_generic(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    [
+        "这是适用于所有项目",
+        "本规则适用于所有项目",
+        "本流程适用于所有项目",
+        "this rule applies to every project",
+        "this workflow applies to every project",
+        "generic rule for all projects",
+        "generic workflow for all projects",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 pub fn validate_staged_artifacts(
@@ -534,6 +978,7 @@ pub fn validate_staged_artifacts(
                 continue;
             }
         };
+        let secret_detected = contains_secret_assignment(&content);
         if ["{{", "待填写", "TODO", "TBD", "以后补充"]
             .iter()
             .any(|token| content.contains(token))
@@ -547,11 +992,14 @@ pub fn validate_staged_artifacts(
         }
         if chinese_count(&content) < 20
             || artifact.evidence.iter().any(|evidence| {
-                !content.contains(&evidence.path)
-                    || evidence
-                        .symbol
-                        .as_deref()
-                        .is_some_and(|symbol| !content.replace(&evidence.path, "").contains(symbol))
+                evidence
+                    .symbol
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|symbol| !symbol.is_empty())
+                    .is_none_or(|symbol| {
+                        !evidence_is_cited_together(&content, &evidence.path, symbol)
+                    })
             })
         {
             issues.push(issue(
@@ -572,19 +1020,18 @@ pub fn validate_staged_artifacts(
             }
         }
         for link in markdown_links(&content) {
-            if link.ends_with(".md")
-                && !link_exists(workspace, &artifact.target_path, link)
-                && !planned_paths.contains(link)
+            if local_markdown_link(link).is_some()
+                && !link_exists(workspace, &artifact.target_path, link, &planned_paths)
             {
                 issues.push(issue(
                     "artifact.link.dangling",
-                    format!("Markdown 链接目标不存在：{link}"),
+                    "Markdown 链接目标不存在或越出工作区",
                     Some(&artifact.target_path),
                     "validate",
                 ));
             }
         }
-        if contains_secret_assignment(&content) {
+        if secret_detected {
             issues.push(issue(
                 "artifact.secret.detected",
                 "产物疑似包含敏感配置值，已拒绝安装",
@@ -596,11 +1043,21 @@ pub fn validate_staged_artifacts(
             if !known_commands.contains(command) {
                 issues.push(issue(
                     "artifact.command.unknown",
-                    format!("文档命令无法从项目脚本中确认：{command}"),
+                    "文档包含无法从项目清单确认的命令",
                     Some(&artifact.target_path),
                     "validate",
                 ));
             }
+        }
+        if matches!(artifact.kind, ArtifactKind::Rule | ArtifactKind::Skill)
+            && content_claims_to_be_generic(&content)
+        {
+            issues.push(issue(
+                "artifact.content.generic",
+                "项目 rule 或 skill 包含明确的跨项目通用模板内容",
+                Some(&artifact.target_path),
+                "validate",
+            ));
         }
         if artifact.kind == ArtifactKind::Rule && !content_has_rule_contract(&content) {
             issues.push(issue(
@@ -627,7 +1084,7 @@ mod tests {
     use super::*;
     use crate::project_factory::docs::ProjectLayers;
     use crate::project_factory::types::{
-        EvidenceReference, InventoryFile, ProjectInventory, ProjectModule,
+        CoverageExclusion, EvidenceReference, InventoryFile, ProjectInventory, ProjectModule,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1017,5 +1474,380 @@ mod tests {
         );
 
         assert!(codes(&issues).contains(&"artifact.content.not-project-specific"));
+    }
+
+    #[test]
+    fn coverage_requires_evidence_from_each_claimed_module_and_source_root() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        fixture.write(
+            "billing-service/src/main/java/BillingService.java",
+            "class BillingService {}",
+        );
+        let mut inventory = inventory(false, true);
+        inventory.modules.push(ProjectModule {
+            name: "billing-service".into(),
+            path: "billing-service".into(),
+            kind: "backend".into(),
+            manifests: vec!["billing-service/pom.xml".into()],
+            source_roots: vec!["billing-service/src/main/java".into()],
+        });
+        inventory
+            .source_roots
+            .push("billing-service/src/main/java".into());
+        inventory.files.push(InventoryFile {
+            path: "billing-service/src/main/java/BillingService.java".into(),
+            kind: "source".into(),
+            size: 8,
+            sha256: "hash".into(),
+            module: Some("billing-service".into()),
+        });
+        let mut plan = valid_plan();
+        plan.artifacts[0].covers.extend([
+            "billing-service".into(),
+            "billing-service/src/main/java".into(),
+        ]);
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory, &plan);
+        let codes = codes(&issues);
+
+        assert!(codes.contains(&"plan.coverage.evidence-unrelated"));
+        assert!(codes.contains(&"plan.module.uncovered"));
+        assert!(codes.contains(&"plan.source-root.uncovered"));
+    }
+
+    #[test]
+    fn exclusions_require_valid_related_path_and_symbol_evidence() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        let mut plan = valid_plan();
+        for artifact in &mut plan.artifacts {
+            artifact.covers.clear();
+        }
+        plan.exclusions.push(CoverageExclusion {
+            target: "iam-service".into(),
+            reason: "该模块由外部流程维护并单独验证".into(),
+            evidence: vec![EvidenceReference {
+                path: "missing/exclusion-proof.md".into(),
+                symbol: Some("ExternalOwner".into()),
+            }],
+        });
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory(false, true), &plan);
+        let codes = codes(&issues);
+
+        assert!(codes.contains(&"plan.exclusion.evidence.missing"));
+        assert!(codes.contains(&"plan.module.uncovered"));
+    }
+
+    #[test]
+    fn every_plan_evidence_requires_a_nonempty_symbol() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        let mut plan = valid_plan();
+        plan.artifacts[0].evidence[0].symbol = None;
+        plan.artifacts[1].evidence[0].symbol = Some("   ".into());
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory(false, true), &plan);
+
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "plan.evidence.symbol-empty")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn common_or_contract_labels_cannot_hide_opposite_layer_topics() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        let mut plan = valid_plan();
+        plan.artifacts.push(ArtifactPlanItem {
+            layer: "contract".into(),
+            ..item(
+                "vue-components",
+                ArtifactKind::Rule,
+                ".claude/rules/project/frontend/vue-components.md",
+                "vue-components",
+            )
+        });
+        plan.artifacts.push(ArtifactPlanItem {
+            layer: "common".into(),
+            ..item(
+                "design-system",
+                ArtifactKind::Document,
+                "docs/ai/design-system.md",
+                "design-system",
+            )
+        });
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory(false, true), &plan);
+
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "plan.layer.mismatch")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_prefixed_or_reworded_generic_rules_and_skills() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        let mut plan = valid_plan();
+        plan.artifacts.push(item(
+            "backend-development",
+            ArtifactKind::Rule,
+            ".claude/rules/project/backend/backend-development.md",
+            "coding-guidelines",
+        ));
+        plan.artifacts.push(item(
+            "iam-developer",
+            ArtifactKind::Skill,
+            ".claude/skills/iam-developer/SKILL.md",
+            "developer-workflow",
+        ));
+        plan.artifacts.push(item(
+            "iam-engineering-standards",
+            ArtifactKind::Rule,
+            ".claude/rules/project/iam-engineering-standards.md",
+            "general-best-practices",
+        ));
+        plan.artifacts.push(item(
+            "general-debugging",
+            ArtifactKind::Skill,
+            ".claude/skills/general-debugging/SKILL.md",
+            "problem-troubleshooting",
+        ));
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory(false, true), &plan);
+        let codes = codes(&issues);
+
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|code| **code == "plan.rule.generic")
+                .count(),
+            2
+        );
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|code| **code == "plan.skill.generic")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn staged_evidence_path_and_symbol_must_be_cited_together() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        fixture.write(
+            &artifact.target_path,
+            &format!(
+                "# 项目地图\n\n## 真实证据\n\n路径 `{}` 已核验。\n\n另一个无关段落提到 `AuthService`。\n\n## 验证方式\n\n{}",
+                artifact.evidence[0].path,
+                "项目边界、复用入口、风险与验证都必须依据真实实现。".repeat(8)
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert!(codes(&issues).contains(&"artifact.content.not-project-specific"));
+    }
+
+    #[test]
+    fn secret_values_are_never_echoed_by_other_diagnostics() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        let secret = "do-not-echo-this-token";
+        fixture.write(
+            &artifact.target_path,
+            &format!(
+                "# 项目地图\n\n## 真实证据\n\n`{}` 与 `AuthService` 共同证明认证入口。\n\n## 验证方式\n\n{}\n\n`npm config set token={secret}`",
+                artifact.evidence[0].path,
+                "认证边界和验证步骤均来自当前项目源码。".repeat(8)
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert!(codes(&issues).contains(&"artifact.secret.detected"));
+        assert!(issues.iter().all(|issue| !issue.detail.contains(secret)));
+    }
+
+    #[test]
+    fn fenced_shell_commands_are_checked_against_inventory_commands() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        fixture.write(
+            &artifact.target_path,
+            &format!(
+                "# 项目地图\n\n## 真实证据\n\n`{}` 与 `AuthService` 共同证明认证入口。\n\n## 验证方式\n\n{}\n\n```bash\nnpm run imaginary\n```",
+                artifact.evidence[0].path,
+                "认证边界和验证步骤均来自当前项目源码。".repeat(8)
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert!(codes(&issues).contains(&"artifact.command.unknown"));
+    }
+
+    #[test]
+    fn markdown_links_resolve_only_from_the_containing_artifact() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        fixture.write("README.md", "# Root");
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        fixture.write(
+            &artifact.target_path,
+            &format!(
+                "# 项目地图\n\n## 真实证据\n\n`{}` 与 `AuthService` 共同证明认证入口。\n\n## 验证方式\n\n{}\n\n[错误的同目录链接](README.md)",
+                artifact.evidence[0].path,
+                "认证边界和验证步骤均来自当前项目源码。".repeat(8)
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert!(codes(&issues).contains(&"artifact.link.dangling"));
+    }
+
+    #[test]
+    fn markdown_links_may_walk_to_an_existing_file_inside_the_workspace() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        fixture.write("README.md", "# Root");
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        fixture.write(
+            &artifact.target_path,
+            &format!(
+                "# 项目地图\n\n## 真实证据\n\n`{}` 与 `AuthService` 共同证明认证入口。\n\n## 验证方式\n\n{}\n\n[仓库说明](../../README.md)",
+                artifact.evidence[0].path,
+                "认证边界和验证步骤均来自当前项目源码。".repeat(8)
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert!(!codes(&issues).contains(&"artifact.link.dangling"));
+    }
+
+    #[test]
+    fn staged_rules_and_skills_reject_explicitly_generic_template_content() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        let mut plan = valid_plan();
+        plan.artifacts.retain(|artifact| {
+            matches!(
+                artifact.id.as_str(),
+                "auth-lifecycle" | "auth-change-review"
+            )
+        });
+        for artifact in &plan.artifacts {
+            let evidence = &artifact.evidence[0];
+            let content = match artifact.kind {
+                ArtifactKind::Rule => format!(
+                    "# 认证规则\n\n## 真实证据\n\n`{}` 与 `AuthService`。\n\n## 验证方式\n\npaths: iam-service/**\n\n触发：修改代码。复用：先搜索资产。禁止：不得重复实现。影响：检查调用方。验证：运行测试。\n\n{}",
+                    evidence.path,
+                    "这是适用于所有项目的通用开发规则。".repeat(8)
+                ),
+                ArtifactKind::Skill => format!(
+                    "---\nname: iam-auth-change-review\ndescription: 认证变更检查。\n---\n\n# 认证变更\n\n## 真实证据\n\n`{}` 与 `AuthService`。\n\n## 验证方式\n\n## 项目资源\n读取源码。\n## 执行流程\n执行检查。\n## 完成 Gate\n运行验证。\n## 失败处理\n停止安装。\n\n{}",
+                    evidence.path,
+                    "这是适用于所有项目的通用调试流程。".repeat(8)
+                ),
+                ArtifactKind::Document => unreachable!("filtered to rule and skill"),
+            };
+            fixture.write(&artifact.target_path, &content);
+        }
+
+        let issues =
+            validate_staged_artifacts(fixture.path(), &inventory(false, true), &plan, None);
+
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "artifact.content.generic")
+                .count(),
+            2
+        );
     }
 }
