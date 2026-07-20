@@ -241,6 +241,41 @@ fn copy_inventory(
     Ok(())
 }
 
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)))]
+pub(super) fn read_project_bytes_handle_safe(
+    _root: &Path,
+    _relative: &Path,
+) -> Result<Option<Vec<u8>>, String> {
+    Err(
+        "Handle-safe project file reading is unsupported on this platform until descriptor-relative traversal is available"
+            .to_string(),
+    )
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+pub(super) fn read_project_bytes_handle_safe(
+    root: &Path,
+    relative: &Path,
+) -> Result<Option<Vec<u8>>, String> {
+    read_project_file(root, relative).map(|read| read.map(|read| read.bytes))
+}
+
 #[cfg(any(
     target_os = "linux",
     target_os = "android",
@@ -1188,7 +1223,11 @@ fn redact_json_value(
                 let composite = value.is_object() || value.is_array();
                 let protected = protected
                     || container_policy.redacts(key)
-                    || (!composite && sensitive_key(key));
+                    || if composite {
+                        explicit_sensitive_key(key)
+                    } else {
+                        sensitive_key(key)
+                    };
                 redact_json_value(value, Some(key), protected, container_policy, keys);
             }
         }
@@ -1223,7 +1262,11 @@ fn redact_toml_value(
                 let composite = value.is_table() || value.is_array();
                 let protected = protected
                     || container_policy.redacts(key)
-                    || (!composite && sensitive_key(key));
+                    || if composite {
+                        explicit_sensitive_key(key)
+                    } else {
+                        sensitive_key(key)
+                    };
                 redact_toml_value(value, Some(key), protected, container_policy, keys);
             }
         }
@@ -1269,7 +1312,13 @@ fn redact_yaml_value(
                 );
                 let protected = protected
                     || key_text.is_some_and(|key| container_policy.redacts(key))
-                    || (!composite && key_text.is_some_and(sensitive_key));
+                    || key_text.is_some_and(|key| {
+                        if composite {
+                            explicit_sensitive_key(key)
+                        } else {
+                            sensitive_key(key)
+                        }
+                    });
                 redact_yaml_value(
                     value,
                     key_text.or(context),
@@ -1402,6 +1451,10 @@ fn sensitive_key(key: &str) -> bool {
         ]
         .iter()
         .any(|candidate| key.ends_with(candidate))
+}
+
+fn explicit_sensitive_key(key: &str) -> bool {
+    !matches!(normalized_key(key).as_str(), "auth" | "authorization") && sensitive_key(key)
 }
 
 #[derive(Clone, Copy)]
@@ -1581,7 +1634,7 @@ fn credential_assignment_value(value: &str, source: bool) -> bool {
         return true;
     }
     if source {
-        direct_string_literal(value).is_some_and(hardcoded_credential_literal)
+        source_string_literal(value).is_some_and(hardcoded_credential_literal)
     } else {
         let value = value
             .split(|character: char| character.is_ascii_whitespace() || character == ';')
@@ -1619,6 +1672,19 @@ fn direct_string_literal(value: &str) -> Option<&str> {
     };
     let end = remainder.find(quote)?;
     Some(&remainder[..end])
+}
+
+fn source_string_literal(value: &str) -> Option<&str> {
+    direct_string_literal(value).or_else(|| {
+        ["Some", "new String"].iter().find_map(|wrapper| {
+            let inner = value
+                .trim_start()
+                .strip_prefix(wrapper)?
+                .trim_start()
+                .strip_prefix('(')?;
+            direct_string_literal(inner)
+        })
+    })
 }
 
 fn high_confidence_secret(value: &str) -> bool {
@@ -2299,6 +2365,38 @@ mod tests {
         }
 
         #[test]
+        fn handle_safe_byte_reader_rejects_direct_and_ancestor_symlinks() {
+            use std::os::unix::fs::symlink;
+
+            let fixture = Fixture::new("handle-safe-reader");
+            let outside = Fixture::new("handle-safe-reader-outside");
+            fixture.write("config/public.txt", "ordinary project bytes\n");
+            outside.write("secret.txt", "must not be read\n");
+            symlink(
+                outside.path().join("secret.txt"),
+                fixture.path().join("direct-link.txt"),
+            )
+            .expect("direct file symlink");
+            symlink(outside.path(), fixture.path().join("ancestor-link"))
+                .expect("ancestor directory symlink");
+
+            assert_eq!(
+                read_project_bytes_handle_safe(fixture.path(), Path::new("config/public.txt"))
+                    .expect("ordinary file read"),
+                Some(b"ordinary project bytes\n".to_vec())
+            );
+            assert!(
+                read_project_bytes_handle_safe(fixture.path(), Path::new("direct-link.txt"))
+                    .is_err()
+            );
+            assert!(read_project_bytes_handle_safe(
+                fixture.path(),
+                Path::new("ancestor-link/secret.txt")
+            )
+            .is_err());
+        }
+
+        #[test]
         fn excludes_private_key_files_from_inventory_and_workspace() {
             let fixture = Fixture::new("private-key");
             fixture.write("src/lib.rs", "pub fn ready() -> bool { true }\n");
@@ -2556,6 +2654,84 @@ mod tests {
         }
 
         #[test]
+        fn redacts_all_descendant_scalars_below_explicit_sensitive_keys() {
+            let fixture = Fixture::new("nested-explicit-secrets");
+            fixture.write(
+                "config/nested.json",
+                r#"{
+  "password": {"value": "json-password", "generation": 3, "active": true},
+  "auth": {
+    "endpoint": "https://identity.example.com/authorize",
+    "scope": "openid",
+    "client_secret": "json-client-secret"
+  }
+}"#,
+            );
+            fixture.write(
+                "config/nested.toml",
+                concat!(
+                    "public_name = \"visible\"\n",
+                    "[credentials]\n",
+                    "username = \"toml-user\"\n",
+                    "parts = [\"toml-one\", \"toml-two\"]\n",
+                    "enabled = true\n",
+                ),
+            );
+            fixture.write(
+                "config/nested.yml",
+                concat!(
+                    "public-name: visible\n",
+                    "private-key:\n",
+                    "  material: yaml-private\n",
+                    "  generation: 2\n",
+                    "secret:\n",
+                    "  nested:\n",
+                    "    - yaml-one\n",
+                    "    - false\n",
+                ),
+            );
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let workspace_parent = Fixture::new("nested-explicit-secrets-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+
+            let json: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace.join("config/nested.json")).expect("nested JSON"),
+            )
+            .expect("redacted nested JSON remains valid");
+            assert_eq!(json["password"]["value"], REDACTED);
+            assert_eq!(json["password"]["generation"], REDACTED);
+            assert_eq!(json["password"]["active"], REDACTED);
+            assert_eq!(
+                json["auth"]["endpoint"],
+                "https://identity.example.com/authorize"
+            );
+            assert_eq!(json["auth"]["scope"], "openid");
+            assert_eq!(json["auth"]["client_secret"], REDACTED);
+
+            let toml: toml::Value = fs::read_to_string(workspace.join("config/nested.toml"))
+                .expect("nested TOML")
+                .parse()
+                .expect("redacted nested TOML remains valid");
+            assert_eq!(toml["public_name"].as_str(), Some("visible"));
+            assert_eq!(toml["credentials"]["username"].as_str(), Some(REDACTED));
+            assert_eq!(toml["credentials"]["parts"][0].as_str(), Some(REDACTED));
+            assert_eq!(toml["credentials"]["parts"][1].as_str(), Some(REDACTED));
+            assert_eq!(toml["credentials"]["enabled"].as_str(), Some(REDACTED));
+
+            let yaml: serde_yaml::Value = serde_yaml::from_slice(
+                &fs::read(workspace.join("config/nested.yml")).expect("nested YAML"),
+            )
+            .expect("redacted nested YAML remains valid");
+            assert_eq!(yaml["public-name"].as_str(), Some("visible"));
+            assert_eq!(yaml["private-key"]["material"].as_str(), Some(REDACTED));
+            assert_eq!(yaml["private-key"]["generation"].as_str(), Some(REDACTED));
+            assert_eq!(yaml["secret"]["nested"][0].as_str(), Some(REDACTED));
+            assert_eq!(yaml["secret"]["nested"][1].as_str(), Some(REDACTED));
+        }
+
+        #[test]
         fn preserves_public_oauth_metadata_outside_known_credential_containers() {
             let fixture = Fixture::new("public-oauth");
             fixture.write(
@@ -2772,6 +2948,35 @@ mod tests {
                 .files
                 .iter()
                 .any(|file| file.path == "src/leak.ts"));
+        }
+
+        #[test]
+        fn source_scanning_detects_wrapped_literals_but_keeps_runtime_results() {
+            let fixture = Fixture::new("wrapped-literals");
+            fixture.write(
+                "src/wrapped.rs",
+                "let token = Some(\"wrapped-rust-secret\");\n",
+            );
+            fixture.write(
+                "src/wrapped.ts",
+                "const password = new String(\"wrapped-ts-secret\");\n",
+            );
+            fixture.write("src/runtime.rs", "let password = fetch_password();\n");
+            fixture.write("src/runtime.ts", "const token = loadToken();\n");
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            for excluded in ["src/wrapped.rs", "src/wrapped.ts"] {
+                assert!(
+                    !inventory.files.iter().any(|file| file.path == excluded),
+                    "wrapped hardcoded credential was inventoried: {excluded}"
+                );
+            }
+            for retained in ["src/runtime.rs", "src/runtime.ts"] {
+                assert!(
+                    inventory.files.iter().any(|file| file.path == retained),
+                    "runtime credential result was excluded: {retained}"
+                );
+            }
         }
 
         #[test]
@@ -3051,5 +3256,9 @@ mod tests {
         )
         .expect_err("unsupported workspace");
         assert!(error.contains("unsupported"));
+
+        let read_error = read_project_bytes_handle_safe(fixture.path(), Path::new("src/main.rs"))
+            .expect_err("unsupported handle-safe reader");
+        assert!(read_error.contains("unsupported"));
     }
 }
