@@ -92,7 +92,7 @@ fn inspect_project_platform(root: &Path) -> Result<ProjectInventory, String> {
                 continue;
             };
             redacted
-        } else if suspected_credentials(&bytes) || credential_like_unstructured_file(&path) {
+        } else if suspected_credentials(&path, &bytes) {
             continue;
         } else {
             (bytes, Vec::new())
@@ -219,8 +219,7 @@ fn copy_inventory(
         let bytes = safe_read.bytes;
         if binary(&bytes)
             || private_key_content(&bytes)
-            || (!configuration_file(&source)
-                && (suspected_credentials(&bytes) || credential_like_unstructured_file(&source)))
+            || (!configuration_file(&source) && suspected_credentials(&source, &bytes))
         {
             return Err(format!("Inventory source became excluded: {}", file.path));
         }
@@ -1074,12 +1073,13 @@ fn configuration_format(path: &Path) -> Option<ConfigurationFormat> {
 fn redact_configuration(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, Vec<String>), String> {
     let format = configuration_format(path)
         .ok_or_else(|| format!("Unsupported configuration format: {}", path.display()))?;
+    let container_policy = CredentialContainerPolicy::for_path(path);
     let mut keys = Vec::new();
     let output = match format {
         ConfigurationFormat::Json => {
             let mut value: serde_json::Value = serde_json::from_slice(bytes)
                 .map_err(|_| format!("Invalid JSON configuration: {}", path.display()))?;
-            redact_json_value(&mut value, None, false, &mut keys);
+            redact_json_value(&mut value, None, false, container_policy, &mut keys);
             serde_json::to_vec_pretty(&value)
                 .map_err(|_| format!("Cannot serialize JSON configuration: {}", path.display()))?
         }
@@ -1088,7 +1088,7 @@ fn redact_configuration(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, Vec<Strin
                 .map_err(|_| format!("Invalid UTF-8 TOML configuration: {}", path.display()))?;
             let mut value: toml::Value = toml::from_str(text)
                 .map_err(|_| format!("Invalid TOML configuration: {}", path.display()))?;
-            redact_toml_value(&mut value, None, false, &mut keys);
+            redact_toml_value(&mut value, None, false, container_policy, &mut keys);
             toml::to_string_pretty(&value)
                 .map(String::into_bytes)
                 .map_err(|_| format!("Cannot serialize TOML configuration: {}", path.display()))?
@@ -1096,7 +1096,7 @@ fn redact_configuration(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, Vec<Strin
         ConfigurationFormat::Yaml => {
             let mut value: serde_yaml::Value = serde_yaml::from_slice(bytes)
                 .map_err(|_| format!("Invalid YAML configuration: {}", path.display()))?;
-            redact_yaml_value(&mut value, None, false, &mut keys);
+            redact_yaml_value(&mut value, None, false, container_policy, &mut keys);
             serde_yaml::to_string(&value)
                 .map(String::into_bytes)
                 .map_err(|_| format!("Cannot serialize YAML configuration: {}", path.display()))?
@@ -1174,6 +1174,7 @@ fn redact_json_value(
     value: &mut serde_json::Value,
     context: Option<&str>,
     protected: bool,
+    container_policy: CredentialContainerPolicy,
     keys: &mut Vec<String>,
 ) {
     if protected && !value.is_object() && !value.is_array() {
@@ -1184,13 +1185,16 @@ fn redact_json_value(
     match value {
         serde_json::Value::Object(object) => {
             for (key, value) in object {
-                let protected = protected || credential_container(key) || sensitive_key(key);
-                redact_json_value(value, Some(key), protected, keys);
+                let composite = value.is_object() || value.is_array();
+                let protected = protected
+                    || container_policy.redacts(key)
+                    || (!composite && sensitive_key(key));
+                redact_json_value(value, Some(key), protected, container_policy, keys);
             }
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                redact_json_value(value, context, protected, keys);
+                redact_json_value(value, context, protected, container_policy, keys);
             }
         }
         serde_json::Value::String(text) if connection_string(text) => {
@@ -1205,6 +1209,7 @@ fn redact_toml_value(
     value: &mut toml::Value,
     context: Option<&str>,
     protected: bool,
+    container_policy: CredentialContainerPolicy,
     keys: &mut Vec<String>,
 ) {
     if protected && !value.is_table() && !value.is_array() {
@@ -1215,13 +1220,16 @@ fn redact_toml_value(
     match value {
         toml::Value::Table(table) => {
             for (key, value) in table {
-                let protected = protected || credential_container(key) || sensitive_key(key);
-                redact_toml_value(value, Some(key), protected, keys);
+                let composite = value.is_table() || value.is_array();
+                let protected = protected
+                    || container_policy.redacts(key)
+                    || (!composite && sensitive_key(key));
+                redact_toml_value(value, Some(key), protected, container_policy, keys);
             }
         }
         toml::Value::Array(values) => {
             for value in values {
-                redact_toml_value(value, context, protected, keys);
+                redact_toml_value(value, context, protected, container_policy, keys);
             }
         }
         toml::Value::String(text) if connection_string(text) => {
@@ -1236,6 +1244,7 @@ fn redact_yaml_value(
     value: &mut serde_yaml::Value,
     context: Option<&str>,
     protected: bool,
+    container_policy: CredentialContainerPolicy,
     keys: &mut Vec<String>,
 ) {
     if protected
@@ -1254,15 +1263,25 @@ fn redact_yaml_value(
         serde_yaml::Value::Mapping(mapping) => {
             for (key, value) in mapping {
                 let key_text = key.as_str();
+                let composite = matches!(
+                    value,
+                    serde_yaml::Value::Mapping(_) | serde_yaml::Value::Sequence(_)
+                );
                 let protected = protected
-                    || key_text.is_some_and(credential_container)
-                    || key_text.is_some_and(sensitive_key);
-                redact_yaml_value(value, key_text.or(context), protected, keys);
+                    || key_text.is_some_and(|key| container_policy.redacts(key))
+                    || (!composite && key_text.is_some_and(sensitive_key));
+                redact_yaml_value(
+                    value,
+                    key_text.or(context),
+                    protected,
+                    container_policy,
+                    keys,
+                );
             }
         }
         serde_yaml::Value::Sequence(values) => {
             for value in values {
-                redact_yaml_value(value, context, protected, keys);
+                redact_yaml_value(value, context, protected, container_policy, keys);
             }
         }
         serde_yaml::Value::String(text) if connection_string(text) => {
@@ -1270,7 +1289,13 @@ fn redact_yaml_value(
             keys.push(context.unwrap_or("connection-string").to_string());
         }
         serde_yaml::Value::Tagged(tagged) => {
-            redact_yaml_value(&mut tagged.value, context, protected, keys);
+            redact_yaml_value(
+                &mut tagged.value,
+                context,
+                protected,
+                container_policy,
+                keys,
+            );
         }
         _ => {}
     }
@@ -1379,6 +1404,54 @@ fn sensitive_key(key: &str) -> bool {
         .any(|candidate| key.ends_with(candidate))
 }
 
+#[derive(Clone, Copy)]
+enum CredentialContainerPolicy {
+    None,
+    ComposerAuth,
+    DockerAuth,
+}
+
+impl CredentialContainerPolicy {
+    fn for_path(path: &Path) -> Self {
+        let name = filename(path);
+        if name == "auth.json" {
+            Self::ComposerAuth
+        } else if name == "config.json"
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|value| value.to_str())
+                .is_some_and(|parent| matches!(parent, "docker" | ".docker"))
+        {
+            Self::DockerAuth
+        } else {
+            Self::None
+        }
+    }
+
+    fn redacts(self, key: &str) -> bool {
+        let key = normalized_key(key);
+        match self {
+            Self::None => false,
+            Self::ComposerAuth => matches!(
+                key.as_str(),
+                "auth"
+                    | "auths"
+                    | "credential"
+                    | "credentials"
+                    | "githuboauth"
+                    | "gitlaboauth"
+                    | "bitbucketoauth"
+                    | "httpbasic"
+                    | "httpbearer"
+                    | "bearer"
+                    | "gitlabtoken"
+            ),
+            Self::DockerAuth => key == "auths",
+        }
+    }
+}
+
 fn credential_container(key: &str) -> bool {
     let key = normalized_key(key);
     matches!(
@@ -1432,13 +1505,14 @@ fn connection_string(value: &str) -> bool {
         })
 }
 
-fn suspected_credentials(bytes: &[u8]) -> bool {
+fn suspected_credentials(path: &Path, bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return true;
     };
     if bearer_credential(text) || xml_like_credentials(text) {
         return true;
     }
+    let source = source_file(path);
     text.lines().any(|line| {
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
@@ -1465,56 +1539,203 @@ fn suspected_credentials(bytes: &[u8]) -> bool {
                     .next()
                     .unwrap_or("");
                 let value = line[delimiter + 1..].trim_start();
-                !value.is_empty() && (sensitive_key(key) || connection_string(value))
+                !value.is_empty()
+                    && (connection_string(value)
+                        || (sensitive_key(key) && credential_assignment_value(value, source)))
             })
     })
 }
 
 fn bearer_credential(text: &str) -> bool {
-    let words = text
-        .split(|character: char| {
-            !character.is_ascii_alphanumeric() && character != '-' && character != '_'
-        })
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
-    words.windows(2).any(|pair| {
-        pair[0].eq_ignore_ascii_case("bearer")
-            && !matches!(pair[1].to_ascii_lowercase().as_str(), "token" | "redacted")
-    })
-}
-
-fn xml_like_credentials(text: &str) -> bool {
-    let mut remainder = text;
-    while let Some(start) = remainder.find('<') {
-        remainder = &remainder[start + 1..];
-        let opening = remainder.trim_start();
-        if opening.starts_with('/') || opening.starts_with('!') || opening.starts_with('?') {
-            continue;
+    let lower = text.to_ascii_lowercase();
+    let mut offset = 0;
+    while let Some(found) = lower[offset..].find("bearer") {
+        let start = offset + found;
+        let before = text[..start].chars().next_back();
+        let after_word = start + "bearer".len();
+        let after = text[after_word..].chars().next();
+        let bounded = before.is_none_or(|value| !value.is_ascii_alphanumeric())
+            && after.is_none_or(|value| !value.is_ascii_alphanumeric());
+        if bounded {
+            let token = text[after_word..]
+                .trim_start_matches(|value: char| {
+                    value.is_ascii_whitespace() || matches!(value, ':' | '=' | '"' | '\'')
+                })
+                .split(|value: char| {
+                    value.is_ascii_whitespace() || matches!(value, '"' | '\'' | '<' | '>')
+                })
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(|value: char| matches!(value, ',' | ';' | '.'));
+            if high_confidence_secret(token) {
+                return true;
+            }
         }
-        let name = opening
-            .split(|character: char| {
-                character.is_ascii_whitespace() || matches!(character, '>' | '/')
-            })
-            .next()
-            .unwrap_or("");
-        if name.is_empty() {
-            continue;
-        }
-        if (sensitive_key(name) || credential_container(name))
-            && opening.split_once('>').is_some_and(|(_, content)| {
-                !content.trim_start().starts_with('<') || content.contains("</")
-            })
-        {
-            return true;
-        }
+        offset = after_word;
     }
     false
 }
 
-fn credential_like_unstructured_file(path: &Path) -> bool {
-    let extension = extension(path);
-    if matches!(
-        extension.as_str(),
+fn credential_assignment_value(value: &str, source: bool) -> bool {
+    if connection_string(value) || bearer_credential(value) {
+        return true;
+    }
+    if source {
+        direct_string_literal(value).is_some_and(hardcoded_credential_literal)
+    } else {
+        let value = value
+            .split(|character: char| character.is_ascii_whitespace() || character == ';')
+            .next()
+            .unwrap_or("")
+            .trim_matches(['"', '\'', '`']);
+        !value.is_empty()
+            && !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "string"
+                    | "str"
+                    | "token"
+                    | "secret"
+                    | "password"
+                    | "redacted"
+                    | "example"
+                    | "placeholder"
+            )
+    }
+}
+
+fn hardcoded_credential_literal(value: &str) -> bool {
+    !value.trim().is_empty()
+        && !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "token" | "secret" | "password" | "redacted" | "example" | "placeholder"
+        )
+}
+
+fn direct_string_literal(value: &str) -> Option<&str> {
+    let value = value.trim_start();
+    let (quote, remainder) = match value.chars().next()? {
+        quote @ ('"' | '\'' | '`') => (quote, &value[quote.len_utf8()..]),
+        _ => return None,
+    };
+    let end = remainder.find(quote)?;
+    Some(&remainder[..end])
+}
+
+fn high_confidence_secret(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty()
+        || matches!(
+            value.to_ascii_lowercase().as_str(),
+            "token"
+                | "secret"
+                | "password"
+                | "redacted"
+                | "example"
+                | "placeholder"
+                | "authentication"
+        )
+    {
+        return false;
+    }
+    value.starts_with("eyJ") && value.matches('.').count() >= 2
+        || ["ghp_", "github_pat_", "sk-", "xox", "akia", "ya29."]
+            .iter()
+            .any(|prefix| value.to_ascii_lowercase().starts_with(prefix))
+        || value.len() >= 16
+}
+
+fn xml_like_credentials(text: &str) -> bool {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    if !text.trim_start().starts_with('<') {
+        return false;
+    }
+    let mut reader = Reader::from_str(text);
+    let decoder = reader.decoder();
+    let mut sensitive_elements = Vec::new();
+    loop {
+        let event = match reader.read_event() {
+            Ok(event) => event,
+            Err(_) => return credential_vocabulary(text),
+        };
+        match event {
+            Event::Start(start) => {
+                let name = std::str::from_utf8(start.local_name().as_ref())
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                match xml_attributes_contain_credentials(&start, decoder) {
+                    Ok(true) => return true,
+                    Ok(false) => sensitive_elements.push(sensitive_key(&name)),
+                    Err(_) => return credential_vocabulary(text),
+                }
+            }
+            Event::Empty(start) => match xml_attributes_contain_credentials(&start, decoder) {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(_) => return credential_vocabulary(text),
+            },
+            Event::Text(value)
+                if sensitive_elements.last() == Some(&true)
+                    && (value.as_ref() as &[u8])
+                        .iter()
+                        .any(|byte| !byte.is_ascii_whitespace()) =>
+            {
+                return true;
+            }
+            Event::End(_) => {
+                sensitive_elements.pop();
+            }
+            Event::Eof => {
+                return if sensitive_elements.is_empty() {
+                    false
+                } else {
+                    credential_vocabulary(text)
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
+fn xml_attributes_contain_credentials(
+    start: &quick_xml::events::BytesStart<'_>,
+    decoder: quick_xml::Decoder,
+) -> Result<bool, String> {
+    use quick_xml::XmlVersion;
+
+    let mut attributes = Vec::new();
+    for attribute in start.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let name = std::str::from_utf8(attribute.key.as_ref())
+            .map_err(|_| "XML attribute name is not UTF-8".to_string())?
+            .to_string();
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+        attributes.push((name, value));
+    }
+    let logical_key = attributes
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("key") || name.eq_ignore_ascii_case("name"))
+        .map(|(_, value)| value.as_str());
+    Ok(attributes.iter().any(|(name, value)| {
+        !value.trim().is_empty()
+            && (sensitive_key(name)
+                || (name.eq_ignore_ascii_case("value") && logical_key.is_some_and(sensitive_key)))
+    }))
+}
+
+fn credential_vocabulary(text: &str) -> bool {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .any(|word| sensitive_key(word) || credential_container(word))
+}
+
+fn source_file(path: &Path) -> bool {
+    matches!(
+        extension(path).as_str(),
         "rs" | "java"
             | "kt"
             | "kts"
@@ -1536,27 +1757,6 @@ fn credential_like_unstructured_file(path: &Path) -> bool {
             | "rb"
             | "php"
             | "swift"
-    ) {
-        return false;
-    }
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .map(normalized_key)
-        .unwrap_or_default();
-    matches!(
-        stem.as_str(),
-        "auth"
-            | "authentication"
-            | "credential"
-            | "credentials"
-            | "oauth"
-            | "password"
-            | "passwords"
-            | "secret"
-            | "secrets"
-            | "token"
-            | "tokens"
     )
 }
 
@@ -2356,6 +2556,54 @@ mod tests {
         }
 
         #[test]
+        fn preserves_public_oauth_metadata_outside_known_credential_containers() {
+            let fixture = Fixture::new("public-oauth");
+            fixture.write(
+                "package.json",
+                r#"{"dependencies":{"oauth":"2.0.0","oauth2":"3.0.0","tokenizers":"1.2.3"}}"#,
+            );
+            fixture.write(
+                "config/oauth.json",
+                r#"{
+  "oauth": {
+    "authorization_endpoint": "https://identity.example.com/authorize",
+    "scope": "openid profile",
+    "client_id": "public-client-id",
+    "timeout": 30,
+    "pkce": true,
+    "client_secret": "private-client-secret"
+  }
+}"#,
+            );
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let workspace_parent = Fixture::new("public-oauth-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+
+            let package: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace.join("package.json")).expect("package manifest"),
+            )
+            .expect("package manifest JSON");
+            assert_eq!(package["dependencies"]["oauth"], "2.0.0");
+            assert_eq!(package["dependencies"]["oauth2"], "3.0.0");
+
+            let oauth: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace.join("config/oauth.json")).expect("OAuth config"),
+            )
+            .expect("OAuth config JSON");
+            assert_eq!(
+                oauth["oauth"]["authorization_endpoint"],
+                "https://identity.example.com/authorize"
+            );
+            assert_eq!(oauth["oauth"]["scope"], "openid profile");
+            assert_eq!(oauth["oauth"]["client_id"], "public-client-id");
+            assert_eq!(oauth["oauth"]["timeout"], 30);
+            assert_eq!(oauth["oauth"]["pkce"], true);
+            assert_eq!(oauth["oauth"]["client_secret"], REDACTED);
+        }
+
+        #[test]
         fn redacts_nuget_xml_and_excludes_suspicious_unstructured_credentials() {
             let fixture = Fixture::new("xml-secrets");
             fixture.write(
@@ -2414,11 +2662,11 @@ mod tests {
             );
             fixture.write(
                 "notes/request.txt",
-                "send the Authorization Bearer bearer-header-secret header\n",
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature\n",
             );
             fixture.write(
                 "notes/oauth.txt",
-                "opaque credential payload that cannot be classified reliably\n",
+                "access_token = opaque-credential-payload\n",
             );
             fixture.write("notes/readme.txt", "public architecture notes\n");
 
@@ -2438,6 +2686,92 @@ mod tests {
                 .files
                 .iter()
                 .any(|file| file.path == "notes/readme.txt"));
+        }
+
+        #[test]
+        fn parses_unknown_xml_credentials_and_fails_closed_on_malformed_vocabulary() {
+            let fixture = Fixture::new("unknown-xml-credentials");
+            fixture.write(
+                "notes/property.xml",
+                "<settings><property name=\"password\" value=\"xml-property-secret\"/></settings>\n",
+            );
+            fixture.write(
+                "notes/key-value.xml",
+                "<settings><add key=\"api-token\" value=\"xml-token-secret\"/></settings>\n",
+            );
+            fixture.write(
+                "notes/element.xml",
+                "<settings><password>xml-element-secret</password></settings>\n",
+            );
+            fixture.write(
+                "notes/malformed.xml",
+                "<settings><property name=\"password\" value=\"unclosed-secret\"\n",
+            );
+            fixture.write(
+                "notes/public.xml",
+                "<settings><property name=\"region\" value=\"local\"/></settings>\n",
+            );
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            for excluded in [
+                "notes/property.xml",
+                "notes/key-value.xml",
+                "notes/element.xml",
+                "notes/malformed.xml",
+            ] {
+                assert!(
+                    !inventory.files.iter().any(|file| file.path == excluded),
+                    "XML credential file was inventoried: {excluded}"
+                );
+            }
+            assert!(inventory
+                .files
+                .iter()
+                .any(|file| file.path == "notes/public.xml"));
+        }
+
+        #[test]
+        fn source_and_document_scanning_requires_high_confidence_credential_literals() {
+            let fixture = Fixture::new("literal-aware");
+            fixture.write(
+                "src/types.ts",
+                "export type Credentials = { token: string; authorization: string };\n",
+            );
+            fixture.write(
+                "src/types.rs",
+                "pub fn typed(token: String) { let token: String = token; }\n",
+            );
+            fixture.write("src/leak.ts", "export const token = \"abc123\";\n");
+            fixture.write(
+                "docs/auth.md",
+                "Use the Bearer authentication scheme with an access token.\n",
+            );
+            fixture.write(
+                "notes/oauth.txt",
+                "OAuth redirects use PKCE and the authorization code flow.\n",
+            );
+            fixture.write(
+                "docs/secrets.md",
+                "Secrets are injected by the deployment platform; no values live here.\n",
+            );
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            for retained in [
+                "src/types.ts",
+                "src/types.rs",
+                "docs/auth.md",
+                "notes/oauth.txt",
+                "docs/secrets.md",
+            ] {
+                assert!(
+                    inventory.files.iter().any(|file| file.path == retained),
+                    "safe typed source or documentation was excluded: {retained}"
+                );
+            }
+            assert!(!inventory
+                .files
+                .iter()
+                .any(|file| file.path == "src/leak.ts"));
         }
 
         #[test]
