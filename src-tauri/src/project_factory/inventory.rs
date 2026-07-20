@@ -1619,7 +1619,7 @@ fn bearer_credential(text: &str) -> bool {
                 })
                 .next()
                 .unwrap_or("")
-                .trim_end_matches(|value: char| matches!(value, ',' | ';' | '.'));
+                .trim_end_matches([',', ';', '.']);
             if high_confidence_secret(token) {
                 return true;
             }
