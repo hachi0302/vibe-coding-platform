@@ -163,9 +163,13 @@ import {
 } from './projectFactory/api'
 import { buildProjectInitializationPrompt } from './workflows/prompt'
 import {
+  initializationActionForStatus,
   initializationAgentGuardMessage,
+  initializationCompletionDetail,
   initializationProgressFor,
+  initializationProgressFromStatus,
   isInitializationTaskCardVisible,
+  isInitializationTaskVisible,
   isProjectInitializationAgent,
   projectInitializationSteps,
   type ProjectInitializationPhase,
@@ -211,16 +215,18 @@ let initializationElapsedTimer = 0
 let initializationCompleteTimer = 0
 let initializationProgressUnlisten: UnlistenFn | null = null
 
-function setInitializationProgress(project: ProjectInfo, phase: ProjectInitializationPhase) {
-  const progress = initializationProgressFor(phase)
-  const current = initializationProgress.value
-  if (!current || current.projectPath !== project.displayPath) {
-    window.clearInterval(initializationElapsedTimer)
-    window.clearTimeout(initializationCompleteTimer)
-    initializationElapsedSeconds.value = 0
+function setInitializationProgress(
+  project: ProjectInfo,
+  progress: ProjectInitializationProgress = initializationProgressFor('scan'),
+) {
+  window.clearInterval(initializationElapsedTimer)
+  window.clearTimeout(initializationCompleteTimer)
+  initializationElapsedSeconds.value = 0
+  initializationElapsedTimer = 0
+  if (isInitializationTaskVisible(progress.phase)) {
     initializationElapsedTimer = window.setInterval(() => { initializationElapsedSeconds.value += 1 }, 1000)
-    initializationProgressMinimized.value = false
   }
+  initializationProgressMinimized.value = false
   initializationProgress.value = {
     ...progress,
     projectPath: project.displayPath,
@@ -228,24 +234,32 @@ function setInitializationProgress(project: ProjectInfo, phase: ProjectInitializ
   }
 }
 
-function advanceInitializationProgress(projectPath: string, phase: ProjectInitializationPhase) {
+function advanceInitializationProgress(
+  projectPath: string,
+  phase: ProjectInitializationPhase,
+  detail?: string,
+  sequence?: number,
+) {
   const current = initializationProgress.value
   if (!current || current.projectPath !== projectPath) return
   initializationProgress.value = {
+    ...current,
     ...initializationProgressFor(phase),
+    detail: detail ?? initializationProgressFor(phase).detail,
+    sequence: sequence ?? current.sequence,
     projectPath,
     projectName: current.projectName,
   }
-  if (phase === 'complete' || phase === 'failed') {
+  if (!isInitializationTaskVisible(phase)) {
     window.clearInterval(initializationElapsedTimer)
     initializationElapsedTimer = 0
   }
-  if (phase === 'complete' || phase === 'failed') {
+  if (phase === 'complete') {
     window.clearTimeout(initializationCompleteTimer)
     initializationCompleteTimer = window.setTimeout(() => {
       if (
         initializationProgress.value?.projectPath === projectPath
-        && (initializationProgress.value.phase === 'complete' || initializationProgress.value.phase === 'failed')
+        && initializationProgress.value.phase === 'complete'
       ) {
         initializationProgress.value = null
       }
@@ -287,17 +301,49 @@ function updateProjectFactoryTask(task: BackgroundTaskSummary) {
 function applyInitializationProgress(progress: ExistingProjectInitializationProgress) {
   const current = initializationProgress.value
   if (!current || current.projectPath !== progress.projectPath) return
-  const allowed: ProjectInitializationPhase[] = ['analyze', 'documents', 'rules', 'validate', 'complete', 'failed']
+  const allowed: ProjectInitializationPhase[] = [
+    'scan',
+    'plan',
+    'documents',
+    'rules',
+    'skills',
+    'install',
+    'verify',
+    'complete',
+    'failed',
+    'interrupted',
+    'conflict',
+  ]
   if (!allowed.includes(progress.phase)) return
+  if (
+    progress.sequence !== undefined
+    && current.sequence !== undefined
+    && progress.sequence <= current.sequence
+  ) return
   initializationProgress.value = {
+    ...current,
     phase: progress.phase,
     percent: Math.max(0, Math.min(100, progress.percent)),
     detail: progress.detail,
+    runId: progress.runId ?? current.runId,
+    attempt: progress.attempt ?? current.attempt,
+    sequence: progress.sequence ?? current.sequence,
+    recoverable: progress.recoverable ?? current.recoverable,
     projectPath: current.projectPath,
     projectName: current.projectName,
   }
-  if (progress.phase === 'complete' || progress.phase === 'failed') {
-    advanceInitializationProgress(progress.projectPath, progress.phase)
+  if (!isInitializationTaskVisible(progress.phase)) {
+    window.clearInterval(initializationElapsedTimer)
+    initializationElapsedTimer = 0
+  }
+  if (progress.phase === 'complete') {
+    window.clearTimeout(initializationCompleteTimer)
+    initializationCompleteTimer = window.setTimeout(() => {
+      if (
+        initializationProgress.value?.projectPath === progress.projectPath
+        && initializationProgress.value.phase === 'complete'
+      ) initializationProgress.value = null
+    }, 2200)
   }
 }
 
@@ -315,7 +361,12 @@ function finishProjectFactoryTask() {
 }
 
 function minimizeInitializationProgress() {
-  if (initializationProgress.value) initializationProgressMinimized.value = true
+  if (!initializationProgress.value) return
+  if (!isInitializationTaskVisible(initializationProgress.value.phase)) {
+    initializationProgress.value = null
+    return
+  }
+  initializationProgressMinimized.value = true
 }
 
 function restoreBackgroundTask(kind: BackgroundTaskKind) {
@@ -842,7 +893,9 @@ function openCtxMenu(e: MouseEvent, p: ProjectInfo) {
     const target = p.displayPath
     existingProjectInitStatus(target)
       .then((status) => {
-        if (ctxMenu.value?.project.displayPath === target) ctxMenu.value.initialized = status.initialized
+        if (ctxMenu.value?.project.displayPath === target) {
+          ctxMenu.value.initialized = initializationActionForStatus(status) === 'complete'
+        }
       })
       .catch(() => {})
   }
@@ -857,11 +910,21 @@ async function initializeProject(project: ProjectInfo) {
   }
   try {
     const status = await existingProjectInitStatus(project.displayPath)
-    if (status.initialized) {
+    const action = initializationActionForStatus(status)
+    if (action === 'complete') {
       notify('该项目已完成平台初始化，无需重复执行。')
       return
     }
-    setInitializationProgress(project, 'analyze')
+    const restoredProgress = initializationProgressFromStatus(status)
+    if (action === 'attention') {
+      setInitializationProgress(project, restoredProgress)
+      notify(restoredProgress.detail, true)
+      return
+    }
+    setInitializationProgress(
+      project,
+      action === 'resume' ? restoredProgress : initializationProgressFor('scan'),
+    )
     const result = await initializeExistingProject(
       project.displayPath,
       initializationAgent,
@@ -871,13 +934,15 @@ async function initializeProject(project: ProjectInfo) {
         path: project.displayPath,
       }),
     )
-    advanceInitializationProgress(project.displayPath, 'complete')
+    const completionDetail = initializationCompletionDetail(result.artifactTotals)
+    advanceInitializationProgress(project.displayPath, 'complete', completionDetail, result.sequence)
     window.dispatchEvent(new CustomEvent<string>('vibe-project-initialized', { detail: project.displayPath }))
-    notify(`项目初始化完成：已校验 ${result.generated.length} 份中文项目文档、规则与 skills。`)
+    notify(completionDetail)
     markProjectsDirty()
   } catch (error) {
-    advanceInitializationProgress(project.displayPath, 'failed')
-    notify(`项目初始化失败：${String(error)}`, true)
+    const detail = error instanceof Error ? error.message : String(error)
+    advanceInitializationProgress(project.displayPath, 'failed', detail)
+    notify(`项目初始化失败：${detail}`, true)
   }
 }
 async function ctxInitializeProject() {
@@ -4282,7 +4347,7 @@ provide<PaneActions>(PaneActionsKey, {
             :elapsed-seconds="initializationElapsedSeconds"
             :steps="projectInitializationSteps"
             title="正在初始化项目"
-            description="正在基于当前项目真实代码补齐中文 docs、规则与 skills，请保持此页面打开。"
+            description="正在依据当前项目真实代码生成并验证工程文档、规则与 skills，请保持此页面打开。"
             step-label="01 / 初始化"
             note="每个节点仅在实际完成后推进；不会覆盖已有业务文档或业务代码。"
             progress-label="项目初始化进度"

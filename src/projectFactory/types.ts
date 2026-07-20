@@ -232,14 +232,70 @@ export interface CreateProjectResult {
   }
 }
 
-export interface ExistingProjectInitResult {
+export type ExistingProjectInitClassification =
+  | 'not-initialized'
+  | 'incomplete'
+  | 'legacy-v3'
+  | 'current-v4'
+  | 'needs-attention'
+
+export type ExistingProjectInitializationPhase =
+  | 'scan'
+  | 'plan'
+  | 'documents'
+  | 'rules'
+  | 'skills'
+  | 'install'
+  | 'verify'
+  | 'complete'
+  | 'failed'
+  | 'interrupted'
+  | 'conflict'
+
+export interface ExistingProjectArtifactTotals {
+  documents: number
+  rules: number
+  skills: number
+  total?: number
+}
+
+export interface ExistingProjectInitializationIssue {
+  code: string
+  detail: string
+  path?: string
+  stage?: ExistingProjectInitializationPhase
+}
+
+export interface ExistingProjectInitializationConflict {
+  path: string
+  detail: string
+  expectedHash?: string
+  actualHash?: string
+}
+
+export interface ExistingProjectInitializationState {
+  runId?: string
+  status?: ExistingProjectInitClassification
+  phase?: ExistingProjectInitializationPhase
+  percent?: number
+  detail?: string
+  attempt?: number
+  sequence?: number
+  recoverable?: boolean
+  issues?: ExistingProjectInitializationIssue[]
+  conflicts?: ExistingProjectInitializationConflict[]
+  warnings?: string[]
+  artifactTotals?: ExistingProjectArtifactTotals
+}
+
+export interface ExistingProjectInitResult extends ExistingProjectInitializationState {
   projectPath: string
-  layers: {
+  layers?: {
     frontend: boolean
     backend: boolean
   }
-  detectedStack: string[]
-  generated: string[]
+  detectedStack?: string[]
+  generated?: string[]
 }
 
 export interface ExistingProjectInitPreparation {
@@ -253,14 +309,22 @@ export interface ExistingProjectInitPreparation {
   existingAgentMaterial: string[]
 }
 
-export interface ExistingProjectInitStatus {
+export interface ExistingProjectInitStatus extends ExistingProjectInitializationState {
   initialized: boolean
   markerVersion?: string
 }
 
-export interface ExistingProjectInitializationProgress {
+export interface ExistingProjectInitializationProgress extends ExistingProjectInitializationState {
   projectPath: string
-  phase: 'analyze' | 'documents' | 'rules' | 'validate' | 'complete' | 'failed'
+  runId?: string
+  phase: ExistingProjectInitializationPhase
   percent: number
   detail: string
+  attempt?: number
+  sequence?: number
+  recoverable?: boolean
+  issues?: ExistingProjectInitializationIssue[]
+  conflicts?: ExistingProjectInitializationConflict[]
+  warnings?: string[]
+  artifactTotals?: ExistingProjectArtifactTotals
 }

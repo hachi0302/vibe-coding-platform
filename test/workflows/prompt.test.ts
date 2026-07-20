@@ -77,28 +77,20 @@ describe('workflow prompt', () => {
     expect(normalizeInitialInput('请开始分析\n')).toBe('请开始分析\r')
   })
 
-  it('builds a headless initialization contract without chat commands or checkpoints', () => {
+  it('builds one stable product-intent prompt without duplicating the Rust artifact contract', () => {
     const input = buildProjectInitializationPrompt(project)
 
     expect(input.startsWith('/init')).toBe(false)
-    expect(input).toContain('后台非会话')
-    expect(input).toContain('第一步读取并执行 `.claude/skills/skill-designer/SKILL.md`')
-    expect(input).toContain('版本号、任务序号、模块编号')
-    expect(input).toContain('禁止写死 `01`')
-    expect(input).toContain('其他长期文档不得留下 `{{占位符}}`')
-    expect(input).toContain('不得把通用模板原文不加分析地复制成项目规则')
-    expect(input).toContain('使用 skill-designer 生成并校验项目专属')
-    expect(input).not.toContain('生成 `worktree`')
-    expect(input).not.toContain('项目专属 `worktree`')
-    expect(input).toContain('前端项目不得生成物理模型')
-    expect(input).toContain('只有扫描到真实服务端路由')
-    expect(input).toContain('所有后端项目都生成项目专属 `backend-log-diagnose`')
-    expect(input).toContain('检测到数据库连接配置时生成项目专属 `database-read-diagnose`')
-    expect(input).toContain('检测到真实第三方客户端或 SDK 调用时')
-    expect(input).not.toContain('运维接入说明')
+    expect(input).toContain('当前项目：Demo Service')
+    expect(input).toContain('可执行工程上下文')
+    expect(input).toContain('真实代码证据')
+    expect(input).toContain('不得覆盖用户已有内容')
+    expect(input).not.toContain(project.path)
+    expect(input).not.toContain('docs/backend/latest/接口文档')
+    expect(input).not.toContain('.claude/rules/公共')
+    expect(input).not.toMatch(/允许(?:输出|写入|生成).*(?:docs\/|\.claude\/)/)
     expect(input).not.toContain('WORKFLOW_CHECKPOINT')
     expect(input).not.toContain('initialization-ready')
-    expect(input).not.toContain('完成 /init 后再补全')
   })
 
   it('parses the initialization-ready checkpoint only after the agent has real artifacts', () => {
