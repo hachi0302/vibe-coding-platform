@@ -393,11 +393,23 @@ pub enum AgentAssetMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentAssetTarget {
+    pub path: String,
+    pub source_path: String,
+    pub mode: AgentAssetMode,
+    #[serde(default)]
+    pub link_target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OwnershipManifest {
     pub schema_version: u32,
     pub platform_version: String,
     pub run_id: String,
     pub state: InitializationRunState,
+    #[serde(default)]
+    pub inventory_sha256: String,
     #[serde(default)]
     pub plan_sha256: String,
     #[serde(default)]
@@ -409,13 +421,21 @@ pub struct OwnershipManifest {
     #[serde(default)]
     pub agent_assets: Vec<ManagedAgentAsset>,
     #[serde(default)]
+    pub agent_asset_targets: Vec<AgentAssetTarget>,
+    #[serde(default)]
     pub agent_asset_mode: Option<AgentAssetMode>,
+    #[serde(default)]
+    pub checkpoints: Vec<InitializationCheckpoint>,
     #[serde(default)]
     pub conflicts: Vec<ValidationIssue>,
     #[serde(default)]
     pub diagnostics: Vec<ValidationIssue>,
     #[serde(default)]
+    pub started_at_unix_ms: u64,
+    #[serde(default)]
     pub installed_at_unix_ms: u64,
+    #[serde(default)]
+    pub completed_at_unix_ms: u64,
 }
 
 impl Default for OwnershipManifest {
@@ -425,15 +445,20 @@ impl Default for OwnershipManifest {
             platform_version: env!("CARGO_PKG_VERSION").to_string(),
             run_id: String::new(),
             state: InitializationRunState::Preflight,
+            inventory_sha256: String::new(),
             plan_sha256: String::new(),
             artifact_totals: ArtifactTotals::default(),
             artifacts: Vec::new(),
             managed_entries: Vec::new(),
             agent_assets: Vec::new(),
+            agent_asset_targets: Vec::new(),
             agent_asset_mode: None,
+            checkpoints: Vec::new(),
             conflicts: Vec::new(),
             diagnostics: Vec::new(),
+            started_at_unix_ms: 0,
             installed_at_unix_ms: 0,
+            completed_at_unix_ms: 0,
         }
     }
 }

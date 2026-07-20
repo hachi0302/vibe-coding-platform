@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use super::artifact_plan::artifact_totals;
 use super::inventory::content_sha256;
 use super::types::{
-    AgentAssetMode, ArtifactKind, ArtifactPlan, InitializationRunState, InitializationState,
-    ManagedAgentAsset, ManagedEntryOwnership, OwnedArtifact, OwnershipManifest, ValidationIssue,
+    AgentAssetMode, AgentAssetTarget, ArtifactKind, ArtifactPlan, InitializationCheckpoint,
+    InitializationRunState, InitializationState, ManagedAgentAsset, ManagedEntryOwnership,
+    OwnedArtifact, OwnershipManifest, ValidationIssue,
 };
 
 pub const INITIALIZATION_STATE_SCHEMA_VERSION: u32 = 4;
@@ -34,13 +35,51 @@ struct InstallCandidate {
     baseline_sha256: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct RemovalCandidate {
+    path: String,
+    baseline_sha256: String,
+    operation: JournalOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum JournalOperation {
+    WriteArtifact,
+    WriteManagedEntry,
+    WriteAgentCopy,
+    RemoveOwnedArtifact,
+    RemoveAgentCopy,
+    CreateAgentLink,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum JournalEntryState {
+    Pending,
+    Applied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallJournalEntry {
+    operation: JournalOperation,
+    #[serde(default)]
+    baseline_sha256: Option<String>,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+    state: JournalEntryState,
+    #[serde(default)]
+    link_target: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InstallJournal {
     schema_version: u32,
     plan_sha256: String,
     #[serde(default)]
-    started: BTreeMap<String, String>,
+    entries: BTreeMap<String, InstallJournalEntry>,
 }
 
 #[derive(Debug)]
@@ -48,6 +87,8 @@ struct EntryCandidate {
     path: String,
     bytes: Vec<u8>,
     block_sha256: String,
+    baseline_sha256: Option<String>,
+    expected_sha256: String,
 }
 
 #[derive(Debug)]
@@ -55,6 +96,7 @@ struct CopyCandidate {
     path: String,
     bytes: Vec<u8>,
     sha256: String,
+    baseline_sha256: Option<String>,
 }
 
 fn issue(
@@ -270,6 +312,23 @@ fn save_install_journal(project: &Path, journal: &InstallJournal) -> Result<(), 
     .map_err(|error| issue("install.journal.write", error, None, "install"))
 }
 
+fn journal_for_plan(project: &Path, plan_sha256: &str) -> Result<InstallJournal, ValidationIssue> {
+    match load_install_journal(project)? {
+        Some(journal) if journal.plan_sha256 == plan_sha256 => Ok(journal),
+        Some(_) => Err(issue(
+            "install.journal.plan-mismatch",
+            "存在另一份未完成计划的安装恢复日志",
+            None,
+            "install",
+        )),
+        None => Ok(InstallJournal {
+            schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
+            plan_sha256: plan_sha256.to_string(),
+            entries: BTreeMap::new(),
+        }),
+    }
+}
+
 fn source_bytes(
     workspace: &Path,
     relative: &Path,
@@ -370,6 +429,14 @@ pub fn install_planned_artifacts(
     let mut issues = Vec::new();
     let mut seen = BTreeSet::new();
     let mut candidates = Vec::new();
+    let mut removals = Vec::new();
+    let initialization_state = match load_initialization_state(&project) {
+        Ok(state) => state,
+        Err(error) => {
+            issues.push(issue("install.state.read", error, None, "install"));
+            None
+        }
+    };
 
     if let Some(previous) = previous {
         if previous.schema_version != INITIALIZATION_STATE_SCHEMA_VERSION
@@ -465,7 +532,31 @@ pub fn install_planned_artifacts(
         let baseline_sha256 = match fs::read(&target) {
             Ok(current) => {
                 let current_hash = content_sha256(&current);
-                if let Some(owned) = previous_artifacts.get(item.target_path.as_str()) {
+                let matching_journal_entry = journal.as_ref().and_then(|journal| {
+                    (journal.plan_sha256 == plan_sha256)
+                        .then(|| journal.entries.get(&item.target_path))
+                        .flatten()
+                });
+                let journal_owns = matching_journal_entry.is_some_and(|entry| {
+                    entry.operation == JournalOperation::WriteArtifact
+                        && entry.expected_sha256.as_deref() == Some(sha256.as_str())
+                        && (entry.expected_sha256.as_deref() == Some(current_hash.as_str())
+                            || entry.baseline_sha256.as_deref() == Some(current_hash.as_str()))
+                });
+                let journal_contract_mismatch = matching_journal_entry.is_some_and(|entry| {
+                    entry.operation != JournalOperation::WriteArtifact
+                        || entry.expected_sha256.as_deref() != Some(sha256.as_str())
+                });
+                if journal_contract_mismatch {
+                    issues.push(issue(
+                        "install.journal.target-diverged",
+                        "安装恢复日志与当前暂存产物或目标内容不一致",
+                        Some(&item.target_path),
+                        "install",
+                    ));
+                } else if journal_owns {
+                    // A matching in-flight journal is newer than the last completed manifest.
+                } else if let Some(owned) = previous_artifacts.get(item.target_path.as_str()) {
                     if current_hash != owned.sha256 {
                         issues.push(issue(
                             "install.target.modified",
@@ -475,25 +566,34 @@ pub fn install_planned_artifacts(
                         ));
                     }
                 } else {
-                    let journal_owns = journal.as_ref().is_some_and(|journal| {
-                        journal.plan_sha256 == plan_sha256
-                            && journal
-                                .started
-                                .get(&item.target_path)
-                                .is_some_and(|expected| expected == &current_hash)
-                    });
-                    if !journal_owns {
+                    issues.push(issue(
+                        "install.target.unowned",
+                        "目标文件没有 completed v4 manifest 所有权，拒绝覆盖",
+                        Some(&item.target_path),
+                        "install",
+                    ));
+                }
+                Some(current_hash)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(entry) = journal.as_ref().and_then(|journal| {
+                    (journal.plan_sha256 == plan_sha256)
+                        .then(|| journal.entries.get(&item.target_path))
+                        .flatten()
+                }) {
+                    if entry.operation != JournalOperation::WriteArtifact
+                        || entry.expected_sha256.as_deref() != Some(sha256.as_str())
+                    {
                         issues.push(issue(
-                            "install.target.unowned",
-                            "目标文件没有 completed v4 manifest 所有权，拒绝覆盖",
+                            "install.journal.target-diverged",
+                            "安装恢复日志中的目标操作与本轮产物不一致",
                             Some(&item.target_path),
                             "install",
                         ));
                     }
                 }
-                Some(current_hash)
+                None
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 issues.push(issue(
                     "install.target.read",
@@ -513,6 +613,59 @@ pub fn install_planned_artifacts(
         });
     }
 
+    for owned in previous_artifacts.values() {
+        if seen.contains(owned.path.as_str()) {
+            continue;
+        }
+        let relative = match normalized_relative_path(&owned.path) {
+            Ok(relative) => relative,
+            Err(detail) => {
+                issues.push(issue(
+                    "install.removed-owned.invalid",
+                    detail,
+                    Some(&owned.path),
+                    "install",
+                ));
+                continue;
+            }
+        };
+        if let Err(detail) = validate_target_ancestors(&project, &relative) {
+            issues.push(issue(
+                "install.removed-owned.unsafe",
+                detail,
+                Some(&owned.path),
+                "install",
+            ));
+            continue;
+        }
+        match fs::read(project.join(&relative)) {
+            Ok(bytes) => {
+                let current_hash = content_sha256(&bytes);
+                if current_hash != owned.sha256 {
+                    issues.push(issue(
+                        "install.removed-owned.modified",
+                        "旧计划中的平台产物已被修改，拒绝删除并继续由旧 manifest 记录所有权",
+                        Some(&owned.path),
+                        "install",
+                    ));
+                } else {
+                    removals.push(RemovalCandidate {
+                        path: owned.path.clone(),
+                        baseline_sha256: current_hash,
+                        operation: JournalOperation::RemoveOwnedArtifact,
+                    });
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => issues.push(issue(
+                "install.removed-owned.read",
+                format!("无法读取待撤销的旧产物：{error}"),
+                Some(&owned.path),
+                "install",
+            )),
+        }
+    }
+
     if !issues.is_empty() {
         return Err(issues);
     }
@@ -520,8 +673,32 @@ pub fn install_planned_artifacts(
     let mut journal = journal.unwrap_or(InstallJournal {
         schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
         plan_sha256: plan_sha256.clone(),
-        started: BTreeMap::new(),
+        entries: BTreeMap::new(),
     });
+    for candidate in &candidates {
+        journal
+            .entries
+            .entry(candidate.path.clone())
+            .or_insert_with(|| InstallJournalEntry {
+                operation: JournalOperation::WriteArtifact,
+                baseline_sha256: candidate.baseline_sha256.clone(),
+                expected_sha256: Some(candidate.sha256.clone()),
+                state: JournalEntryState::Pending,
+                link_target: None,
+            });
+    }
+    for candidate in &removals {
+        journal.entries.insert(
+            candidate.path.clone(),
+            InstallJournalEntry {
+                operation: candidate.operation,
+                baseline_sha256: Some(candidate.baseline_sha256.clone()),
+                expected_sha256: None,
+                state: JournalEntryState::Pending,
+                link_target: None,
+            },
+        );
+    }
     save_install_journal(&project, &journal).map_err(|error| vec![error])?;
 
     for candidate in &candidates {
@@ -548,7 +725,8 @@ pub fn install_planned_artifacts(
                 )]);
             }
         };
-        if current_sha256 != candidate.baseline_sha256 {
+        let already_applied = current_sha256.as_deref() == Some(candidate.sha256.as_str());
+        if !already_applied && current_sha256 != candidate.baseline_sha256 {
             return Err(vec![issue(
                 "install.target.changed-during-install",
                 "目标文件在预检后发生变化，已停止安装并保留恢复日志",
@@ -556,43 +734,98 @@ pub fn install_planned_artifacts(
                 "install",
             )]);
         }
-        journal
-            .started
-            .insert(candidate.path.clone(), candidate.sha256.clone());
+        if !already_applied {
+            atomic_write(&target, &candidate.bytes).map_err(|error| {
+                vec![issue(
+                    "install.target.write",
+                    error,
+                    Some(&candidate.path),
+                    "install",
+                )]
+            })?;
+        }
+        if let Some(entry) = journal.entries.get_mut(&candidate.path) {
+            entry.state = JournalEntryState::Applied;
+        }
         save_install_journal(&project, &journal).map_err(|error| vec![error])?;
-        atomic_write(&target, &candidate.bytes).map_err(|error| {
+    }
+
+    for candidate in &removals {
+        let relative = normalized_relative_path(&candidate.path)
+            .expect("preflight accepted normalized removal path");
+        validate_target_ancestors(&project, &relative).map_err(|detail| {
             vec![issue(
-                "install.target.write",
-                error,
+                "install.removed-owned.changed-during-install",
+                detail,
                 Some(&candidate.path),
                 "install",
             )]
         })?;
-    }
-
-    if let Ok(path) = journal_path(&project) {
-        let _ = fs::remove_file(path);
-        if let Ok(directory) = state_directory(&project) {
-            let _ = fs::remove_dir(directory);
+        let target = project.join(relative);
+        match fs::read(&target) {
+            Ok(bytes) if content_sha256(&bytes) == candidate.baseline_sha256 => {
+                fs::remove_file(&target).map_err(|error| {
+                    vec![issue(
+                        "install.removed-owned.delete",
+                        format!("无法删除已撤销的旧产物：{error}"),
+                        Some(&candidate.path),
+                        "install",
+                    )]
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(vec![issue(
+                    "install.removed-owned.changed-during-install",
+                    "旧产物在预检后发生变化，已停止删除",
+                    Some(&candidate.path),
+                    "install",
+                )]);
+            }
+            Err(error) => {
+                return Err(vec![issue(
+                    "install.removed-owned.changed-during-install",
+                    format!("删除前无法重新读取旧产物：{error}"),
+                    Some(&candidate.path),
+                    "install",
+                )]);
+            }
         }
+        if let Some(entry) = journal.entries.get_mut(&candidate.path) {
+            entry.state = JournalEntryState::Applied;
+        }
+        save_install_journal(&project, &journal).map_err(|error| vec![error])?;
     }
 
+    let installed_at_unix_ms = unix_time_ms();
+    let totals = artifact_totals(plan);
+    let mut checkpoints = initialization_state
+        .as_ref()
+        .map(|state| state.checkpoints.clone())
+        .or_else(|| previous.map(|manifest| manifest.checkpoints.clone()))
+        .unwrap_or_default();
+    checkpoints.push(InitializationCheckpoint {
+        state: InitializationRunState::Installing,
+        artifact_totals: totals,
+        completed_at_unix_ms: installed_at_unix_ms,
+    });
     Ok(OwnershipManifest {
         schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
         platform_version: env!("CARGO_PKG_VERSION").to_string(),
-        run_id: previous
-            .map(|manifest| manifest.run_id.clone())
+        run_id: initialization_state
+            .as_ref()
+            .map(|state| state.run_id.clone())
             .filter(|run_id| !run_id.is_empty())
-            .or_else(|| {
-                load_initialization_state(&project)
-                    .ok()
-                    .flatten()
-                    .map(|state| state.run_id)
-            })
+            .or_else(|| previous.map(|manifest| manifest.run_id.clone()))
             .unwrap_or_default(),
         state: InitializationRunState::Installing,
+        inventory_sha256: initialization_state
+            .as_ref()
+            .and_then(|state| state.inventory_sha256.clone())
+            .or_else(|| previous.map(|manifest| manifest.inventory_sha256.clone()))
+            .unwrap_or_default(),
         plan_sha256,
-        artifact_totals: artifact_totals(plan),
+        artifact_totals: totals,
         artifacts: candidates
             .into_iter()
             .map(|candidate| OwnedArtifact {
@@ -607,10 +840,21 @@ pub fn install_planned_artifacts(
         agent_assets: previous
             .map(|manifest| manifest.agent_assets.clone())
             .unwrap_or_default(),
+        agent_asset_targets: previous
+            .map(|manifest| manifest.agent_asset_targets.clone())
+            .unwrap_or_default(),
         agent_asset_mode: previous.and_then(|manifest| manifest.agent_asset_mode),
+        checkpoints,
         conflicts: Vec::new(),
         diagnostics: Vec::new(),
-        installed_at_unix_ms: unix_time_ms(),
+        started_at_unix_ms: initialization_state
+            .as_ref()
+            .map(|state| state.started_at_unix_ms)
+            .filter(|timestamp| *timestamp > 0)
+            .or_else(|| previous.map(|manifest| manifest.started_at_unix_ms))
+            .unwrap_or_default(),
+        installed_at_unix_ms,
+        completed_at_unix_ms: 0,
     })
 }
 
@@ -687,20 +931,25 @@ fn preflight_entry(
     relative: &str,
     block: &str,
     previous: &BTreeMap<&str, &ManagedEntryOwnership>,
+    journal: &InstallJournal,
 ) -> Result<EntryCandidate, ValidationIssue> {
     let path = project.join(relative);
     validate_target_ancestors(project, Path::new(relative))
         .map_err(|detail| issue("install.entry.unsafe", detail, Some(relative), "install"))?;
-    let existing = match fs::read(&path) {
-        Ok(bytes) => String::from_utf8(bytes).map_err(|_| {
-            issue(
-                "install.entry.encoding",
-                "入口文件不是 UTF-8，无法安全插入托管块",
-                Some(relative),
-                "install",
-            )
-        })?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+    let (existing, baseline_sha256) = match fs::read(&path) {
+        Ok(bytes) => {
+            let baseline_sha256 = Some(content_sha256(&bytes));
+            let content = String::from_utf8(bytes).map_err(|_| {
+                issue(
+                    "install.entry.encoding",
+                    "入口文件不是 UTF-8，无法安全插入托管块",
+                    Some(relative),
+                    "install",
+                )
+            })?;
+            (content, baseline_sha256)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
         Err(error) => {
             return Err(issue(
                 "install.entry.read",
@@ -710,26 +959,32 @@ fn preflight_entry(
             ));
         }
     };
+    let journal_proves_current = journal.entries.get(relative).is_some_and(|entry| {
+        entry.operation == JournalOperation::WriteManagedEntry
+            && entry.expected_sha256 == baseline_sha256
+    });
     let output = match managed_block_range(&existing)
         .map_err(|detail| issue("install.entry.malformed", detail, Some(relative), "install"))?
     {
         Some((start, end)) => {
             let current_block = &existing[start..end];
-            let owned = previous.get(relative).ok_or_else(|| {
-                issue(
-                    "install.entry.unowned",
-                    "入口文件包含没有 v4 manifest 所有权的托管标记",
-                    Some(relative),
-                    "install",
-                )
-            })?;
-            if content_sha256(current_block.as_bytes()) != owned.block_sha256 {
-                return Err(issue(
-                    "install.entry.modified",
-                    "入口文件中的平台托管块已被修改，拒绝覆盖",
-                    Some(relative),
-                    "install",
-                ));
+            if !journal_proves_current {
+                let owned = previous.get(relative).ok_or_else(|| {
+                    issue(
+                        "install.entry.unowned",
+                        "入口文件包含没有 v4 manifest 所有权的托管标记",
+                        Some(relative),
+                        "install",
+                    )
+                })?;
+                if content_sha256(current_block.as_bytes()) != owned.block_sha256 {
+                    return Err(issue(
+                        "install.entry.modified",
+                        "入口文件中的平台托管块已被修改，拒绝覆盖",
+                        Some(relative),
+                        "install",
+                    ));
+                }
             }
             let mut output = String::with_capacity(existing.len() + block.len());
             output.push_str(&existing[..start]);
@@ -749,10 +1004,25 @@ fn preflight_entry(
             format!("{existing}{separator}{block}\n")
         }
     };
+    let expected_sha256 = content_sha256(output.as_bytes());
+    if let Some(entry) = journal.entries.get(relative) {
+        if entry.operation != JournalOperation::WriteManagedEntry
+            || entry.expected_sha256.as_deref() != Some(expected_sha256.as_str())
+        {
+            return Err(issue(
+                "install.entry.journal-diverged",
+                "入口文件恢复日志与本轮期望内容不一致",
+                Some(relative),
+                "install",
+            ));
+        }
+    }
     Ok(EntryCandidate {
         path: relative.to_string(),
         bytes: output.into_bytes(),
         block_sha256: content_sha256(block.as_bytes()),
+        baseline_sha256,
+        expected_sha256,
     })
 }
 
@@ -762,6 +1032,8 @@ pub fn install_managed_entries(
 ) -> Result<(), Vec<ValidationIssue>> {
     let project = canonical_directory(project, "项目")
         .map_err(|error| vec![issue("install.project.invalid", error, None, "install")])?;
+    let mut journal =
+        journal_for_plan(&project, &manifest.plan_sha256).map_err(|error| vec![error])?;
     let block = managed_block(manifest);
     let previous: BTreeMap<&str, &ManagedEntryOwnership> = manifest
         .managed_entries
@@ -771,7 +1043,7 @@ pub fn install_managed_entries(
     let mut issues = Vec::new();
     let mut candidates = Vec::new();
     for path in ["CLAUDE.md", "AGENTS.md"] {
-        match preflight_entry(&project, path, &block, &previous) {
+        match preflight_entry(&project, path, &block, &previous, &journal) {
             Ok(candidate) => candidates.push(candidate),
             Err(error) => issues.push(error),
         }
@@ -780,14 +1052,63 @@ pub fn install_managed_entries(
         return Err(issues);
     }
     for candidate in &candidates {
-        atomic_write(&project.join(&candidate.path), &candidate.bytes).map_err(|error| {
+        journal
+            .entries
+            .entry(candidate.path.clone())
+            .or_insert_with(|| InstallJournalEntry {
+                operation: JournalOperation::WriteManagedEntry,
+                baseline_sha256: candidate.baseline_sha256.clone(),
+                expected_sha256: Some(candidate.expected_sha256.clone()),
+                state: JournalEntryState::Pending,
+                link_target: None,
+            });
+    }
+    save_install_journal(&project, &journal).map_err(|error| vec![error])?;
+    for candidate in &candidates {
+        let target = project.join(&candidate.path);
+        validate_target_ancestors(&project, Path::new(&candidate.path)).map_err(|detail| {
             vec![issue(
-                "install.entry.write",
-                error,
+                "install.entry.changed-during-install",
+                detail,
                 Some(&candidate.path),
                 "install",
             )]
         })?;
+        let current_sha256 = match fs::read(&target) {
+            Ok(bytes) => Some(content_sha256(&bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(vec![issue(
+                    "install.entry.changed-during-install",
+                    format!("写入前无法重新读取入口文件：{error}"),
+                    Some(&candidate.path),
+                    "install",
+                )]);
+            }
+        };
+        let already_applied = current_sha256.as_deref() == Some(candidate.expected_sha256.as_str());
+        if !already_applied && current_sha256 != candidate.baseline_sha256 {
+            return Err(vec![issue(
+                "install.entry.changed-during-install",
+                "入口文件在预检后发生变化，已保留恢复日志",
+                Some(&candidate.path),
+                "install",
+            )]);
+        }
+        if !already_applied {
+            atomic_write(&target, &candidate.bytes).map_err(|error| {
+                vec![issue(
+                    "install.entry.write",
+                    error,
+                    Some(&candidate.path),
+                    "install",
+                )]
+            })?;
+        }
+        if let Some(entry) = journal.entries.get_mut(&candidate.path) {
+            entry.state = JournalEntryState::Applied;
+        }
+        save_install_journal(&project, &journal).map_err(|error| vec![error])?;
     }
     manifest.managed_entries = candidates
         .into_iter()
@@ -832,6 +1153,53 @@ fn expected_agent_link(name: &str) -> PathBuf {
     PathBuf::from(format!("../.claude/{name}"))
 }
 
+fn preflight_agent_copy_removal(
+    project: &Path,
+    asset: &ManagedAgentAsset,
+) -> Result<Option<RemovalCandidate>, ValidationIssue> {
+    let relative = normalized_relative_path(&asset.path).map_err(|detail| {
+        issue(
+            "install.agent-copy.remove-invalid",
+            detail,
+            Some(&asset.path),
+            "install",
+        )
+    })?;
+    validate_target_ancestors(project, &relative).map_err(|detail| {
+        issue(
+            "install.agent-copy.remove-unsafe",
+            detail,
+            Some(&asset.path),
+            "install",
+        )
+    })?;
+    match fs::read(project.join(relative)) {
+        Ok(bytes) => {
+            let current_sha256 = content_sha256(&bytes);
+            if current_sha256 != asset.sha256 {
+                return Err(issue(
+                    "install.agent-copy.modified",
+                    "不再需要的同步副本已被修改，拒绝删除并继续由旧 manifest 记录所有权",
+                    Some(&asset.path),
+                    "install",
+                ));
+            }
+            Ok(Some(RemovalCandidate {
+                path: asset.path.clone(),
+                baseline_sha256: current_sha256,
+                operation: JournalOperation::RemoveAgentCopy,
+            }))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(issue(
+            "install.agent-copy.remove-read",
+            format!("无法读取待撤销的同步副本：{error}"),
+            Some(&asset.path),
+            "install",
+        )),
+    }
+}
+
 pub fn share_agent_assets(
     project: &Path,
     manifest: &mut OwnershipManifest,
@@ -846,6 +1214,8 @@ fn share_agent_assets_for_test(
 ) -> Result<AgentAssetMode, Vec<ValidationIssue>> {
     let project = canonical_directory(project, "项目")
         .map_err(|error| vec![issue("install.project.invalid", error, None, "install")])?;
+    let mut journal =
+        journal_for_plan(&project, &manifest.plan_sha256).map_err(|error| vec![error])?;
     let previous_assets: BTreeMap<&str, &ManagedAgentAsset> = manifest
         .agent_assets
         .iter()
@@ -854,7 +1224,9 @@ fn share_agent_assets_for_test(
     let mut issues = Vec::new();
     let mut links = Vec::new();
     let mut copies = Vec::new();
+    let mut removals = Vec::new();
     let mut preserved = false;
+    let mut preserved_names = Vec::new();
 
     for name in AGENT_ASSET_NAMES {
         let source = project.join(".claude").join(name);
@@ -871,7 +1243,20 @@ fn share_agent_assets_for_test(
         }
         let source_metadata = match fs::symlink_metadata(&source) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let prefix = format!(".agents/{name}/");
+                for asset in previous_assets
+                    .values()
+                    .filter(|asset| asset.path.starts_with(&prefix))
+                {
+                    match preflight_agent_copy_removal(&project, asset) {
+                        Ok(Some(candidate)) => removals.push(candidate),
+                        Ok(None) => {}
+                        Err(error) => issues.push(error),
+                    }
+                }
+                continue;
+            }
             Err(error) => {
                 issues.push(issue(
                     "install.agent-source.read",
@@ -900,6 +1285,26 @@ fn share_agent_assets_for_test(
                 "install",
             ));
             continue;
+        }
+        let desired_paths: BTreeSet<String> = source_files
+            .iter()
+            .map(|(relative, _)| {
+                format!(
+                    ".agents/{name}/{}",
+                    relative.to_string_lossy().replace('\\', "/")
+                )
+            })
+            .collect();
+        let prefix = format!(".agents/{name}/");
+        for asset in previous_assets
+            .values()
+            .filter(|asset| asset.path.starts_with(&prefix) && !desired_paths.contains(&asset.path))
+        {
+            match preflight_agent_copy_removal(&project, asset) {
+                Ok(Some(candidate)) => removals.push(candidate),
+                Ok(None) => {}
+                Err(error) => issues.push(error),
+            }
         }
         if source_files.is_empty() {
             continue;
@@ -943,9 +1348,14 @@ fn share_agent_assets_for_test(
                 let owned_prefix = format!(".agents/{name}/");
                 let owns_destination = previous_assets
                     .keys()
-                    .any(|path| path.starts_with(&owned_prefix));
+                    .any(|path| path.starts_with(&owned_prefix))
+                    || journal.entries.iter().any(|(path, entry)| {
+                        path.starts_with(&owned_prefix)
+                            && entry.operation == JournalOperation::WriteAgentCopy
+                    });
                 if !owns_destination {
                     preserved = true;
+                    preserved_names.push(name.to_string());
                     continue;
                 }
                 for (relative, bytes) in source_files {
@@ -963,33 +1373,59 @@ fn share_agent_assets_for_test(
                         ));
                         continue;
                     }
-                    if let Ok(current) = fs::read(&target) {
-                        let current_hash = content_sha256(&current);
-                        match previous_assets.get(display.as_str()) {
-                            Some(owned) if owned.sha256 == current_hash => {}
-                            Some(_) => {
-                                issues.push(issue(
-                                    "install.agent-copy.modified",
-                                    "同步副本已被修改，拒绝覆盖",
-                                    Some(&display),
-                                    "install",
-                                ));
-                                continue;
+                    let expected_sha256 = content_sha256(&bytes);
+                    let baseline_sha256 = match fs::read(&target) {
+                        Ok(current) => {
+                            let current_hash = content_sha256(&current);
+                            let journal_owns = journal.entries.get(&display).is_some_and(|entry| {
+                                entry.operation == JournalOperation::WriteAgentCopy
+                                    && entry.expected_sha256.as_deref()
+                                        == Some(expected_sha256.as_str())
+                                    && (entry.expected_sha256.as_deref()
+                                        == Some(current_hash.as_str())
+                                        || entry.baseline_sha256.as_deref()
+                                            == Some(current_hash.as_str()))
+                            });
+                            if !journal_owns {
+                                match previous_assets.get(display.as_str()) {
+                                    Some(owned) if owned.sha256 == current_hash => {}
+                                    Some(_) => {
+                                        issues.push(issue(
+                                            "install.agent-copy.modified",
+                                            "同步副本已被修改，拒绝覆盖",
+                                            Some(&display),
+                                            "install",
+                                        ));
+                                        continue;
+                                    }
+                                    None => {
+                                        issues.push(issue(
+                                            "install.agent-copy.unowned",
+                                            "同步目标文件不属于当前 manifest，拒绝覆盖",
+                                            Some(&display),
+                                            "install",
+                                        ));
+                                        continue;
+                                    }
+                                }
                             }
-                            None => {
-                                issues.push(issue(
-                                    "install.agent-copy.unowned",
-                                    "同步目标文件不属于当前 manifest，拒绝覆盖",
-                                    Some(&display),
-                                    "install",
-                                ));
-                                continue;
-                            }
+                            Some(current_hash)
                         }
-                    }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => {
+                            issues.push(issue(
+                                "install.agent-copy.read",
+                                format!("无法读取同步目标：{error}"),
+                                Some(&display),
+                                "install",
+                            ));
+                            continue;
+                        }
+                    };
                     copies.push(CopyCandidate {
+                        baseline_sha256,
                         path: display,
-                        sha256: content_sha256(&bytes),
+                        sha256: expected_sha256,
                         bytes,
                     });
                 }
@@ -1010,6 +1446,7 @@ fn share_agent_assets_for_test(
                             relative.to_string_lossy().replace('\\', "/")
                         );
                         copies.push(CopyCandidate {
+                            baseline_sha256: None,
                             path: display,
                             sha256: content_sha256(&bytes),
                             bytes,
@@ -1026,17 +1463,119 @@ fn share_agent_assets_for_test(
         }
     }
 
+    for candidate in &copies {
+        if let Some(entry) = journal.entries.get(&candidate.path) {
+            if entry.operation != JournalOperation::WriteAgentCopy
+                || entry.expected_sha256.as_deref() != Some(candidate.sha256.as_str())
+            {
+                issues.push(issue(
+                    "install.agent-copy.journal-diverged",
+                    "同步副本恢复日志与本轮期望内容不一致",
+                    Some(&candidate.path),
+                    "install",
+                ));
+            }
+        }
+    }
+    for name in &links {
+        let path = format!(".agents/{name}");
+        let expected = expected_agent_link(name).to_string_lossy().into_owned();
+        if let Some(entry) = journal.entries.get(&path) {
+            if entry.operation != JournalOperation::CreateAgentLink
+                || entry.link_target.as_deref() != Some(expected.as_str())
+            {
+                issues.push(issue(
+                    "install.agent-link.journal-diverged",
+                    "智能体链接恢复日志与本轮期望目标不一致",
+                    Some(&path),
+                    "install",
+                ));
+            }
+        }
+    }
     if !issues.is_empty() {
         return Err(issues);
     }
 
+    for candidate in &copies {
+        journal
+            .entries
+            .entry(candidate.path.clone())
+            .or_insert_with(|| InstallJournalEntry {
+                operation: JournalOperation::WriteAgentCopy,
+                baseline_sha256: candidate.baseline_sha256.clone(),
+                expected_sha256: Some(candidate.sha256.clone()),
+                state: JournalEntryState::Pending,
+                link_target: None,
+            });
+    }
+    for candidate in &removals {
+        journal.entries.insert(
+            candidate.path.clone(),
+            InstallJournalEntry {
+                operation: candidate.operation,
+                baseline_sha256: Some(candidate.baseline_sha256.clone()),
+                expected_sha256: None,
+                state: JournalEntryState::Pending,
+                link_target: None,
+            },
+        );
+    }
+    for name in &links {
+        let path = format!(".agents/{name}");
+        let expected = expected_agent_link(name).to_string_lossy().into_owned();
+        let baseline_sha256 = fs::read_link(project.join(&path))
+            .ok()
+            .map(|actual| content_sha256(actual.to_string_lossy().as_bytes()));
+        journal
+            .entries
+            .entry(path)
+            .or_insert_with(|| InstallJournalEntry {
+                operation: JournalOperation::CreateAgentLink,
+                baseline_sha256,
+                expected_sha256: Some(content_sha256(expected.as_bytes())),
+                state: JournalEntryState::Pending,
+                link_target: Some(expected),
+            });
+    }
+    save_install_journal(&project, &journal).map_err(|error| vec![error])?;
+
     let mut linked_count = 0;
     let mut copied_count = 0;
+    let mut installed_link_names = Vec::new();
     for name in links {
         let destination = project.join(".agents").join(&name);
-        if fs::symlink_metadata(&destination).is_ok() {
-            linked_count += 1;
-            continue;
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata)
+                if metadata_is_link_or_reparse(&metadata)
+                    && fs::read_link(&destination).ok().as_deref()
+                        == Some(expected_agent_link(&name).as_path()) =>
+            {
+                linked_count += 1;
+                installed_link_names.push(name.clone());
+                if let Some(entry) = journal.entries.get_mut(&format!(".agents/{name}")) {
+                    entry.state = JournalEntryState::Applied;
+                }
+                save_install_journal(&project, &journal).map_err(|error| vec![error])?;
+                continue;
+            }
+            Ok(_) => {
+                return Err(vec![issue(
+                    "install.agent-link.changed-during-install",
+                    "智能体链接在预检后发生变化",
+                    Some(&format!(".agents/{name}")),
+                    "install",
+                )]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(vec![issue(
+                    "install.agent-link.changed-during-install",
+                    format!("创建链接前无法检查目标：{error}"),
+                    Some(&format!(".agents/{name}")),
+                    "install",
+                )]);
+            }
         }
         fs::create_dir_all(project.join(".agents")).map_err(|error| {
             vec![issue(
@@ -1047,8 +1586,16 @@ fn share_agent_assets_for_test(
             )]
         })?;
         match create_directory_symlink(&expected_agent_link(&name), &destination) {
-            Ok(()) => linked_count += 1,
+            Ok(()) => {
+                linked_count += 1;
+                installed_link_names.push(name.clone());
+                if let Some(entry) = journal.entries.get_mut(&format!(".agents/{name}")) {
+                    entry.state = JournalEntryState::Applied;
+                }
+                save_install_journal(&project, &journal).map_err(|error| vec![error])?;
+            }
             Err(_) => {
+                journal.entries.remove(&format!(".agents/{name}"));
                 let source = project.join(".claude").join(&name);
                 let mut source_files = Vec::new();
                 collect_agent_source_files(&source, Path::new(""), &mut source_files).map_err(
@@ -1063,6 +1610,7 @@ fn share_agent_assets_for_test(
                 )?;
                 for (relative, bytes) in source_files {
                     copies.push(CopyCandidate {
+                        baseline_sha256: None,
                         path: format!(
                             ".agents/{name}/{}",
                             relative.to_string_lossy().replace('\\', "/")
@@ -1075,24 +1623,152 @@ fn share_agent_assets_for_test(
         }
     }
 
+    for candidate in &copies {
+        journal
+            .entries
+            .entry(candidate.path.clone())
+            .or_insert_with(|| InstallJournalEntry {
+                operation: JournalOperation::WriteAgentCopy,
+                baseline_sha256: candidate.baseline_sha256.clone(),
+                expected_sha256: Some(candidate.sha256.clone()),
+                state: JournalEntryState::Pending,
+                link_target: None,
+            });
+    }
+    save_install_journal(&project, &journal).map_err(|error| vec![error])?;
+
     let mut installed_assets = Vec::new();
     for candidate in copies {
-        atomic_write(&project.join(&candidate.path), &candidate.bytes).map_err(|error| {
+        let target = project.join(&candidate.path);
+        validate_target_ancestors(&project, Path::new(&candidate.path)).map_err(|detail| {
             vec![issue(
-                "install.agent-copy.write",
-                error,
+                "install.agent-copy.changed-during-install",
+                detail,
                 Some(&candidate.path),
                 "install",
             )]
         })?;
+        let current_sha256 = match fs::read(&target) {
+            Ok(bytes) => Some(content_sha256(&bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(vec![issue(
+                    "install.agent-copy.changed-during-install",
+                    format!("复制前无法重新读取目标：{error}"),
+                    Some(&candidate.path),
+                    "install",
+                )]);
+            }
+        };
+        let already_applied = current_sha256.as_deref() == Some(candidate.sha256.as_str());
+        if !already_applied && current_sha256 != candidate.baseline_sha256 {
+            return Err(vec![issue(
+                "install.agent-copy.changed-during-install",
+                "同步副本在预检后发生变化，已保留恢复日志",
+                Some(&candidate.path),
+                "install",
+            )]);
+        }
+        if !already_applied {
+            atomic_write(&target, &candidate.bytes).map_err(|error| {
+                vec![issue(
+                    "install.agent-copy.write",
+                    error,
+                    Some(&candidate.path),
+                    "install",
+                )]
+            })?;
+        }
         copied_count += 1;
+        if let Some(entry) = journal.entries.get_mut(&candidate.path) {
+            entry.state = JournalEntryState::Applied;
+        }
+        save_install_journal(&project, &journal).map_err(|error| vec![error])?;
         installed_assets.push(ManagedAgentAsset {
             path: candidate.path,
             sha256: candidate.sha256,
         });
     }
+    for candidate in removals {
+        let relative = normalized_relative_path(&candidate.path)
+            .expect("preflight accepted managed-copy removal path");
+        validate_target_ancestors(&project, &relative).map_err(|detail| {
+            vec![issue(
+                "install.agent-copy.changed-during-remove",
+                detail,
+                Some(&candidate.path),
+                "install",
+            )]
+        })?;
+        let target = project.join(&relative);
+        match fs::read(&target) {
+            Ok(bytes) if content_sha256(&bytes) == candidate.baseline_sha256 => {
+                fs::remove_file(&target).map_err(|error| {
+                    vec![issue(
+                        "install.agent-copy.remove",
+                        format!("无法删除旧同步副本：{error}"),
+                        Some(&candidate.path),
+                        "install",
+                    )]
+                })?;
+                remove_empty_agent_copy_parents(&project, &target);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(vec![issue(
+                    "install.agent-copy.changed-during-remove",
+                    "同步副本在预检后发生变化，已停止删除",
+                    Some(&candidate.path),
+                    "install",
+                )]);
+            }
+            Err(error) => {
+                return Err(vec![issue(
+                    "install.agent-copy.changed-during-remove",
+                    format!("删除前无法重新读取同步副本：{error}"),
+                    Some(&candidate.path),
+                    "install",
+                )]);
+            }
+        }
+        if let Some(entry) = journal.entries.get_mut(&candidate.path) {
+            entry.state = JournalEntryState::Applied;
+        }
+        save_install_journal(&project, &journal).map_err(|error| vec![error])?;
+    }
     installed_assets.sort_by(|left, right| left.path.cmp(&right.path));
+    let copied_names: BTreeSet<String> = installed_assets
+        .iter()
+        .filter_map(|asset| asset.path.split('/').nth(1).map(str::to_string))
+        .collect();
+    let mut targets = Vec::new();
+    for name in installed_link_names {
+        targets.push(AgentAssetTarget {
+            path: format!(".agents/{name}"),
+            source_path: format!(".claude/{name}"),
+            mode: AgentAssetMode::RelativeSymlink,
+            link_target: Some(expected_agent_link(&name).to_string_lossy().into_owned()),
+        });
+    }
+    for name in copied_names {
+        targets.push(AgentAssetTarget {
+            path: format!(".agents/{name}"),
+            source_path: format!(".claude/{name}"),
+            mode: AgentAssetMode::ManagedCopy,
+            link_target: None,
+        });
+    }
+    for name in preserved_names {
+        targets.push(AgentAssetTarget {
+            path: format!(".agents/{name}"),
+            source_path: format!(".claude/{name}"),
+            mode: AgentAssetMode::Preserved,
+            link_target: None,
+        });
+    }
+    targets.sort_by(|left, right| left.path.cmp(&right.path));
     manifest.agent_assets = installed_assets;
+    manifest.agent_asset_targets = targets;
     let mode = match (linked_count > 0, copied_count > 0, preserved) {
         (true, false, false) => AgentAssetMode::RelativeSymlink,
         (false, true, false) => AgentAssetMode::ManagedCopy,
@@ -1102,6 +1778,24 @@ fn share_agent_assets_for_test(
     };
     manifest.agent_asset_mode = Some(mode);
     Ok(mode)
+}
+
+fn remove_empty_agent_copy_parents(project: &Path, target: &Path) {
+    let stop = project.join(".agents");
+    let mut current = target.parent();
+    while let Some(directory) = current {
+        if directory == stop || !directory.starts_with(&stop) {
+            break;
+        }
+        let parent = directory.parent();
+        let is_empty = fs::read_dir(directory)
+            .ok()
+            .is_some_and(|mut entries| entries.next().is_none());
+        if !is_empty || fs::remove_dir(directory).is_err() {
+            break;
+        }
+        current = parent;
+    }
 }
 
 #[cfg(unix)]
@@ -1133,6 +1827,18 @@ pub fn save_ownership_manifest(project: &Path, manifest: &OwnershipManifest) -> 
         return Err("只有 completed 状态可以写入便携所有权 manifest".to_string());
     }
     let project = canonical_directory(project, "项目")?;
+    if let Some(journal) = load_install_journal(&project).map_err(|issue| issue.detail)? {
+        if journal.plan_sha256 != manifest.plan_sha256 {
+            return Err("存在另一份计划的未完成安装恢复日志，拒绝完成当前 manifest".to_string());
+        }
+        if journal
+            .entries
+            .values()
+            .any(|entry| entry.state != JournalEntryState::Applied)
+        {
+            return Err("安装恢复日志仍有 pending 目标，拒绝写入 completed manifest".to_string());
+        }
+    }
     let verification = verify_ownership_manifest(&project, manifest);
     if !verification.is_empty() {
         return Err(format!(
@@ -1146,20 +1852,33 @@ pub fn save_ownership_manifest(project: &Path, manifest: &OwnershipManifest) -> 
     }
     validate_target_ancestors(&project, Path::new(OWNERSHIP_MANIFEST_PATH))?;
     let target = project.join(OWNERSHIP_MANIFEST_PATH);
-    if target.exists() {
-        let current =
-            fs::read(&target).map_err(|error| format!("无法读取现有所有权 manifest：{error}"))?;
-        let current: OwnershipManifest = serde_json::from_slice(&current)
-            .map_err(|error| format!("现有所有权 manifest 不可解析，拒绝覆盖：{error}"))?;
-        if current.schema_version != INITIALIZATION_STATE_SCHEMA_VERSION
-            || current.state != InitializationRunState::Completed
-        {
-            return Err("现有文件不是受支持的 completed v4 manifest，拒绝覆盖".to_string());
+    match fs::symlink_metadata(&target) {
+        Ok(_) => {
+            let current = fs::read(&target)
+                .map_err(|error| format!("无法读取现有所有权 manifest：{error}"))?;
+            let current: OwnershipManifest = serde_json::from_slice(&current)
+                .map_err(|error| format!("现有所有权 manifest 不可解析，拒绝覆盖：{error}"))?;
+            if current.schema_version != INITIALIZATION_STATE_SCHEMA_VERSION
+                || current.state != InitializationRunState::Completed
+            {
+                return Err("现有文件不是受支持的 completed v4 manifest，拒绝覆盖".to_string());
+            }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("无法检查现有所有权 manifest：{error}")),
     }
     let bytes = serde_json::to_vec_pretty(manifest)
         .map_err(|error| format!("无法序列化所有权 manifest：{error}"))?;
-    atomic_write(&target, &bytes)
+    atomic_write(&target, &bytes)?;
+    if let Some(journal) = load_install_journal(&project).map_err(|issue| issue.detail)? {
+        if journal.plan_sha256 == manifest.plan_sha256 {
+            let path = journal_path(&project)?;
+            fs::remove_file(&path).map_err(|error| {
+                format!("completed manifest 已写入，但无法清理恢复日志：{error}")
+            })?;
+        }
+    }
+    Ok(())
 }
 
 pub fn load_ownership_manifest(project: &Path) -> Result<Option<OwnershipManifest>, String> {
@@ -1212,6 +1931,54 @@ pub fn verify_ownership_manifest(
             "verify",
         ));
     }
+    if manifest.run_id.trim().is_empty() {
+        issues.push(issue(
+            "manifest.run-id.missing",
+            "completed manifest 缺少 runId",
+            None,
+            "verify",
+        ));
+    }
+    if manifest.inventory_sha256.trim().is_empty() {
+        issues.push(issue(
+            "manifest.inventory-hash.missing",
+            "completed manifest 缺少 inventorySha256",
+            None,
+            "verify",
+        ));
+    }
+    if manifest.plan_sha256.trim().is_empty() {
+        issues.push(issue(
+            "manifest.plan-hash.missing",
+            "completed manifest 缺少 planSha256",
+            None,
+            "verify",
+        ));
+    }
+    if manifest.started_at_unix_ms == 0
+        || manifest.installed_at_unix_ms == 0
+        || manifest.completed_at_unix_ms < manifest.installed_at_unix_ms
+        || manifest.installed_at_unix_ms < manifest.started_at_unix_ms
+    {
+        issues.push(issue(
+            "manifest.timestamps.invalid",
+            "completed manifest 的 started/installed/completed 时间无效或顺序错误",
+            None,
+            "verify",
+        ));
+    }
+    if !manifest.checkpoints.iter().any(|checkpoint| {
+        checkpoint.state == InitializationRunState::Completed
+            && checkpoint.artifact_totals == manifest.artifact_totals
+            && checkpoint.completed_at_unix_ms == manifest.completed_at_unix_ms
+    }) {
+        issues.push(issue(
+            "manifest.checkpoints.incomplete",
+            "completed manifest 缺少与最终产物计数一致的 completed checkpoint",
+            None,
+            "verify",
+        ));
+    }
     let mut paths = BTreeSet::new();
     let mut documents = 0;
     let mut rules = 0;
@@ -1259,6 +2026,34 @@ pub fn verify_ownership_manifest(
             &mut issues,
         );
     }
+    let mut agent_target_paths = BTreeSet::new();
+    for target in &manifest.agent_asset_targets {
+        if !agent_target_paths.insert(target.path.as_str()) {
+            issues.push(issue(
+                "manifest.agent-target.duplicate",
+                "智能体目标在 manifest 中重复",
+                Some(&target.path),
+                "verify",
+            ));
+        }
+        verify_agent_asset_target(&project, target, &manifest.agent_assets, &mut issues);
+    }
+    for asset in &manifest.agent_assets {
+        let covered = manifest.agent_asset_targets.iter().any(|target| {
+            target.mode == AgentAssetMode::ManagedCopy
+                && asset
+                    .path
+                    .starts_with(&format!("{}/", target.path.trim_end_matches('/')))
+        });
+        if !covered {
+            issues.push(issue(
+                "manifest.agent-asset.target-missing",
+                "managed-copy 文件没有对应的目标状态记录",
+                Some(&asset.path),
+                "verify",
+            ));
+        }
+    }
     for entry in &manifest.managed_entries {
         let path = project.join(&entry.path);
         match fs::read_to_string(&path) {
@@ -1281,6 +2076,121 @@ pub fn verify_ownership_manifest(
         }
     }
     issues
+}
+
+fn verify_agent_asset_target(
+    project: &Path,
+    target: &AgentAssetTarget,
+    managed_assets: &[ManagedAgentAsset],
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let relative = match normalized_relative_path(&target.path) {
+        Ok(relative) => relative,
+        Err(detail) => {
+            issues.push(issue(
+                "manifest.agent-target.invalid",
+                detail,
+                Some(&target.path),
+                "verify",
+            ));
+            return;
+        }
+    };
+    let path = project.join(relative);
+    match target.mode {
+        AgentAssetMode::RelativeSymlink => {
+            let expected = target.link_target.as_deref().unwrap_or_default();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    issues.push(issue(
+                        "manifest.agent-target.link-mismatch",
+                        format!("无法读取相对链接：{error}"),
+                        Some(&target.path),
+                        "verify",
+                    ));
+                    return;
+                }
+            };
+            if !metadata_is_link_or_reparse(&metadata)
+                || fs::read_link(&path).ok().as_deref() != Some(Path::new(expected))
+            {
+                issues.push(issue(
+                    "manifest.agent-target.link-mismatch",
+                    "相对链接缺失或目标与 manifest 不一致",
+                    Some(&target.path),
+                    "verify",
+                ));
+            }
+        }
+        AgentAssetMode::ManagedCopy => {
+            let metadata = fs::symlink_metadata(&path);
+            if !matches!(metadata, Ok(ref metadata) if metadata.is_dir() && !metadata_is_link_or_reparse(metadata))
+            {
+                issues.push(issue(
+                    "manifest.agent-target.copy-missing",
+                    "managed-copy 目标目录缺失或不是普通目录",
+                    Some(&target.path),
+                    "verify",
+                ));
+            }
+            let prefix = format!("{}/", target.path.trim_end_matches('/'));
+            if !managed_assets
+                .iter()
+                .any(|asset| asset.path.starts_with(&prefix))
+            {
+                issues.push(issue(
+                    "manifest.agent-target.copy-empty",
+                    "managed-copy 目标没有任何受所有权哈希保护的文件",
+                    Some(&target.path),
+                    "verify",
+                ));
+            }
+        }
+        AgentAssetMode::Preserved => match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && !metadata_is_link_or_reparse(&metadata) => {}
+            Ok(_) => issues.push(issue(
+                "manifest.agent-target.preserved-mismatch",
+                "preserved 目标不再是原有普通目录",
+                Some(&target.path),
+                "verify",
+            )),
+            Err(error) => issues.push(issue(
+                "manifest.agent-target.preserved-mismatch",
+                format!("preserved 目标不可访问：{error}"),
+                Some(&target.path),
+                "verify",
+            )),
+        },
+        AgentAssetMode::Mixed => issues.push(issue(
+            "manifest.agent-target.mode-invalid",
+            "单个智能体目标不能使用 mixed 模式",
+            Some(&target.path),
+            "verify",
+        )),
+    }
+    match normalized_relative_path(&target.source_path) {
+        Ok(source) => {
+            let source_path = project.join(&source);
+            let source_metadata = fs::symlink_metadata(&source_path);
+            if reject_symlink_components(project, &source).is_err()
+                || !matches!(source_metadata, Ok(ref metadata) if metadata.is_dir() && !metadata_is_link_or_reparse(metadata))
+            {
+                issues.push(issue(
+                    "manifest.agent-source.invalid",
+                    "智能体目标的 sourcePath 缺失、不是普通目录或包含链接",
+                    Some(&target.path),
+                    "verify",
+                ));
+            }
+        }
+        Err(_) => issues.push(issue(
+            "manifest.agent-source.invalid",
+            "智能体目标记录了无效 sourcePath",
+            Some(&target.path),
+            "verify",
+        )),
+    }
 }
 
 fn verify_owned_file(
@@ -1423,8 +2333,8 @@ mod tests {
 
     use super::*;
     use crate::project_factory::types::{
-        ArtifactKind, ArtifactPlan, ArtifactPlanItem, EvidenceReference, InitializationRunState,
-        InitializationState,
+        ArtifactKind, ArtifactPlan, ArtifactPlanItem, EvidenceReference, InitializationCheckpoint,
+        InitializationRunState, InitializationState,
     };
 
     struct TestDir(PathBuf);
@@ -1497,6 +2407,32 @@ mod tests {
             workspace_path: "/tmp/workspace".to_string(),
             attempt: 2,
             ..InitializationState::default()
+        }
+    }
+
+    fn mark_completed(manifest: &mut OwnershipManifest) {
+        manifest.state = InitializationRunState::Completed;
+        manifest.run_id = "run-completed".to_string();
+        manifest.inventory_sha256 = "inventory-sha256".to_string();
+        if manifest.plan_sha256.is_empty() {
+            manifest.plan_sha256 = "plan-sha256".to_string();
+        }
+        if manifest.installed_at_unix_ms == 0 {
+            manifest.installed_at_unix_ms = 20;
+        }
+        manifest.started_at_unix_ms = manifest.installed_at_unix_ms.saturating_sub(10).max(1);
+        manifest.completed_at_unix_ms = manifest.installed_at_unix_ms + 10;
+        manifest.checkpoints = vec![InitializationCheckpoint {
+            state: InitializationRunState::Completed,
+            artifact_totals: manifest.artifact_totals,
+            completed_at_unix_ms: manifest.completed_at_unix_ms,
+        }];
+    }
+
+    fn empty_manifest(plan_sha256: &str) -> OwnershipManifest {
+        OwnershipManifest {
+            plan_sha256: plan_sha256.to_string(),
+            ..OwnershipManifest::default()
         }
     }
 
@@ -1583,7 +2519,7 @@ mod tests {
         let mut first =
             install_planned_artifacts(project.path(), workspace.path(), &artifact_plan, None)
                 .expect("first install");
-        first.state = InitializationRunState::Completed;
+        mark_completed(&mut first);
         assert!(project.path().join("docs/ai/project-map.md").is_file());
         assert!(project
             .path()
@@ -1658,7 +2594,7 @@ mod tests {
         let mut previous =
             install_planned_artifacts(project.path(), workspace.path(), &artifact_plan, None)
                 .expect("initial install");
-        previous.state = InitializationRunState::Completed;
+        mark_completed(&mut previous);
         write(
             project.path().join("docs/ai/project-map.md"),
             "# 用户已修改",
@@ -1693,12 +2629,21 @@ mod tests {
         write(workspace.path().join("docs/ai/project-map.md"), content);
         write(project.path().join("docs/ai/project-map.md"), content);
         let hash = content_sha256(content.as_bytes());
-        let mut started = BTreeMap::new();
-        started.insert("docs/ai/project-map.md".to_string(), hash);
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "docs/ai/project-map.md".to_string(),
+            InstallJournalEntry {
+                operation: JournalOperation::WriteArtifact,
+                baseline_sha256: None,
+                expected_sha256: Some(hash),
+                state: JournalEntryState::Applied,
+                link_target: None,
+            },
+        );
         let journal = InstallJournal {
             schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
             plan_sha256: plan_sha256(&artifact_plan).expect("plan hash"),
-            started,
+            entries,
         };
         save_install_journal(project.path(), &journal).expect("save interrupted journal");
 
@@ -1707,7 +2652,123 @@ mod tests {
                 .expect("resume journal-owned target");
         assert_eq!(manifest.artifacts.len(), 1);
         assert_eq!(read(project.path().join("docs/ai/project-map.md")), content);
-        assert!(!journal_path(project.path()).expect("journal path").exists());
+        assert!(journal_path(project.path()).expect("journal path").exists());
+    }
+
+    #[test]
+    fn matching_journal_takes_precedence_over_the_previous_completed_manifest() {
+        let project = TestDir::new("journal-priority-project");
+        let workspace = TestDir::new("journal-priority-workspace");
+        let artifact_plan = plan(vec![item(
+            "map",
+            ArtifactKind::Document,
+            "docs/ai/project-map.md",
+        )]);
+        write(workspace.path().join("docs/ai/project-map.md"), "# 旧内容");
+        let mut previous =
+            install_planned_artifacts(project.path(), workspace.path(), &artifact_plan, None)
+                .expect("initial install");
+        mark_completed(&mut previous);
+        save_ownership_manifest(project.path(), &previous).expect("complete previous install");
+
+        let new_content = "# 新一轮已原子写入的内容";
+        write(workspace.path().join("docs/ai/project-map.md"), new_content);
+        write(project.path().join("docs/ai/project-map.md"), new_content);
+        let path = "docs/ai/project-map.md".to_string();
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            path.clone(),
+            InstallJournalEntry {
+                operation: JournalOperation::WriteArtifact,
+                baseline_sha256: previous
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.path == path)
+                    .map(|artifact| artifact.sha256.clone()),
+                expected_sha256: Some(content_sha256(new_content.as_bytes())),
+                state: JournalEntryState::Applied,
+                link_target: None,
+            },
+        );
+        save_install_journal(
+            project.path(),
+            &InstallJournal {
+                schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
+                plan_sha256: plan_sha256(&artifact_plan).expect("plan hash"),
+                entries,
+            },
+        )
+        .expect("save matching journal");
+
+        install_planned_artifacts(
+            project.path(),
+            workspace.path(),
+            &artifact_plan,
+            Some(&previous),
+        )
+        .expect("matching journal must own its applied write before old manifest");
+    }
+
+    #[test]
+    fn a_new_plan_deletes_unchanged_old_owned_artifacts() {
+        let project = TestDir::new("remove-old-project");
+        let workspace = TestDir::new("remove-old-workspace");
+        let old_plan = plan(vec![item("old", ArtifactKind::Document, "docs/ai/old.md")]);
+        write(workspace.path().join("docs/ai/old.md"), "# 旧产物");
+        let mut previous =
+            install_planned_artifacts(project.path(), workspace.path(), &old_plan, None)
+                .expect("install old plan");
+        mark_completed(&mut previous);
+        save_ownership_manifest(project.path(), &previous).expect("save old manifest");
+
+        let new_plan = plan(vec![item("new", ArtifactKind::Document, "docs/ai/new.md")]);
+        write(workspace.path().join("docs/ai/new.md"), "# 新产物");
+        let next =
+            install_planned_artifacts(project.path(), workspace.path(), &new_plan, Some(&previous))
+                .expect("replace plan");
+
+        assert!(!project.path().join("docs/ai/old.md").exists());
+        assert!(project.path().join("docs/ai/new.md").is_file());
+        assert!(next
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.path != "docs/ai/old.md"));
+    }
+
+    #[test]
+    fn a_new_plan_conflicts_on_modified_old_artifacts_and_preserves_prior_ownership() {
+        let project = TestDir::new("keep-modified-old-project");
+        let workspace = TestDir::new("keep-modified-old-workspace");
+        let old_plan = plan(vec![item("old", ArtifactKind::Document, "docs/ai/old.md")]);
+        write(workspace.path().join("docs/ai/old.md"), "# 旧产物");
+        let mut previous =
+            install_planned_artifacts(project.path(), workspace.path(), &old_plan, None)
+                .expect("install old plan");
+        mark_completed(&mut previous);
+        save_ownership_manifest(project.path(), &previous).expect("save old manifest");
+        write(project.path().join("docs/ai/old.md"), "# 用户已修改旧产物");
+
+        let new_plan = plan(vec![item("new", ArtifactKind::Document, "docs/ai/new.md")]);
+        write(workspace.path().join("docs/ai/new.md"), "# 新产物");
+        let issues =
+            install_planned_artifacts(project.path(), workspace.path(), &new_plan, Some(&previous))
+                .expect_err("modified retired artifact must conflict");
+
+        assert!(issues
+            .iter()
+            .any(|issue| issue.code == "install.removed-owned.modified"));
+        assert_eq!(
+            read(project.path().join("docs/ai/old.md")),
+            "# 用户已修改旧产物"
+        );
+        assert!(!project.path().join("docs/ai/new.md").exists());
+        let still_owned = load_ownership_manifest(project.path())
+            .expect("read prior manifest")
+            .expect("prior manifest remains");
+        assert!(still_owned
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.path == "docs/ai/old.md"));
     }
 
     #[cfg(unix)]
@@ -1761,7 +2822,8 @@ mod tests {
             install_planned_artifacts(project.path(), workspace.path(), &first_plan, None)
                 .expect("install first plan");
         install_managed_entries(project.path(), &mut first).expect("insert managed entries");
-        first.state = InitializationRunState::Completed;
+        mark_completed(&mut first);
+        save_ownership_manifest(project.path(), &first).expect("complete first plan");
         let first_claude = read(project.path().join("CLAUDE.md"));
         assert!(first_claude.starts_with("prefix\n\nuser instructions\n"));
         assert!(first_claude.contains(MANAGED_BLOCK_START));
@@ -1807,6 +2869,48 @@ mod tests {
     }
 
     #[test]
+    fn managed_entries_resume_an_applied_target_from_the_matching_journal() {
+        let project = TestDir::new("entry-resume");
+        let mut manifest = empty_manifest("entry-resume-plan");
+        let block = managed_block(&manifest);
+        let applied = format!("{block}\n");
+        write(project.path().join("CLAUDE.md"), &applied);
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "CLAUDE.md".to_string(),
+            InstallJournalEntry {
+                operation: JournalOperation::WriteManagedEntry,
+                baseline_sha256: None,
+                expected_sha256: Some(content_sha256(applied.as_bytes())),
+                state: JournalEntryState::Applied,
+                link_target: None,
+            },
+        );
+        save_install_journal(
+            project.path(),
+            &InstallJournal {
+                schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
+                plan_sha256: manifest.plan_sha256.clone(),
+                entries,
+            },
+        )
+        .expect("save entry journal");
+
+        install_managed_entries(project.path(), &mut manifest)
+            .expect("resume remaining managed entry");
+        assert_eq!(manifest.managed_entries.len(), 2);
+        assert!(project.path().join("AGENTS.md").is_file());
+        let journal = load_install_journal(project.path())
+            .expect("load entry journal")
+            .expect("journal retained");
+        assert!(journal
+            .entries
+            .values()
+            .filter(|entry| entry.operation == JournalOperation::WriteManagedEntry)
+            .all(|entry| entry.state == JournalEntryState::Applied));
+    }
+
+    #[test]
     fn completed_manifest_is_atomic_and_verifies_owned_hashes() {
         let project = TestDir::new("manifest-project");
         let workspace = TestDir::new("manifest-workspace");
@@ -1822,8 +2926,14 @@ mod tests {
         let mut manifest =
             install_planned_artifacts(project.path(), workspace.path(), &artifact_plan, None)
                 .expect("install artifact");
-        manifest.state = InitializationRunState::Completed;
+        mark_completed(&mut manifest);
+        assert!(journal_path(project.path())
+            .expect("journal retained before completed manifest")
+            .exists());
         save_ownership_manifest(project.path(), &manifest).expect("save manifest");
+        assert!(!journal_path(project.path())
+            .expect("journal removed after completed manifest")
+            .exists());
 
         let loaded = load_ownership_manifest(project.path())
             .expect("load manifest")
@@ -1835,6 +2945,78 @@ mod tests {
         assert!(verify_ownership_manifest(project.path(), &loaded)
             .iter()
             .any(|issue| issue.code == "manifest.hash.mismatch"));
+    }
+
+    #[test]
+    fn completed_manifest_refuses_pending_journal_entries_and_missing_run_metadata() {
+        let project = TestDir::new("manifest-pending");
+        let workspace = TestDir::new("manifest-pending-workspace");
+        let artifact_plan = plan(vec![item(
+            "map",
+            ArtifactKind::Document,
+            "docs/ai/project-map.md",
+        )]);
+        write(
+            workspace.path().join("docs/ai/project-map.md"),
+            "# 项目地图",
+        );
+        let mut manifest =
+            install_planned_artifacts(project.path(), workspace.path(), &artifact_plan, None)
+                .expect("install artifact");
+        manifest.state = InitializationRunState::Completed;
+        let verification = verify_ownership_manifest(project.path(), &manifest);
+        assert!(verification
+            .iter()
+            .any(|issue| issue.code == "manifest.inventory-hash.missing"));
+
+        mark_completed(&mut manifest);
+        let mut journal = load_install_journal(project.path())
+            .expect("load journal")
+            .expect("journal exists");
+        journal
+            .entries
+            .values_mut()
+            .next()
+            .expect("journal entry")
+            .state = JournalEntryState::Pending;
+        save_install_journal(project.path(), &journal).expect("save pending journal");
+        assert!(save_ownership_manifest(project.path(), &manifest)
+            .expect_err("pending journal must block completion")
+            .contains("pending"));
+        assert!(!project
+            .path()
+            .join("docs/ai/.initialization-manifest.json")
+            .exists());
+        assert!(journal_path(project.path()).expect("journal path").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_existing_targets_are_conflicts_not_missing_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = TestDir::new("permission-project");
+        let workspace = TestDir::new("permission-workspace");
+        let artifact_plan = plan(vec![item(
+            "map",
+            ArtifactKind::Document,
+            "docs/ai/project-map.md",
+        )]);
+        write(workspace.path().join("docs/ai/project-map.md"), "# 新内容");
+        let target = project.path().join("docs/ai/project-map.md");
+        write(&target, "# 用户内容");
+        let mut permissions = fs::metadata(&target)
+            .expect("target metadata")
+            .permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&target, permissions).expect("make target unreadable");
+
+        let issues =
+            install_planned_artifacts(project.path(), workspace.path(), &artifact_plan, None)
+                .expect_err("unreadable target must conflict");
+        assert!(issues
+            .iter()
+            .any(|issue| issue.code == "install.target.read"));
     }
 
     #[test]
@@ -1850,7 +3032,7 @@ mod tests {
                 .join(".claude/skills/release-verification/SKILL.md"),
             "# 发布验证",
         );
-        let mut manifest = OwnershipManifest::default();
+        let mut manifest = empty_manifest("agent-copy-plan");
 
         let mode = share_agent_assets_for_test(project.path(), &mut manifest, false)
             .expect("copy fallback");
@@ -1873,6 +3055,11 @@ mod tests {
         );
         assert!(!project.path().join(".agents/scripts").exists());
         assert_eq!(manifest.agent_assets.len(), 2);
+        assert!(manifest.agent_asset_targets.iter().any(|target| {
+            target.path == ".agents/rules" && target.mode == AgentAssetMode::ManagedCopy
+        }));
+        mark_completed(&mut manifest);
+        assert!(verify_ownership_manifest(project.path(), &manifest).is_empty());
 
         write(
             project.path().join(".agents/rules/project/README.md"),
@@ -1883,6 +3070,72 @@ mod tests {
         assert!(issues
             .iter()
             .any(|issue| issue.code == "install.agent-copy.modified"));
+    }
+
+    #[test]
+    fn copy_fallback_resumes_applied_targets_and_removes_only_unchanged_stale_copies() {
+        let project = TestDir::new("copy-resume");
+        let source_path = ".claude/rules/project/README.md";
+        let target_path = ".agents/rules/project/README.md";
+        let content = "# 规则路由";
+        write(project.path().join(source_path), content);
+        write(project.path().join(target_path), content);
+        let mut manifest = empty_manifest("copy-resume-plan");
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            target_path.to_string(),
+            InstallJournalEntry {
+                operation: JournalOperation::WriteAgentCopy,
+                baseline_sha256: None,
+                expected_sha256: Some(content_sha256(content.as_bytes())),
+                state: JournalEntryState::Applied,
+                link_target: None,
+            },
+        );
+        save_install_journal(
+            project.path(),
+            &InstallJournal {
+                schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
+                plan_sha256: manifest.plan_sha256.clone(),
+                entries,
+            },
+        )
+        .expect("save copy journal");
+
+        share_agent_assets_for_test(project.path(), &mut manifest, false)
+            .expect("resume copy target");
+        assert_eq!(manifest.agent_assets.len(), 1);
+
+        fs::remove_file(project.path().join(source_path)).expect("remove obsolete source");
+        share_agent_assets_for_test(project.path(), &mut manifest, false)
+            .expect("remove unchanged obsolete managed copy");
+        assert!(!project.path().join(target_path).exists());
+        assert!(!project.path().join(".agents/rules").exists());
+        assert!(manifest.agent_assets.is_empty());
+    }
+
+    #[test]
+    fn stale_copy_modified_by_the_user_remains_owned_and_conflicts() {
+        let project = TestDir::new("copy-stale-modified");
+        let source_path = ".claude/rules/project/README.md";
+        let target_path = ".agents/rules/project/README.md";
+        write(project.path().join(source_path), "# 规则路由");
+        let mut manifest = empty_manifest("copy-stale-modified-plan");
+        share_agent_assets_for_test(project.path(), &mut manifest, false)
+            .expect("initial managed copy");
+        fs::remove_file(project.path().join(source_path)).expect("remove obsolete source");
+        write(project.path().join(target_path), "# 用户修改");
+
+        let issues = share_agent_assets_for_test(project.path(), &mut manifest, false)
+            .expect_err("modified stale copy must conflict");
+        assert!(issues
+            .iter()
+            .any(|issue| issue.code == "install.agent-copy.modified"));
+        assert_eq!(read(project.path().join(target_path)), "# 用户修改");
+        assert!(manifest
+            .agent_assets
+            .iter()
+            .any(|asset| asset.path == target_path));
     }
 
     #[cfg(unix)]
@@ -1899,7 +3152,7 @@ mod tests {
             project.path().join(".claude/skills/task/SKILL.md"),
             "# Task",
         );
-        let mut manifest = OwnershipManifest::default();
+        let mut manifest = empty_manifest("agent-link-plan");
         let mode = share_agent_assets_for_test(project.path(), &mut manifest, true)
             .expect("link agent assets");
         assert_eq!(mode, AgentAssetMode::RelativeSymlink);
@@ -1911,6 +3164,19 @@ mod tests {
             fs::read_link(project.path().join(".agents/skills")).expect("skills link"),
             PathBuf::from("../.claude/skills")
         );
+        assert!(manifest.agent_asset_targets.iter().any(|target| {
+            target.path == ".agents/rules"
+                && target.mode == AgentAssetMode::RelativeSymlink
+                && target.link_target.as_deref() == Some("../.claude/rules")
+        }));
+        mark_completed(&mut manifest);
+        assert!(verify_ownership_manifest(project.path(), &manifest).is_empty());
+        fs::remove_file(project.path().join(".agents/rules")).expect("remove owned rules link");
+        symlink("../.claude/skills", project.path().join(".agents/rules"))
+            .expect("replace with wrong link");
+        assert!(verify_ownership_manifest(project.path(), &manifest)
+            .iter()
+            .any(|issue| issue.code == "manifest.agent-target.link-mismatch"));
 
         let preserved = TestDir::new("preserved-assets");
         write(
@@ -1921,11 +3187,14 @@ mod tests {
             preserved.path().join(".agents/rules/user-owned.md"),
             "# 用户规则",
         );
-        let mut preserved_manifest = OwnershipManifest::default();
+        let mut preserved_manifest = empty_manifest("agent-preserved-plan");
         let preserved_mode =
             share_agent_assets_for_test(preserved.path(), &mut preserved_manifest, true)
                 .expect("preserve real agents directory");
         assert_eq!(preserved_mode, AgentAssetMode::Preserved);
+        assert!(preserved_manifest.agent_asset_targets.iter().any(|target| {
+            target.path == ".agents/rules" && target.mode == AgentAssetMode::Preserved
+        }));
         assert_eq!(
             read(preserved.path().join(".agents/rules/user-owned.md")),
             "# 用户规则"
@@ -1942,7 +3211,7 @@ mod tests {
             "# 新规则",
         );
         symlink(outside.path(), escaped.path().join(".agents")).expect("agents root escape");
-        let mut escaped_manifest = OwnershipManifest::default();
+        let mut escaped_manifest = empty_manifest("agent-escaped-plan");
         let issues = share_agent_assets_for_test(escaped.path(), &mut escaped_manifest, true)
             .expect_err("agents root symlink must fail");
         assert!(issues
