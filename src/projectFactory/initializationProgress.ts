@@ -1,6 +1,9 @@
 import type {
   ExistingProjectArtifactTotals,
+  ExistingProjectInitResult,
   ExistingProjectInitStatus,
+  ExistingProjectInitializationConflict,
+  ExistingProjectInitializationIssue,
   ExistingProjectInitializationPhase,
 } from './types'
 
@@ -14,6 +17,10 @@ export interface ProjectInitializationProgress {
   attempt?: number
   sequence?: number
   recoverable?: boolean
+  issues?: ExistingProjectInitializationIssue[]
+  conflicts?: ExistingProjectInitializationConflict[]
+  warnings?: string[]
+  artifactTotals?: ExistingProjectArtifactTotals
 }
 
 const progressByPhase: Record<ProjectInitializationPhase, ProjectInitializationProgress> = {
@@ -68,11 +75,47 @@ export function initializationProgressFromStatus(
     attempt: status.attempt,
     sequence: status.sequence,
     recoverable: status.recoverable,
+    issues: status.issues,
+    conflicts: status.conflicts,
+    warnings: status.warnings,
+    artifactTotals: status.artifactTotals,
+  }
+}
+
+export function isSuccessfulInitializationResult(result: ExistingProjectInitResult): boolean {
+  return result.status === 'current-v4' && result.phase === 'complete'
+}
+
+export function initializationProgressFromResult(
+  result: ExistingProjectInitResult,
+): ProjectInitializationProgress {
+  const reportedPhase = result.conflicts?.length
+    ? 'conflict'
+    : result.phase ?? 'failed'
+  const phase = reportedPhase === 'complete' && !isSuccessfulInitializationResult(result)
+    ? 'failed'
+    : reportedPhase
+  const fallback = initializationProgressFor(phase)
+  return {
+    ...fallback,
+    percent: Math.max(0, Math.min(100, result.percent ?? fallback.percent)),
+    detail: result.detail
+      ?? result.conflicts?.[0]?.detail
+      ?? result.issues?.[0]?.detail
+      ?? fallback.detail,
+    runId: result.runId,
+    attempt: result.attempt,
+    sequence: result.sequence,
+    recoverable: result.recoverable,
+    issues: result.issues,
+    conflicts: result.conflicts,
+    warnings: result.warnings,
+    artifactTotals: result.artifactTotals,
   }
 }
 
 export function initializationCompletionDetail(totals?: ExistingProjectArtifactTotals): string {
-  if (!totals) return '初始化完成。'
+  if (!totals) throw new Error('初始化完成结果缺少 artifactTotals，无法确认产物数量。')
   const skillLabel = totals.skills === 1 ? 'skill' : 'skills'
   return `初始化完成：${totals.documents} 份文档、${totals.rules} 条规则、${totals.skills} 个 ${skillLabel} 已通过校验。`
 }

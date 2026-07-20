@@ -67,9 +67,10 @@ describe('project initialization progress', () => {
       attempt: 2,
       sequence: 17,
       recoverable: true,
-      issues: [],
+      issues: [{ code: 'rules.missing-verification', detail: '规则缺少验证命令' }],
       conflicts: [],
       warnings: ['上次进程已退出'],
+      artifactTotals: { documents: 3, rules: 2, skills: 1, total: 6 },
     })
 
     expect(progress).toMatchObject({
@@ -80,6 +81,10 @@ describe('project initialization progress', () => {
       attempt: 2,
       sequence: 17,
       recoverable: true,
+      issues: [{ code: 'rules.missing-verification', detail: '规则缺少验证命令' }],
+      conflicts: [],
+      warnings: ['上次进程已退出'],
+      artifactTotals: { documents: 3, rules: 2, skills: 1, total: 6 },
     })
   })
 
@@ -93,6 +98,9 @@ describe('project initialization progress', () => {
       skills: 1,
       total: 6,
     })).toBe('初始化完成：3 份文档、2 条规则、1 个 skill 已通过校验。')
+    expect(() => (completionDetail as (totals?: unknown) => string)()).toThrow(
+      '初始化完成结果缺少 artifactTotals，无法确认产物数量。',
+    )
   })
 
   it('guards unsupported agents without suggesting a chat or permission flow', () => {

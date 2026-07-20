@@ -238,6 +238,23 @@ describe('App existing-project initialization progress', () => {
     await nextTick()
     expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(true)
 
+    const initializedEvent = vi.fn()
+    window.addEventListener('vibe-project-initialized', initializedEvent)
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-live',
+      phase: 'complete',
+      percent: 100,
+      detail: '后端完成事件',
+      attempt: 1,
+      sequence: 9,
+      recoverable: false,
+      issues: [],
+      conflicts: [],
+      warnings: [],
+      artifactTotals: { documents: 3, rules: 2, skills: 1, total: 6 },
+    })
+    await nextTick()
     initialization.resolve({
       projectPath: project.displayPath,
       runId: 'run-live',
@@ -253,6 +270,8 @@ describe('App existing-project initialization progress', () => {
       generated: ['docs/ai/project-map.md'],
     })
     await settle()
+    expect(initializedEvent).toHaveBeenCalledTimes(1)
+    window.removeEventListener('vibe-project-initialized', initializedEvent)
     expect(wrapper.find('[data-background-task="initialization"]').exists()).toBe(false)
     expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(true)
 
@@ -330,6 +349,244 @@ describe('App existing-project initialization progress', () => {
     wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).vm.$emit('minimize')
     await nextTick()
     expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps a resolved needs-attention result instead of claiming completion', async () => {
+    initializeExistingProjectMock.mockResolvedValue({
+      projectPath: project.displayPath,
+      runId: 'run-attention',
+      status: 'needs-attention',
+      phase: 'conflict',
+      percent: 82,
+      detail: 'CLAUDE.md 已由用户修改，未安装任何产物',
+      attempt: 2,
+      sequence: 14,
+      recoverable: false,
+      issues: [{ code: 'install.conflict', detail: '安装前冲突检查失败' }],
+      conflicts: [{ path: 'CLAUDE.md', detail: '当前哈希与扫描时不同' }],
+      warnings: ['用户文件保持不变'],
+      artifactTotals: { documents: 3, rules: 2, skills: 1, total: 6 },
+      generated: [],
+    })
+
+    const wrapper = await mountAndStartInitialization()
+
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
+      phase: 'conflict',
+      percent: 82,
+      detail: 'CLAUDE.md 已由用户修改，未安装任何产物',
+      runId: 'run-attention',
+      sequence: 14,
+      issues: [{ code: 'install.conflict', detail: '安装前冲突检查失败' }],
+      conflicts: [{ path: 'CLAUDE.md', detail: '当前哈希与扫描时不同' }],
+      warnings: ['用户文件保持不变'],
+      artifactTotals: { documents: 3, rules: 2, skills: 1, total: 6 },
+    })
+    await vi.advanceTimersByTimeAsync(2_200)
+    expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('treats current-v4 complete without artifact totals as a contract failure', async () => {
+    initializeExistingProjectMock.mockResolvedValue({
+      projectPath: project.displayPath,
+      runId: 'run-no-totals',
+      status: 'current-v4',
+      phase: 'complete',
+      detail: '后端称已完成但未返回报告计数',
+      attempt: 1,
+      sequence: 7,
+      recoverable: false,
+      issues: [],
+      conflicts: [],
+      warnings: [],
+      generated: [],
+    })
+
+    const wrapper = await mountAndStartInitialization()
+
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
+      phase: 'failed',
+      detail: '初始化完成结果缺少 artifactTotals，无法确认产物数量。',
+    })
+    await vi.advanceTimersByTimeAsync(2_200)
+    expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('keeps an exact terminal event when the invoke rejects afterward', async () => {
+    const initialization = deferred<ExistingProjectInitResult>()
+    initializeExistingProjectMock.mockReturnValue(initialization.promise)
+    const wrapper = await mountAndStartInitialization()
+    const progressHandler = listenInitializationProgressMock.mock.calls[0]?.[0]
+
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-terminal',
+      phase: 'failed',
+      percent: 67,
+      detail: 'artifact-plan.json 缺少 backend 模块覆盖',
+      attempt: 3,
+      sequence: 12,
+      recoverable: true,
+      issues: [{ code: 'plan.module.uncovered', detail: 'backend 模块未覆盖' }],
+      conflicts: [],
+      warnings: ['已保留诊断'],
+    })
+    await nextTick()
+    initialization.reject(new Error('agent process exited with code 1'))
+    await settle()
+
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
+      phase: 'failed',
+      percent: 67,
+      detail: 'artifact-plan.json 缺少 backend 模块覆盖',
+      issues: [{ code: 'plan.module.uncovered', detail: 'backend 模块未覆盖' }],
+      warnings: ['已保留诊断'],
+    })
+    wrapper.unmount()
+  })
+
+  it('isolates events by run id while allowing a new run to reset sequence', async () => {
+    existingProjectInitStatusMock.mockReset()
+      .mockResolvedValueOnce({ initialized: false, status: 'not-initialized', recoverable: false })
+      .mockResolvedValueOnce({
+        initialized: false,
+        status: 'incomplete',
+        runId: 'run-next',
+        phase: 'scan',
+        percent: 5,
+        detail: '开始新的恢复运行',
+        attempt: 1,
+        sequence: 0,
+        recoverable: true,
+        issues: [],
+        conflicts: [],
+        warnings: [],
+      })
+    const first = deferred<ExistingProjectInitResult>()
+    const second = deferred<ExistingProjectInitResult>()
+    initializeExistingProjectMock
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+    const wrapper = await mountAndStartInitialization()
+    const progressHandler = listenInitializationProgressMock.mock.calls[0]?.[0]
+
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-first',
+      phase: 'documents',
+      percent: 42,
+      detail: '第一轮文档阶段',
+      attempt: 1,
+      sequence: 50,
+      recoverable: true,
+      issues: [],
+      conflicts: [],
+      warnings: [],
+    })
+    await nextTick()
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-old',
+      phase: 'rules',
+      percent: 55,
+      detail: '其他运行的事件',
+      attempt: 1,
+      sequence: 99,
+      recoverable: true,
+      issues: [],
+      conflicts: [],
+      warnings: [],
+    })
+    await nextTick()
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
+      runId: 'run-first',
+      phase: 'documents',
+      sequence: 50,
+    })
+
+    first.reject(new Error('第一轮已退出'))
+    await settle()
+    await wrapper.get('[data-start-initialization]').trigger('click')
+    await settle()
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-next',
+      phase: 'plan',
+      percent: 18,
+      detail: '新运行从低 sequence 开始',
+      attempt: 1,
+      sequence: 1,
+      recoverable: true,
+      issues: [],
+      conflicts: [],
+      warnings: [],
+    })
+    await nextTick()
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-first',
+      phase: 'skills',
+      percent: 70,
+      detail: '第一轮迟到事件',
+      attempt: 1,
+      sequence: 100,
+      recoverable: true,
+      issues: [],
+      conflicts: [],
+      warnings: [],
+    })
+    await nextTick()
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
+      runId: 'run-next',
+      phase: 'plan',
+      sequence: 1,
+      detail: '新运行从低 sequence 开始',
+    })
+    wrapper.unmount()
+  })
+
+  it('restarts elapsed time when a terminal run returns to a running phase', async () => {
+    const initialization = deferred<ExistingProjectInitResult>()
+    initializeExistingProjectMock.mockReturnValue(initialization.promise)
+    const wrapper = await mountAndStartInitialization()
+    const progressHandler = listenInitializationProgressMock.mock.calls[0]?.[0]
+
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-recover',
+      phase: 'interrupted',
+      percent: 64,
+      detail: '进程中断',
+      attempt: 1,
+      sequence: 6,
+      recoverable: true,
+      issues: [],
+      conflicts: [],
+      warnings: [],
+    })
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('elapsedSeconds')).toBe(0)
+
+    progressHandler({
+      projectPath: project.displayPath,
+      runId: 'run-recover',
+      phase: 'skills',
+      percent: 66,
+      detail: '已恢复 skills 阶段',
+      attempt: 2,
+      sequence: 7,
+      recoverable: true,
+      issues: [],
+      conflicts: [],
+      warnings: ['从有效节点恢复'],
+    })
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('elapsedSeconds')).toBe(2)
     wrapper.unmount()
   })
 

@@ -167,10 +167,12 @@ import {
   initializationAgentGuardMessage,
   initializationCompletionDetail,
   initializationProgressFor,
+  initializationProgressFromResult,
   initializationProgressFromStatus,
   isInitializationTaskCardVisible,
   isInitializationTaskVisible,
   isProjectInitializationAgent,
+  isSuccessfulInitializationResult,
   projectInitializationSteps,
   type ProjectInitializationPhase,
   type ProjectInitializationProgress,
@@ -267,6 +269,22 @@ function advanceInitializationProgress(
   }
 }
 
+function updateInitializationTimer(
+  previousPhase: ProjectInitializationPhase,
+  nextPhase: ProjectInitializationPhase,
+) {
+  if (isInitializationTaskVisible(nextPhase)) {
+    window.clearTimeout(initializationCompleteTimer)
+    initializationCompleteTimer = 0
+    if (!isInitializationTaskVisible(previousPhase) && !initializationElapsedTimer) {
+      initializationElapsedTimer = window.setInterval(() => { initializationElapsedSeconds.value += 1 }, 1000)
+    }
+    return
+  }
+  window.clearInterval(initializationElapsedTimer)
+  initializationElapsedTimer = 0
+}
+
 const backgroundTasks = computed<BackgroundTaskSummary[]>(() => {
   const tasks: BackgroundTaskSummary[] = []
   const initialization = initializationProgress.value
@@ -298,9 +316,9 @@ function updateProjectFactoryTask(task: BackgroundTaskSummary) {
   projectFactoryTask.value = task
 }
 
-function applyInitializationProgress(progress: ExistingProjectInitializationProgress) {
+function applyInitializationProgress(progress: ExistingProjectInitializationProgress): boolean {
   const current = initializationProgress.value
-  if (!current || current.projectPath !== progress.projectPath) return
+  if (!current || current.projectPath !== progress.projectPath) return false
   const allowed: ProjectInitializationPhase[] = [
     'scan',
     'plan',
@@ -314,37 +332,59 @@ function applyInitializationProgress(progress: ExistingProjectInitializationProg
     'interrupted',
     'conflict',
   ]
-  if (!allowed.includes(progress.phase)) return
+  if (!allowed.includes(progress.phase)) return false
+  if (current.runId && progress.runId !== current.runId) return false
   if (
     progress.sequence !== undefined
     && current.sequence !== undefined
-    && progress.sequence <= current.sequence
-  ) return
+    && (
+      progress.sequence < current.sequence
+      || (progress.sequence === current.sequence && progress.phase !== current.phase)
+    )
+  ) return false
+  let nextProgress = progress
+  if (progress.phase === 'complete') {
+    try {
+      nextProgress = {
+        ...progress,
+        detail: initializationCompletionDetail(progress.artifactTotals),
+      }
+    } catch (error) {
+      nextProgress = {
+        ...progress,
+        phase: 'failed',
+        detail: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      }
+    }
+  }
   initializationProgress.value = {
     ...current,
-    phase: progress.phase,
-    percent: Math.max(0, Math.min(100, progress.percent)),
-    detail: progress.detail,
-    runId: progress.runId ?? current.runId,
-    attempt: progress.attempt ?? current.attempt,
-    sequence: progress.sequence ?? current.sequence,
-    recoverable: progress.recoverable ?? current.recoverable,
+    phase: nextProgress.phase,
+    percent: Math.max(0, Math.min(100, nextProgress.percent)),
+    detail: nextProgress.detail,
+    runId: nextProgress.runId ?? current.runId,
+    attempt: nextProgress.attempt ?? current.attempt,
+    sequence: nextProgress.sequence ?? current.sequence,
+    recoverable: nextProgress.recoverable ?? current.recoverable,
+    issues: nextProgress.issues ?? current.issues,
+    conflicts: nextProgress.conflicts ?? current.conflicts,
+    warnings: nextProgress.warnings ?? current.warnings,
+    artifactTotals: nextProgress.artifactTotals ?? current.artifactTotals,
     projectPath: current.projectPath,
     projectName: current.projectName,
   }
-  if (!isInitializationTaskVisible(progress.phase)) {
-    window.clearInterval(initializationElapsedTimer)
-    initializationElapsedTimer = 0
-  }
-  if (progress.phase === 'complete') {
+  updateInitializationTimer(current.phase, nextProgress.phase)
+  if (nextProgress.phase === 'complete') {
     window.clearTimeout(initializationCompleteTimer)
     initializationCompleteTimer = window.setTimeout(() => {
       if (
-        initializationProgress.value?.projectPath === progress.projectPath
+        initializationProgress.value?.projectPath === nextProgress.projectPath
         && initializationProgress.value.phase === 'complete'
       ) initializationProgress.value = null
     }, 2200)
   }
+  return true
 }
 
 function minimizeProjectFactoryTask() {
@@ -934,13 +974,37 @@ async function initializeProject(project: ProjectInfo) {
         path: project.displayPath,
       }),
     )
-    const completionDetail = initializationCompletionDetail(result.artifactTotals)
-    advanceInitializationProgress(project.displayPath, 'complete', completionDetail, result.sequence)
-    window.dispatchEvent(new CustomEvent<string>('vibe-project-initialized', { detail: project.displayPath }))
-    notify(completionDetail)
-    markProjectsDirty()
+    const resultProgress = initializationProgressFromResult(result)
+    if (isSuccessfulInitializationResult(result)) {
+      const completionDetail = initializationCompletionDetail(result.artifactTotals)
+      const applied = applyInitializationProgress({
+        ...resultProgress,
+        projectPath: project.displayPath,
+        phase: 'complete',
+        percent: 100,
+        detail: completionDetail,
+      })
+      if (!applied) return
+      window.dispatchEvent(new CustomEvent<string>('vibe-project-initialized', { detail: project.displayPath }))
+      notify(completionDetail)
+      markProjectsDirty()
+      return
+    }
+    const applied = applyInitializationProgress({
+      ...resultProgress,
+      projectPath: project.displayPath,
+    })
+    if (applied) notify(resultProgress.detail, true)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
+    const current = initializationProgress.value
+    if (
+      current?.projectPath === project.displayPath
+      && !isInitializationTaskVisible(current.phase)
+    ) {
+      notify(`项目初始化进程结束：${detail}；保留状态：${current.detail}`, true)
+      return
+    }
     advanceInitializationProgress(project.displayPath, 'failed', detail)
     notify(`项目初始化失败：${detail}`, true)
   }
