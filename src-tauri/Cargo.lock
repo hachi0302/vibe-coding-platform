@@ -5244,6 +5244,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "once_cell",
  "portable-pty",
+ "quick-xml",
  "rayon",
  "regex-lite",
  "rusqlite",
