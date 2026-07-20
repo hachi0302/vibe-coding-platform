@@ -42,6 +42,12 @@ struct RemovalCandidate {
     operation: JournalOperation,
 }
 
+#[derive(Debug, Clone)]
+struct LinkRemovalCandidate {
+    path: String,
+    expected_target: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum JournalOperation {
@@ -50,6 +56,7 @@ enum JournalOperation {
     WriteAgentCopy,
     RemoveOwnedArtifact,
     RemoveAgentCopy,
+    RemoveAgentLink,
     CreateAgentLink,
 }
 
@@ -174,6 +181,114 @@ fn allowed_install_target(kind: ArtifactKind, target_path: &str) -> bool {
                 && target_path.split('/').count() >= 4
         }
     }
+}
+
+fn allowed_agent_asset_path(target_path: &str) -> bool {
+    normalized_relative_path(target_path).is_ok()
+        && AGENT_ASSET_NAMES.iter().any(|name| {
+            let prefix = format!(".agents/{name}/");
+            target_path.starts_with(&prefix) && target_path.len() > prefix.len()
+        })
+}
+
+fn validate_manifest_structure(manifest: &OwnershipManifest) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    let mut artifact_paths = BTreeSet::new();
+    for artifact in &manifest.artifacts {
+        if normalized_relative_path(&artifact.path).is_err()
+            || !allowed_install_target(artifact.kind, &artifact.path)
+        {
+            issues.push(issue(
+                "manifest.artifact.path-invalid",
+                "产物路径不在其 ArtifactKind 允许的受管根目录中",
+                Some(&artifact.path),
+                "verify",
+            ));
+        }
+        if !artifact_paths.insert(artifact.path.as_str()) {
+            issues.push(issue(
+                "manifest.path.duplicate",
+                "所有权 manifest 包含重复产物路径",
+                Some(&artifact.path),
+                "verify",
+            ));
+        }
+    }
+
+    let mut asset_paths = BTreeSet::new();
+    for asset in &manifest.agent_assets {
+        if !allowed_agent_asset_path(&asset.path) {
+            issues.push(issue(
+                "manifest.agent-asset.path-invalid",
+                "智能体副本路径必须位于 .agents/rules、skills 或 scripts 下",
+                Some(&asset.path),
+                "verify",
+            ));
+        }
+        if !asset_paths.insert(asset.path.as_str()) {
+            issues.push(issue(
+                "manifest.agent-asset.duplicate",
+                "所有权 manifest 包含重复智能体副本路径",
+                Some(&asset.path),
+                "verify",
+            ));
+        }
+    }
+
+    let mut entry_paths = BTreeSet::new();
+    for entry in &manifest.managed_entries {
+        if !matches!(entry.path.as_str(), "CLAUDE.md" | "AGENTS.md") {
+            issues.push(issue(
+                "manifest.entry.path-invalid",
+                "入口托管块只能记录 CLAUDE.md 或 AGENTS.md",
+                Some(&entry.path),
+                "verify",
+            ));
+        }
+        if !entry_paths.insert(entry.path.as_str()) {
+            issues.push(issue(
+                "manifest.entry.duplicate",
+                "入口托管块在 manifest 中重复",
+                Some(&entry.path),
+                "verify",
+            ));
+        }
+    }
+
+    let mut target_paths = BTreeSet::new();
+    for target in &manifest.agent_asset_targets {
+        let matching_name = AGENT_ASSET_NAMES.iter().find(|name| {
+            target.path == format!(".agents/{name}")
+                && target.source_path == format!(".claude/{name}")
+        });
+        let link_is_valid = match (matching_name, target.mode) {
+            (Some(name), AgentAssetMode::RelativeSymlink) => {
+                target.link_target.as_deref()
+                    == Some(expected_agent_link(name).to_string_lossy().as_ref())
+            }
+            (Some(_), AgentAssetMode::ManagedCopy | AgentAssetMode::Preserved) => {
+                target.link_target.is_none()
+            }
+            _ => false,
+        };
+        if !link_is_valid {
+            issues.push(issue(
+                "manifest.agent-target.path-invalid",
+                "智能体目标必须是匹配的 .claude/{rules,skills,scripts} 到 .agents 记录",
+                Some(&target.path),
+                "verify",
+            ));
+        }
+        if !target_paths.insert(target.path.as_str()) {
+            issues.push(issue(
+                "manifest.agent-target.duplicate",
+                "智能体目标在 manifest 中重复",
+                Some(&target.path),
+                "verify",
+            ));
+        }
+    }
+    issues
 }
 
 pub fn state_directory(project: &Path) -> Result<PathBuf, String> {
@@ -449,6 +564,7 @@ pub fn install_planned_artifacts(
                 "install",
             ));
         }
+        issues.extend(validate_manifest_structure(previous));
     }
 
     let journal = match load_install_journal(&project) {
@@ -474,6 +590,7 @@ pub fn install_planned_artifacts(
         .filter(|manifest| {
             manifest.schema_version == INITIALIZATION_STATE_SCHEMA_VERSION
                 && manifest.state == InitializationRunState::Completed
+                && validate_manifest_structure(manifest).is_empty()
         })
         .into_iter()
         .flat_map(|manifest| manifest.artifacts.iter())
@@ -656,7 +773,23 @@ pub fn install_planned_artifacts(
                     });
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let pending_remove_matches = journal.as_ref().is_some_and(|journal| {
+                    journal.plan_sha256 == plan_sha256
+                        && journal.entries.get(&owned.path).is_some_and(|entry| {
+                            entry.operation == JournalOperation::RemoveOwnedArtifact
+                                && entry.state == JournalEntryState::Pending
+                                && entry.baseline_sha256.as_deref() == Some(owned.sha256.as_str())
+                        })
+                });
+                if pending_remove_matches {
+                    removals.push(RemovalCandidate {
+                        path: owned.path.clone(),
+                        baseline_sha256: owned.sha256.clone(),
+                        operation: JournalOperation::RemoveOwnedArtifact,
+                    });
+                }
+            }
             Err(error) => issues.push(issue(
                 "install.removed-owned.read",
                 format!("无法读取待撤销的旧产物：{error}"),
@@ -824,6 +957,7 @@ pub fn install_planned_artifacts(
             .and_then(|state| state.inventory_sha256.clone())
             .or_else(|| previous.map(|manifest| manifest.inventory_sha256.clone()))
             .unwrap_or_default(),
+        inventory_summary: previous.and_then(|manifest| manifest.inventory_summary),
         plan_sha256,
         artifact_totals: totals,
         artifacts: candidates
@@ -1153,10 +1287,97 @@ fn expected_agent_link(name: &str) -> PathBuf {
     PathBuf::from(format!("../.claude/{name}"))
 }
 
+fn preflight_agent_link_removal(
+    project: &Path,
+    target: &AgentAssetTarget,
+    journal: &InstallJournal,
+) -> Result<Option<LinkRemovalCandidate>, ValidationIssue> {
+    if target.mode != AgentAssetMode::RelativeSymlink {
+        return Ok(None);
+    }
+    let expected_target = target.link_target.clone().ok_or_else(|| {
+        issue(
+            "manifest.agent-target.path-invalid",
+            "相对链接目标缺少 linkTarget",
+            Some(&target.path),
+            "install",
+        )
+    })?;
+    reject_symlink_components(project, Path::new(".agents")).map_err(|detail| {
+        issue(
+            "install.agent-link.remove-unsafe",
+            detail,
+            Some(&target.path),
+            "install",
+        )
+    })?;
+    let destination = project.join(&target.path);
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata_is_link_or_reparse(&metadata) => {
+            let actual = fs::read_link(&destination).map_err(|error| {
+                issue(
+                    "install.agent-link.remove-read",
+                    format!("无法读取待撤销的智能体链接：{error}"),
+                    Some(&target.path),
+                    "install",
+                )
+            })?;
+            if actual != Path::new(&expected_target) {
+                return Err(issue(
+                    "install.agent-link.remove-mismatch",
+                    format!(
+                        "待撤销链接指向 {}，不等于 manifest 记录的 {}",
+                        actual.display(),
+                        expected_target
+                    ),
+                    Some(&target.path),
+                    "install",
+                ));
+            }
+            Ok(Some(LinkRemovalCandidate {
+                path: target.path.clone(),
+                expected_target,
+            }))
+        }
+        Ok(_) => Err(issue(
+            "install.agent-link.remove-mismatch",
+            "待撤销目标不再是平台创建的相对链接",
+            Some(&target.path),
+            "install",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let pending_remove_matches = journal.entries.get(&target.path).is_some_and(|entry| {
+                entry.operation == JournalOperation::RemoveAgentLink
+                    && entry.state == JournalEntryState::Pending
+                    && entry.link_target.as_deref() == Some(expected_target.as_str())
+            });
+            Ok(pending_remove_matches.then(|| LinkRemovalCandidate {
+                path: target.path.clone(),
+                expected_target,
+            }))
+        }
+        Err(error) => Err(issue(
+            "install.agent-link.remove-read",
+            format!("无法检查待撤销的智能体链接：{error}"),
+            Some(&target.path),
+            "install",
+        )),
+    }
+}
+
 fn preflight_agent_copy_removal(
     project: &Path,
     asset: &ManagedAgentAsset,
+    journal: &InstallJournal,
 ) -> Result<Option<RemovalCandidate>, ValidationIssue> {
+    if !allowed_agent_asset_path(&asset.path) {
+        return Err(issue(
+            "manifest.agent-asset.path-invalid",
+            "智能体副本路径必须位于 .agents/rules、skills 或 scripts 下",
+            Some(&asset.path),
+            "install",
+        ));
+    }
     let relative = normalized_relative_path(&asset.path).map_err(|detail| {
         issue(
             "install.agent-copy.remove-invalid",
@@ -1190,7 +1411,18 @@ fn preflight_agent_copy_removal(
                 operation: JournalOperation::RemoveAgentCopy,
             }))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let pending_remove_matches = journal.entries.get(&asset.path).is_some_and(|entry| {
+                entry.operation == JournalOperation::RemoveAgentCopy
+                    && entry.state == JournalEntryState::Pending
+                    && entry.baseline_sha256.as_deref() == Some(asset.sha256.as_str())
+            });
+            Ok(pending_remove_matches.then(|| RemovalCandidate {
+                path: asset.path.clone(),
+                baseline_sha256: asset.sha256.clone(),
+                operation: JournalOperation::RemoveAgentCopy,
+            }))
+        }
         Err(error) => Err(issue(
             "install.agent-copy.remove-read",
             format!("无法读取待撤销的同步副本：{error}"),
@@ -1214,6 +1446,10 @@ fn share_agent_assets_for_test(
 ) -> Result<AgentAssetMode, Vec<ValidationIssue>> {
     let project = canonical_directory(project, "项目")
         .map_err(|error| vec![issue("install.project.invalid", error, None, "install")])?;
+    let structural_issues = validate_manifest_structure(manifest);
+    if !structural_issues.is_empty() {
+        return Err(structural_issues);
+    }
     let mut journal =
         journal_for_plan(&project, &manifest.plan_sha256).map_err(|error| vec![error])?;
     let previous_assets: BTreeMap<&str, &ManagedAgentAsset> = manifest
@@ -1221,10 +1457,16 @@ fn share_agent_assets_for_test(
         .iter()
         .map(|asset| (asset.path.as_str(), asset))
         .collect();
+    let previous_targets: BTreeMap<&str, &AgentAssetTarget> = manifest
+        .agent_asset_targets
+        .iter()
+        .map(|target| (target.path.as_str(), target))
+        .collect();
     let mut issues = Vec::new();
     let mut links = Vec::new();
     let mut copies = Vec::new();
     let mut removals = Vec::new();
+    let mut link_removals = Vec::new();
     let mut preserved = false;
     let mut preserved_names = Vec::new();
 
@@ -1249,8 +1491,15 @@ fn share_agent_assets_for_test(
                     .values()
                     .filter(|asset| asset.path.starts_with(&prefix))
                 {
-                    match preflight_agent_copy_removal(&project, asset) {
+                    match preflight_agent_copy_removal(&project, asset, &journal) {
                         Ok(Some(candidate)) => removals.push(candidate),
+                        Ok(None) => {}
+                        Err(error) => issues.push(error),
+                    }
+                }
+                if let Some(target) = previous_targets.get(format!(".agents/{name}").as_str()) {
+                    match preflight_agent_link_removal(&project, target, &journal) {
+                        Ok(Some(candidate)) => link_removals.push(candidate),
                         Ok(None) => {}
                         Err(error) => issues.push(error),
                     }
@@ -1300,13 +1549,20 @@ fn share_agent_assets_for_test(
             .values()
             .filter(|asset| asset.path.starts_with(&prefix) && !desired_paths.contains(&asset.path))
         {
-            match preflight_agent_copy_removal(&project, asset) {
+            match preflight_agent_copy_removal(&project, asset, &journal) {
                 Ok(Some(candidate)) => removals.push(candidate),
                 Ok(None) => {}
                 Err(error) => issues.push(error),
             }
         }
         if source_files.is_empty() {
+            if let Some(target) = previous_targets.get(format!(".agents/{name}").as_str()) {
+                match preflight_agent_link_removal(&project, target, &journal) {
+                    Ok(Some(candidate)) => link_removals.push(candidate),
+                    Ok(None) => {}
+                    Err(error) => issues.push(error),
+                }
+            }
             continue;
         }
 
@@ -1518,6 +1774,18 @@ fn share_agent_assets_for_test(
                 expected_sha256: None,
                 state: JournalEntryState::Pending,
                 link_target: None,
+            },
+        );
+    }
+    for candidate in &link_removals {
+        journal.entries.insert(
+            candidate.path.clone(),
+            InstallJournalEntry {
+                operation: JournalOperation::RemoveAgentLink,
+                baseline_sha256: Some(content_sha256(candidate.expected_target.as_bytes())),
+                expected_sha256: None,
+                state: JournalEntryState::Pending,
+                link_target: Some(candidate.expected_target.clone()),
             },
         );
     }
@@ -1736,6 +2004,58 @@ fn share_agent_assets_for_test(
         }
         save_install_journal(&project, &journal).map_err(|error| vec![error])?;
     }
+    for candidate in link_removals {
+        let destination = project.join(&candidate.path);
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata_is_link_or_reparse(&metadata) => {
+                let actual = fs::read_link(&destination).map_err(|error| {
+                    vec![issue(
+                        "install.agent-link.changed-during-remove",
+                        format!("删除前无法读取智能体链接：{error}"),
+                        Some(&candidate.path),
+                        "install",
+                    )]
+                })?;
+                if actual != Path::new(&candidate.expected_target) {
+                    return Err(vec![issue(
+                        "install.agent-link.remove-mismatch",
+                        "智能体链接在预检后改变，已停止删除",
+                        Some(&candidate.path),
+                        "install",
+                    )]);
+                }
+                fs::remove_file(&destination).map_err(|error| {
+                    vec![issue(
+                        "install.agent-link.remove",
+                        format!("无法删除旧智能体链接：{error}"),
+                        Some(&candidate.path),
+                        "install",
+                    )]
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(vec![issue(
+                    "install.agent-link.remove-mismatch",
+                    "智能体链接在预检后被替换为非链接目标，已停止删除",
+                    Some(&candidate.path),
+                    "install",
+                )]);
+            }
+            Err(error) => {
+                return Err(vec![issue(
+                    "install.agent-link.changed-during-remove",
+                    format!("删除前无法检查智能体链接：{error}"),
+                    Some(&candidate.path),
+                    "install",
+                )]);
+            }
+        }
+        if let Some(entry) = journal.entries.get_mut(&candidate.path) {
+            entry.state = JournalEntryState::Applied;
+        }
+        save_install_journal(&project, &journal).map_err(|error| vec![error])?;
+    }
     installed_assets.sort_by(|left, right| left.path.cmp(&right.path));
     let copied_names: BTreeSet<String> = installed_assets
         .iter()
@@ -1901,6 +2221,17 @@ pub fn load_ownership_manifest(project: &Path) -> Result<Option<OwnershipManifes
     if manifest.state != InitializationRunState::Completed {
         return Err("便携所有权 manifest 不是 completed 状态".to_string());
     }
+    let structural_issues = validate_manifest_structure(&manifest);
+    if !structural_issues.is_empty() {
+        return Err(format!(
+            "所有权 manifest 结构无效：{}",
+            structural_issues
+                .iter()
+                .map(|item| format!("{}: {}", item.code, item.detail))
+                .collect::<Vec<_>>()
+                .join("；")
+        ));
+    }
     Ok(Some(manifest))
 }
 
@@ -1914,7 +2245,7 @@ pub fn verify_ownership_manifest(
             return vec![issue("manifest.project.invalid", error, None, "verify")];
         }
     };
-    let mut issues = Vec::new();
+    let mut issues = validate_manifest_structure(manifest);
     if manifest.schema_version != INITIALIZATION_STATE_SCHEMA_VERSION {
         issues.push(issue(
             "manifest.schema.unsupported",
@@ -1943,6 +2274,14 @@ pub fn verify_ownership_manifest(
         issues.push(issue(
             "manifest.inventory-hash.missing",
             "completed manifest 缺少 inventorySha256",
+            None,
+            "verify",
+        ));
+    }
+    if manifest.inventory_summary.is_none() {
+        issues.push(issue(
+            "manifest.inventory-summary.missing",
+            "completed manifest 缺少紧凑项目清单摘要",
             None,
             "verify",
         ));
@@ -2038,6 +2377,7 @@ pub fn verify_ownership_manifest(
         }
         verify_agent_asset_target(&project, target, &manifest.agent_assets, &mut issues);
     }
+    verify_agent_target_coverage_and_mode(&project, manifest, &mut issues);
     for asset in &manifest.agent_assets {
         let covered = manifest.agent_asset_targets.iter().any(|target| {
             target.mode == AgentAssetMode::ManagedCopy
@@ -2075,7 +2415,131 @@ pub fn verify_ownership_manifest(
             )),
         }
     }
+    for required in ["CLAUDE.md", "AGENTS.md"] {
+        let count = manifest
+            .managed_entries
+            .iter()
+            .filter(|entry| entry.path == required)
+            .count();
+        if count == 0 {
+            issues.push(issue(
+                "manifest.entries.incomplete",
+                "completed manifest 必须同时且仅记录一份 CLAUDE.md 与 AGENTS.md 托管块",
+                Some(required),
+                "verify",
+            ));
+        } else if count > 1 {
+            issues.push(issue(
+                "manifest.entry.duplicate",
+                "completed manifest 的入口托管块记录重复",
+                Some(required),
+                "verify",
+            ));
+        }
+    }
     issues
+}
+
+fn verify_agent_target_coverage_and_mode(
+    project: &Path,
+    manifest: &OwnershipManifest,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let mut expected_target_count = 0usize;
+    for name in AGENT_ASSET_NAMES {
+        let source_relative = format!(".claude/{name}");
+        let source = project.join(&source_relative);
+        let source_metadata = match fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                issues.push(issue(
+                    "manifest.agent-source.invalid",
+                    format!("无法读取智能体资源根：{error}"),
+                    Some(&source_relative),
+                    "verify",
+                ));
+                continue;
+            }
+        };
+        if metadata_is_link_or_reparse(&source_metadata) || !source_metadata.is_dir() {
+            issues.push(issue(
+                "manifest.agent-source.invalid",
+                "智能体资源根必须是普通目录",
+                Some(&source_relative),
+                "verify",
+            ));
+            continue;
+        }
+        let mut source_files = Vec::new();
+        if let Err(detail) = collect_agent_source_files(&source, Path::new(""), &mut source_files) {
+            issues.push(issue(
+                "manifest.agent-source.invalid",
+                detail,
+                Some(&source_relative),
+                "verify",
+            ));
+            continue;
+        }
+        if source_files.is_empty() {
+            continue;
+        }
+        expected_target_count += 1;
+        let target_path = format!(".agents/{name}");
+        let count = manifest
+            .agent_asset_targets
+            .iter()
+            .filter(|target| target.path == target_path && target.source_path == source_relative)
+            .count();
+        if count != 1 {
+            issues.push(issue(
+                "manifest.agent-target.missing",
+                "每个非空 .claude 智能体资源根必须恰好对应一个 .agents 目标",
+                Some(&target_path),
+                "verify",
+            ));
+        }
+    }
+
+    if manifest.agent_asset_targets.len() != expected_target_count {
+        issues.push(issue(
+            "manifest.agent-target.coverage-mismatch",
+            "智能体目标数量与非空 .claude 资源根数量不一致",
+            None,
+            "verify",
+        ));
+    }
+
+    let first_mode = manifest
+        .agent_asset_targets
+        .first()
+        .map(|target| target.mode);
+    let expected_mode = first_mode.map(|first| {
+        if manifest
+            .agent_asset_targets
+            .iter()
+            .all(|target| target.mode == first)
+        {
+            first
+        } else {
+            AgentAssetMode::Mixed
+        }
+    });
+    let aggregate_matches = match expected_mode {
+        Some(expected) => manifest.agent_asset_mode == Some(expected),
+        None => matches!(
+            manifest.agent_asset_mode,
+            None | Some(AgentAssetMode::Preserved)
+        ),
+    };
+    if !aggregate_matches {
+        issues.push(issue(
+            "manifest.agent-mode.mismatch",
+            "agentAssetMode 与逐目标共享模式汇总不一致",
+            None,
+            "verify",
+        ));
+    }
 }
 
 fn verify_agent_asset_target(
@@ -2333,8 +2797,8 @@ mod tests {
 
     use super::*;
     use crate::project_factory::types::{
-        ArtifactKind, ArtifactPlan, ArtifactPlanItem, EvidenceReference, InitializationCheckpoint,
-        InitializationRunState, InitializationState,
+        ArtifactKind, ArtifactPlan, ArtifactPlanItem, ArtifactTotals, EvidenceReference,
+        InitializationCheckpoint, InitializationRunState, InitializationState, InventorySummary,
     };
 
     struct TestDir(PathBuf);
@@ -2414,6 +2878,13 @@ mod tests {
         manifest.state = InitializationRunState::Completed;
         manifest.run_id = "run-completed".to_string();
         manifest.inventory_sha256 = "inventory-sha256".to_string();
+        manifest.inventory_summary = Some(InventorySummary {
+            modules: 2,
+            source_roots: 3,
+            files: 10,
+            frontend: false,
+            backend: true,
+        });
         if manifest.plan_sha256.is_empty() {
             manifest.plan_sha256 = "plan-sha256".to_string();
         }
@@ -2434,6 +2905,12 @@ mod tests {
             plan_sha256: plan_sha256.to_string(),
             ..OwnershipManifest::default()
         }
+    }
+
+    fn save_completed_manifest(project: &Path, manifest: &mut OwnershipManifest) {
+        install_managed_entries(project, manifest).expect("install managed entries");
+        mark_completed(manifest);
+        save_ownership_manifest(project, manifest).expect("save completed manifest");
     }
 
     #[test]
@@ -2668,8 +3145,7 @@ mod tests {
         let mut previous =
             install_planned_artifacts(project.path(), workspace.path(), &artifact_plan, None)
                 .expect("initial install");
-        mark_completed(&mut previous);
-        save_ownership_manifest(project.path(), &previous).expect("complete previous install");
+        save_completed_manifest(project.path(), &mut previous);
 
         let new_content = "# 新一轮已原子写入的内容";
         write(workspace.path().join("docs/ai/project-map.md"), new_content);
@@ -2718,8 +3194,7 @@ mod tests {
         let mut previous =
             install_planned_artifacts(project.path(), workspace.path(), &old_plan, None)
                 .expect("install old plan");
-        mark_completed(&mut previous);
-        save_ownership_manifest(project.path(), &previous).expect("save old manifest");
+        save_completed_manifest(project.path(), &mut previous);
 
         let new_plan = plan(vec![item("new", ArtifactKind::Document, "docs/ai/new.md")]);
         write(workspace.path().join("docs/ai/new.md"), "# 新产物");
@@ -2744,8 +3219,7 @@ mod tests {
         let mut previous =
             install_planned_artifacts(project.path(), workspace.path(), &old_plan, None)
                 .expect("install old plan");
-        mark_completed(&mut previous);
-        save_ownership_manifest(project.path(), &previous).expect("save old manifest");
+        save_completed_manifest(project.path(), &mut previous);
         write(project.path().join("docs/ai/old.md"), "# 用户已修改旧产物");
 
         let new_plan = plan(vec![item("new", ArtifactKind::Document, "docs/ai/new.md")]);
@@ -2769,6 +3243,200 @@ mod tests {
             .artifacts
             .iter()
             .any(|artifact| artifact.path == "docs/ai/old.md"));
+    }
+
+    #[test]
+    fn missing_target_with_pending_remove_is_marked_applied_on_resume() {
+        let project = TestDir::new("remove-crash-project");
+        let workspace = TestDir::new("remove-crash-workspace");
+        let old_plan = plan(vec![item("old", ArtifactKind::Document, "docs/ai/old.md")]);
+        write(workspace.path().join("docs/ai/old.md"), "# 旧产物");
+        let mut previous =
+            install_planned_artifacts(project.path(), workspace.path(), &old_plan, None)
+                .expect("install old plan");
+        save_completed_manifest(project.path(), &mut previous);
+
+        let new_plan = plan(vec![item("new", ArtifactKind::Document, "docs/ai/new.md")]);
+        write(workspace.path().join("docs/ai/new.md"), "# 新产物");
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "docs/ai/old.md".to_string(),
+            InstallJournalEntry {
+                operation: JournalOperation::RemoveOwnedArtifact,
+                baseline_sha256: previous.artifacts.first().map(|item| item.sha256.clone()),
+                expected_sha256: None,
+                state: JournalEntryState::Pending,
+                link_target: None,
+            },
+        );
+        save_install_journal(
+            project.path(),
+            &InstallJournal {
+                schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
+                plan_sha256: plan_sha256(&new_plan).expect("new plan hash"),
+                entries,
+            },
+        )
+        .expect("save pending removal");
+        fs::remove_file(project.path().join("docs/ai/old.md"))
+            .expect("simulate crash after delete");
+
+        install_planned_artifacts(project.path(), workspace.path(), &new_plan, Some(&previous))
+            .expect("resume removal");
+        let journal = load_install_journal(project.path())
+            .expect("load journal")
+            .expect("journal remains");
+        assert_eq!(
+            journal
+                .entries
+                .get("docs/ai/old.md")
+                .expect("removal entry")
+                .state,
+            JournalEntryState::Applied
+        );
+    }
+
+    #[test]
+    fn tampered_manifest_paths_never_delete_project_source() {
+        let project = TestDir::new("tampered-manifest-project");
+        let workspace = TestDir::new("tampered-manifest-workspace");
+        let source_path = "src/main.rs";
+        let source_content = "fn main() {}";
+        write(project.path().join(source_path), source_content);
+        let mut previous = empty_manifest("old-plan");
+        mark_completed(&mut previous);
+        previous.artifact_totals = ArtifactTotals {
+            documents: 1,
+            rules: 0,
+            skills: 0,
+            total: 1,
+        };
+        previous.artifacts = vec![OwnedArtifact {
+            path: source_path.to_string(),
+            sha256: content_sha256(source_content.as_bytes()),
+            kind: ArtifactKind::Document,
+        }];
+        let new_plan = plan(vec![item(
+            "map",
+            ArtifactKind::Document,
+            "docs/ai/project-map.md",
+        )]);
+        write(
+            workspace.path().join("docs/ai/project-map.md"),
+            "# 项目地图",
+        );
+
+        let issues =
+            install_planned_artifacts(project.path(), workspace.path(), &new_plan, Some(&previous))
+                .expect_err("forged ownership path must fail");
+        assert!(issues
+            .iter()
+            .any(|issue| issue.code == "manifest.artifact.path-invalid"));
+        assert_eq!(read(project.path().join(source_path)), source_content);
+
+        write(
+            project.path().join("docs/ai/.initialization-manifest.json"),
+            &serde_json::to_string_pretty(&previous).expect("serialize forged manifest"),
+        );
+        assert!(load_ownership_manifest(project.path())
+            .expect_err("loader must reject forged paths")
+            .contains("manifest.artifact.path-invalid"));
+    }
+
+    #[test]
+    fn tampered_agent_asset_paths_are_rejected_without_touching_source() {
+        let project = TestDir::new("tampered-agent-asset");
+        let source_path = "src/secret.md";
+        let source_content = "project-owned source";
+        write(project.path().join(source_path), source_content);
+        let mut manifest = empty_manifest("tampered-agent-plan");
+        manifest.agent_assets = vec![ManagedAgentAsset {
+            path: source_path.to_string(),
+            sha256: content_sha256(source_content.as_bytes()),
+        }];
+        mark_completed(&mut manifest);
+
+        assert!(verify_ownership_manifest(project.path(), &manifest)
+            .iter()
+            .any(|issue| issue.code == "manifest.agent-asset.path-invalid"));
+        let issues = share_agent_assets_for_test(project.path(), &mut manifest, false)
+            .expect_err("forged agent asset path must block sharing");
+        assert!(issues
+            .iter()
+            .any(|issue| issue.code == "manifest.agent-asset.path-invalid"));
+        assert_eq!(read(project.path().join(source_path)), source_content);
+
+        write(
+            project.path().join("docs/ai/.initialization-manifest.json"),
+            &serde_json::to_string_pretty(&manifest).expect("serialize forged manifest"),
+        );
+        assert!(load_ownership_manifest(project.path())
+            .expect_err("loader must reject forged agent asset paths")
+            .contains("manifest.agent-asset.path-invalid"));
+    }
+
+    #[test]
+    fn completed_manifest_requires_exact_entry_set_and_inventory_summary() {
+        let project = TestDir::new("manifest-entry-set");
+        let mut manifest = empty_manifest("entry-set-plan");
+        install_managed_entries(project.path(), &mut manifest).expect("install entries");
+        mark_completed(&mut manifest);
+        assert!(verify_ownership_manifest(project.path(), &manifest).is_empty());
+
+        let mut missing = manifest.clone();
+        missing
+            .managed_entries
+            .retain(|entry| entry.path != "AGENTS.md");
+        assert!(verify_ownership_manifest(project.path(), &missing)
+            .iter()
+            .any(|issue| issue.code == "manifest.entries.incomplete"));
+
+        let mut duplicate = manifest.clone();
+        duplicate
+            .managed_entries
+            .push(duplicate.managed_entries[0].clone());
+        assert!(verify_ownership_manifest(project.path(), &duplicate)
+            .iter()
+            .any(|issue| issue.code == "manifest.entry.duplicate"));
+
+        let mut no_summary = manifest;
+        no_summary.inventory_summary = None;
+        assert!(verify_ownership_manifest(project.path(), &no_summary)
+            .iter()
+            .any(|issue| issue.code == "manifest.inventory-summary.missing"));
+    }
+
+    #[test]
+    fn completed_manifest_requires_agent_target_coverage_and_consistent_mode() {
+        let project = TestDir::new("manifest-agent-coverage");
+        write(
+            project.path().join(".claude/rules/project/README.md"),
+            "# Rules",
+        );
+        write(
+            project.path().join(".claude/skills/debug/SKILL.md"),
+            "# Debug",
+        );
+        let mut manifest = empty_manifest("agent-coverage-plan");
+        share_agent_assets_for_test(project.path(), &mut manifest, false)
+            .expect("install managed copies");
+        install_managed_entries(project.path(), &mut manifest).expect("install entries");
+        mark_completed(&mut manifest);
+        assert!(verify_ownership_manifest(project.path(), &manifest).is_empty());
+
+        let mut missing = manifest.clone();
+        missing
+            .agent_asset_targets
+            .retain(|target| target.path != ".agents/skills");
+        assert!(verify_ownership_manifest(project.path(), &missing)
+            .iter()
+            .any(|issue| issue.code == "manifest.agent-target.missing"));
+
+        let mut wrong_mode = manifest;
+        wrong_mode.agent_asset_mode = Some(AgentAssetMode::RelativeSymlink);
+        assert!(verify_ownership_manifest(project.path(), &wrong_mode)
+            .iter()
+            .any(|issue| issue.code == "manifest.agent-mode.mismatch"));
     }
 
     #[cfg(unix)]
@@ -2926,6 +3594,7 @@ mod tests {
         let mut manifest =
             install_planned_artifacts(project.path(), workspace.path(), &artifact_plan, None)
                 .expect("install artifact");
+        install_managed_entries(project.path(), &mut manifest).expect("install entries");
         mark_completed(&mut manifest);
         assert!(journal_path(project.path())
             .expect("journal retained before completed manifest")
@@ -2969,6 +3638,7 @@ mod tests {
             .iter()
             .any(|issue| issue.code == "manifest.inventory-hash.missing"));
 
+        install_managed_entries(project.path(), &mut manifest).expect("install entries");
         mark_completed(&mut manifest);
         let mut journal = load_install_journal(project.path())
             .expect("load journal")
@@ -3058,6 +3728,7 @@ mod tests {
         assert!(manifest.agent_asset_targets.iter().any(|target| {
             target.path == ".agents/rules" && target.mode == AgentAssetMode::ManagedCopy
         }));
+        install_managed_entries(project.path(), &mut manifest).expect("install entries");
         mark_completed(&mut manifest);
         assert!(verify_ownership_manifest(project.path(), &manifest).is_empty());
 
@@ -3111,6 +3782,59 @@ mod tests {
             .expect("remove unchanged obsolete managed copy");
         assert!(!project.path().join(target_path).exists());
         assert!(!project.path().join(".agents/rules").exists());
+        assert!(manifest.agent_assets.is_empty());
+    }
+
+    #[test]
+    fn missing_managed_copy_with_pending_remove_is_marked_applied() {
+        let project = TestDir::new("copy-remove-crash");
+        let source_path = ".claude/rules/project/README.md";
+        let target_path = ".agents/rules/project/README.md";
+        let content = "# Rules";
+        write(project.path().join(source_path), content);
+        let mut manifest = empty_manifest("copy-remove-crash-plan");
+        share_agent_assets_for_test(project.path(), &mut manifest, false)
+            .expect("initial managed copy");
+        let owned_hash = manifest
+            .agent_assets
+            .iter()
+            .find(|asset| asset.path == target_path)
+            .expect("owned target")
+            .sha256
+            .clone();
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            target_path.to_string(),
+            InstallJournalEntry {
+                operation: JournalOperation::RemoveAgentCopy,
+                baseline_sha256: Some(owned_hash),
+                expected_sha256: None,
+                state: JournalEntryState::Pending,
+                link_target: None,
+            },
+        );
+        save_install_journal(
+            project.path(),
+            &InstallJournal {
+                schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
+                plan_sha256: manifest.plan_sha256.clone(),
+                entries,
+            },
+        )
+        .expect("save pending copy removal");
+        fs::remove_file(project.path().join(source_path)).expect("remove obsolete source");
+        fs::remove_file(project.path().join(target_path))
+            .expect("simulate crash after deleting copy");
+
+        share_agent_assets_for_test(project.path(), &mut manifest, false)
+            .expect("resume managed-copy removal");
+        let journal = load_install_journal(project.path())
+            .expect("load journal")
+            .expect("journal retained");
+        assert_eq!(
+            journal.entries[target_path].state,
+            JournalEntryState::Applied
+        );
         assert!(manifest.agent_assets.is_empty());
     }
 
@@ -3169,6 +3893,7 @@ mod tests {
                 && target.mode == AgentAssetMode::RelativeSymlink
                 && target.link_target.as_deref() == Some("../.claude/rules")
         }));
+        install_managed_entries(project.path(), &mut manifest).expect("install managed entries");
         mark_completed(&mut manifest);
         assert!(verify_ownership_manifest(project.path(), &manifest).is_empty());
         fs::remove_file(project.path().join(".agents/rules")).expect("remove owned rules link");
@@ -3218,5 +3943,94 @@ mod tests {
             .iter()
             .any(|issue| issue.code == "install.agent-target.unsafe"));
         assert!(!outside.path().join("rules").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_platform_links_are_journaled_and_wrong_targets_are_preserved() {
+        use std::os::unix::fs::symlink;
+
+        let project = TestDir::new("stale-agent-link");
+        let source_path = ".claude/rules/project/README.md";
+        write(project.path().join(source_path), "# Rules");
+        let mut manifest = empty_manifest("stale-agent-link-plan");
+        share_agent_assets_for_test(project.path(), &mut manifest, true)
+            .expect("create relative link");
+        fs::remove_file(project.path().join(source_path)).expect("empty source root");
+
+        share_agent_assets_for_test(project.path(), &mut manifest, true)
+            .expect("remove stale platform link");
+        assert!(!project.path().join(".agents/rules").exists());
+        let journal = load_install_journal(project.path())
+            .expect("load journal")
+            .expect("journal retained");
+        let removal = journal.entries.get(".agents/rules").expect("link removal");
+        assert_eq!(removal.operation, JournalOperation::RemoveAgentLink);
+        assert_eq!(removal.state, JournalEntryState::Applied);
+
+        let wrong = TestDir::new("wrong-stale-agent-link");
+        write(wrong.path().join(source_path), "# Rules");
+        let mut wrong_manifest = empty_manifest("wrong-stale-link-plan");
+        share_agent_assets_for_test(wrong.path(), &mut wrong_manifest, true)
+            .expect("create owned relative link");
+        fs::remove_file(wrong.path().join(source_path)).expect("empty source root");
+        fs::remove_file(wrong.path().join(".agents/rules")).expect("remove owned link");
+        symlink("../.claude/skills", wrong.path().join(".agents/rules"))
+            .expect("install user replacement link");
+
+        let issues = share_agent_assets_for_test(wrong.path(), &mut wrong_manifest, true)
+            .expect_err("wrong replacement target must conflict");
+        assert!(issues
+            .iter()
+            .any(|issue| issue.code == "install.agent-link.remove-mismatch"));
+        assert_eq!(
+            fs::read_link(wrong.path().join(".agents/rules")).expect("wrong link preserved"),
+            PathBuf::from("../.claude/skills")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_platform_link_with_pending_remove_is_marked_applied() {
+        let project = TestDir::new("agent-link-remove-crash");
+        let source_path = ".claude/rules/project/README.md";
+        write(project.path().join(source_path), "# Rules");
+        let mut manifest = empty_manifest("agent-link-remove-crash-plan");
+        share_agent_assets_for_test(project.path(), &mut manifest, true)
+            .expect("create relative link");
+        let expected = "../.claude/rules";
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            ".agents/rules".to_string(),
+            InstallJournalEntry {
+                operation: JournalOperation::RemoveAgentLink,
+                baseline_sha256: Some(content_sha256(expected.as_bytes())),
+                expected_sha256: None,
+                state: JournalEntryState::Pending,
+                link_target: Some(expected.to_string()),
+            },
+        );
+        save_install_journal(
+            project.path(),
+            &InstallJournal {
+                schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
+                plan_sha256: manifest.plan_sha256.clone(),
+                entries,
+            },
+        )
+        .expect("save pending link removal");
+        fs::remove_file(project.path().join(source_path)).expect("empty source root");
+        fs::remove_file(project.path().join(".agents/rules")).expect("simulate crash after unlink");
+
+        share_agent_assets_for_test(project.path(), &mut manifest, true)
+            .expect("resume link removal");
+        let journal = load_install_journal(project.path())
+            .expect("load journal")
+            .expect("journal retained");
+        assert_eq!(
+            journal.entries[".agents/rules"].state,
+            JournalEntryState::Applied
+        );
+        assert!(manifest.agent_asset_targets.is_empty());
     }
 }

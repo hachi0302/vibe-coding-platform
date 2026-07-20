@@ -401,6 +401,16 @@ pub struct AgentAssetTarget {
     pub link_target: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InventorySummary {
+    pub modules: usize,
+    pub source_roots: usize,
+    pub files: usize,
+    pub frontend: bool,
+    pub backend: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnershipManifest {
@@ -410,6 +420,8 @@ pub struct OwnershipManifest {
     pub state: InitializationRunState,
     #[serde(default)]
     pub inventory_sha256: String,
+    #[serde(default)]
+    pub inventory_summary: Option<InventorySummary>,
     #[serde(default)]
     pub plan_sha256: String,
     #[serde(default)]
@@ -446,6 +458,7 @@ impl Default for OwnershipManifest {
             run_id: String::new(),
             state: InitializationRunState::Preflight,
             inventory_sha256: String::new(),
+            inventory_summary: None,
             plan_sha256: String::new(),
             artifact_totals: ArtifactTotals::default(),
             artifacts: Vec::new(),
