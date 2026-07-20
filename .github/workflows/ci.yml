@@ -34,11 +34,16 @@ jobs:
         run: npm run test:run
 
   rust:
-    name: rust (clippy + cargo test)
-    # macOS runners ship the WebKit framework Tauri's crate links against, so
-    # `cargo` builds with no extra system packages — unlike Linux, which would
-    # need the webkit2gtk apt stack. release.yml already uses macOS too.
-    runs-on: macos-latest
+    name: rust (${{ matrix.os }}, clippy + cargo test)
+    # macOS and Windows are both product targets and provide Tauri's native
+    # dependencies on hosted runners. Linux packaging remains covered by the
+    # release workflow because it needs the WebKitGTK apt stack.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     if: ${{ !startsWith(github.event.head_commit.message, 'Release:') }}
     steps:
       - uses: actions/checkout@v4

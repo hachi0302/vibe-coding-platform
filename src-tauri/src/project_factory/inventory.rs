@@ -1,15 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_vendor = "apple",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd",
-    target_os = "dragonfly"
-))]
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -43,6 +34,7 @@ pub fn inspect_project(root: &Path) -> Result<ProjectInventory, String> {
 }
 
 #[cfg(not(any(
+    windows,
     target_os = "linux",
     target_os = "android",
     target_vendor = "apple",
@@ -58,6 +50,12 @@ fn inspect_project_platform(_root: &Path) -> Result<ProjectInventory, String> {
     )
 }
 
+#[cfg(windows)]
+fn inspect_project_platform(root: &Path) -> Result<ProjectInventory, String> {
+    validate_root(root)?;
+    inspect_collected_project(root, collect_files(root)?)
+}
+
 #[cfg(any(
     target_os = "linux",
     target_os = "android",
@@ -69,7 +67,13 @@ fn inspect_project_platform(_root: &Path) -> Result<ProjectInventory, String> {
 ))]
 fn inspect_project_platform(root: &Path) -> Result<ProjectInventory, String> {
     validate_root(root)?;
-    let mut paths = collect_files(root)?;
+    inspect_collected_project(root, collect_files(root)?)
+}
+
+fn inspect_collected_project(
+    root: &Path,
+    mut paths: Vec<PathBuf>,
+) -> Result<ProjectInventory, String> {
     paths.sort();
 
     let mut scanned = Vec::new();
@@ -150,6 +154,7 @@ pub fn create_filtered_workspace(
 }
 
 #[cfg(not(any(
+    windows,
     target_os = "linux",
     target_os = "android",
     target_vendor = "apple",
@@ -167,6 +172,18 @@ fn create_filtered_workspace_platform(
         "Filtered workspace creation is unsupported on this platform until handle-safe filesystem access is available"
             .to_string(),
     )
+}
+
+#[cfg(windows)]
+fn create_filtered_workspace_platform(
+    root: &Path,
+    workspace: &Path,
+    inventory: &ProjectInventory,
+) -> Result<(), String> {
+    validate_root(root)?;
+    let writer = WorkspaceWriter::create(workspace)?;
+    copy_inventory(root, inventory, &writer)?;
+    writer.verify_path()
 }
 
 #[cfg(any(
@@ -190,6 +207,7 @@ fn create_filtered_workspace_platform(
 }
 
 #[cfg(any(
+    windows,
     target_os = "linux",
     target_os = "android",
     target_vendor = "apple",
@@ -242,6 +260,7 @@ fn copy_inventory(
 }
 
 #[cfg(not(any(
+    windows,
     target_os = "linux",
     target_os = "android",
     target_vendor = "apple",
@@ -258,6 +277,14 @@ pub(super) fn read_project_bytes_handle_safe(
         "Handle-safe project file reading is unsupported on this platform until descriptor-relative traversal is available"
             .to_string(),
     )
+}
+
+#[cfg(windows)]
+pub(super) fn read_project_bytes_handle_safe(
+    root: &Path,
+    relative: &Path,
+) -> Result<Option<Vec<u8>>, String> {
+    read_project_file(root, relative).map(|read| read.map(|read| read.bytes))
 }
 
 #[cfg(any(
@@ -277,6 +304,7 @@ pub(super) fn read_project_bytes_handle_safe(
 }
 
 #[cfg(any(
+    windows,
     target_os = "linux",
     target_os = "android",
     target_vendor = "apple",
@@ -294,6 +322,689 @@ fn read_bounded(file: &mut fs::File) -> Result<Option<Vec<u8>>, String> {
         Ok(None)
     } else {
         Ok(Some(bytes))
+    }
+}
+
+#[cfg(windows)]
+fn read_project_file(root: &Path, relative: &Path) -> Result<Option<SafeRead>, String> {
+    windows_handles::read_project_file(root, relative)
+}
+
+#[cfg(windows)]
+fn collect_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    windows_handles::collect_files(root)
+}
+
+#[cfg(windows)]
+struct WorkspaceWriter(windows_handles::WorkspaceWriter);
+
+#[cfg(windows)]
+impl WorkspaceWriter {
+    fn create(workspace: &Path) -> Result<Self, String> {
+        windows_handles::WorkspaceWriter::create(workspace).map(Self)
+    }
+
+    fn write_file(
+        &self,
+        relative: &Path,
+        bytes: &[u8],
+        permissions: fs::Permissions,
+    ) -> Result<(), String> {
+        self.0.write_file(relative, bytes, permissions)
+    }
+
+    fn verify_path(&self) -> Result<(), String> {
+        self.0.verify_path()
+    }
+}
+
+#[cfg(windows)]
+mod windows_handles {
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+    use std::mem::{size_of, MaybeUninit};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle};
+    use std::path::Prefix;
+    use std::ptr::{addr_of, null, null_mut};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        NtCreateFile, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+        FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows_sys::Win32::Foundation::{
+        GetLastError, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE,
+        UNICODE_STRING,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, FileIdInfo,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        OPEN_EXISTING, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    const DIRECTORY_READ_ACCESS: u32 =
+        FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+
+    pub(super) fn read_project_file(
+        root: &Path,
+        relative: &Path,
+    ) -> Result<Option<SafeRead>, String> {
+        let mut directory = open_absolute_directory_strict(root, DIRECTORY_READ_ACCESS)?;
+        let components = normal_components(relative, "project file")?;
+        if components.is_empty() {
+            return Err("Project file path is empty".to_string());
+        }
+        for (index, name) in components.iter().enumerate() {
+            let final_component = index + 1 == components.len();
+            let access = if final_component {
+                FILE_GENERIC_READ | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+            } else {
+                DIRECTORY_READ_ACCESS
+            };
+            let options = if final_component {
+                FILE_NON_DIRECTORY_FILE
+            } else {
+                FILE_DIRECTORY_FILE
+            } | FILE_SYNCHRONOUS_IO_NONALERT
+                | FILE_OPEN_REPARSE_POINT;
+            let opened = open_relative(&directory, name, access, FILE_OPEN, options, false)
+                .map_err(|error| format!("Cannot securely open {}: {error}", relative.display()))?;
+            let information = handle_information(&opened)?;
+            reject_reparse(&information, relative)?;
+            if final_component {
+                if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                    return Ok(None);
+                }
+                let raw = opened.into_raw_handle();
+                let mut file = unsafe { fs::File::from_raw_handle(raw) };
+                let permissions = file
+                    .metadata()
+                    .map_err(|error| format!("Cannot inspect {}: {error}", relative.display()))?
+                    .permissions();
+                let Some(bytes) = read_bounded(&mut file)? else {
+                    return Ok(None);
+                };
+                return Ok(Some(SafeRead { bytes, permissions }));
+            }
+            if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(format!(
+                    "Project path component is not a directory: {}",
+                    relative.display()
+                ));
+            }
+            directory = opened;
+        }
+        Err(format!("Cannot open project file: {}", relative.display()))
+    }
+
+    pub(super) fn collect_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+        let root = open_absolute_directory_strict(root, DIRECTORY_READ_ACCESS)?;
+        let mut result = Vec::new();
+        let mut pending = vec![(root, PathBuf::new(), 0usize)];
+        while let Some((directory, relative_directory, depth)) = pending.pop() {
+            if depth > MAX_SCAN_DEPTH {
+                continue;
+            }
+            for entry in directory_entries(&directory, &relative_directory)? {
+                let relative = relative_directory.join(&entry.name);
+                if entry.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    continue;
+                }
+                if entry.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                    if excluded_directory(&relative) {
+                        continue;
+                    }
+                    let opened = open_relative(
+                        &directory,
+                        &entry.name,
+                        DIRECTORY_READ_ACCESS,
+                        FILE_OPEN,
+                        FILE_DIRECTORY_FILE
+                            | FILE_SYNCHRONOUS_IO_NONALERT
+                            | FILE_OPEN_REPARSE_POINT,
+                        false,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "Cannot securely open directory {}: {error}",
+                            relative.display()
+                        )
+                    })?;
+                    let information = handle_information(&opened)?;
+                    reject_reparse(&information, &relative)?;
+                    if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                        return Err(format!(
+                            "Project directory changed type: {}",
+                            relative.display()
+                        ));
+                    }
+                    pending.push((opened, relative, depth + 1));
+                } else {
+                    // The later descriptor-relative read revalidates both type and reparse state.
+                    result.push(relative);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    struct DirectoryEntry {
+        name: OsString,
+        attributes: u32,
+    }
+
+    fn directory_entries(
+        directory: &OwnedHandle,
+        relative: &Path,
+    ) -> Result<Vec<DirectoryEntry>, String> {
+        // u64 backing keeps each variable-length FILE_ID_BOTH_DIR_INFO suitably aligned.
+        let mut buffer = vec![0u64; 64 * 1024 / size_of::<u64>()];
+        let mut restart = true;
+        let mut entries = Vec::new();
+        loop {
+            let class = if restart {
+                FileIdBothDirectoryRestartInfo
+            } else {
+                FileIdBothDirectoryInfo
+            };
+            restart = false;
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    raw_handle(directory),
+                    class,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * size_of::<u64>()) as u32,
+                )
+            };
+            if ok == 0 {
+                let code = unsafe { GetLastError() };
+                if code == ERROR_NO_MORE_FILES {
+                    break;
+                }
+                return Err(format!(
+                    "Cannot enumerate project directory {}: {}",
+                    relative.display(),
+                    std::io::Error::from_raw_os_error(code as i32)
+                ));
+            }
+
+            let base = buffer.as_ptr().cast::<u8>();
+            let mut offset = 0usize;
+            loop {
+                let entry = unsafe { &*base.add(offset).cast::<FILE_ID_BOTH_DIR_INFO>() };
+                let name = unsafe {
+                    std::slice::from_raw_parts(
+                        addr_of!(entry.FileName).cast::<u16>(),
+                        entry.FileNameLength as usize / size_of::<u16>(),
+                    )
+                };
+                let name = OsString::from_wide(name);
+                if name != OsStr::new(".") && name != OsStr::new("..") {
+                    entries.push(DirectoryEntry {
+                        name,
+                        attributes: entry.FileAttributes,
+                    });
+                }
+                if entry.NextEntryOffset == 0 {
+                    break;
+                }
+                offset = offset
+                    .checked_add(entry.NextEntryOffset as usize)
+                    .ok_or_else(|| "Invalid Windows directory entry offset".to_string())?;
+                if offset + size_of::<FILE_ID_BOTH_DIR_INFO>() > buffer.len() * size_of::<u64>() {
+                    return Err("Invalid Windows directory enumeration buffer".to_string());
+                }
+            }
+        }
+        entries.sort_by(|left, right| left.name.encode_wide().cmp(right.name.encode_wide()));
+        Ok(entries)
+    }
+
+    pub(super) struct WorkspaceWriter {
+        path: PathBuf,
+        directory: OwnedHandle,
+        identity: WindowsIdentity,
+    }
+
+    impl WorkspaceWriter {
+        pub(super) fn create(workspace: &Path) -> Result<Self, String> {
+            let path = lexical_absolute(workspace)?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| format!("Workspace has no parent: {}", path.display()))?;
+            let final_name = path
+                .file_name()
+                .ok_or_else(|| format!("Workspace has no name: {}", path.display()))?;
+            let parent = open_or_create_directory_chain(parent)?;
+            let directory = open_relative(
+                &parent,
+                final_name,
+                DIRECTORY_READ_ACCESS,
+                FILE_CREATE,
+                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                true,
+            )
+            .map_err(|error| {
+                format!(
+                    "Cannot securely create workspace {}: {error}",
+                    path.display()
+                )
+            })?;
+            let information = handle_information(&directory)?;
+            reject_reparse(&information, &path)?;
+            if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(format!("Workspace is not a directory: {}", path.display()));
+            }
+            let identity = handle_identity(&directory)?;
+            Ok(Self {
+                path,
+                directory,
+                identity,
+            })
+        }
+
+        pub(super) fn write_file(
+            &self,
+            relative: &Path,
+            bytes: &[u8],
+            permissions: fs::Permissions,
+        ) -> Result<(), String> {
+            let components = normal_components(relative, "workspace file")?;
+            if components.is_empty() {
+                return Err("Workspace file path is empty".to_string());
+            }
+            let mut directory: Option<OwnedHandle> = None;
+            for (index, name) in components.iter().enumerate() {
+                let parent = directory.as_ref().unwrap_or(&self.directory);
+                let final_component = index + 1 == components.len();
+                if final_component {
+                    let opened = open_relative(
+                        parent,
+                        name,
+                        FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        FILE_CREATE,
+                        FILE_NON_DIRECTORY_FILE
+                            | FILE_SYNCHRONOUS_IO_NONALERT
+                            | FILE_OPEN_REPARSE_POINT,
+                        false,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "Cannot securely create workspace file {}: {error}",
+                            relative.display()
+                        )
+                    })?;
+                    let information = handle_information(&opened)?;
+                    reject_reparse(&information, relative)?;
+                    if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                        return Err(format!(
+                            "Workspace destination is not a file: {}",
+                            relative.display()
+                        ));
+                    }
+                    let raw = opened.into_raw_handle();
+                    let mut file = unsafe { fs::File::from_raw_handle(raw) };
+                    file.write_all(bytes)
+                        .map_err(|error| format!("Cannot write {}: {error}", relative.display()))?;
+                    file.sync_all()
+                        .map_err(|error| format!("Cannot sync {}: {error}", relative.display()))?;
+                    file.set_permissions(permissions).map_err(|error| {
+                        format!(
+                            "Cannot preserve permissions for {}: {error}",
+                            relative.display()
+                        )
+                    })?;
+                    return Ok(());
+                }
+                let opened = open_relative(
+                    parent,
+                    name,
+                    DIRECTORY_READ_ACCESS,
+                    FILE_OPEN_IF,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                    true,
+                )
+                .map_err(|error| {
+                    format!(
+                        "Cannot create workspace directory {}: {error}",
+                        relative.display()
+                    )
+                })?;
+                let information = handle_information(&opened)?;
+                reject_reparse(&information, relative)?;
+                if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                    return Err(format!(
+                        "Workspace path component is not a directory: {}",
+                        relative.display()
+                    ));
+                }
+                directory = Some(opened);
+            }
+            Err(format!(
+                "Cannot write workspace file: {}",
+                relative.display()
+            ))
+        }
+
+        pub(super) fn verify_path(&self) -> Result<(), String> {
+            let reopened = open_absolute_directory_strict(&self.path, DIRECTORY_READ_ACCESS)?;
+            let information = handle_information(&reopened)?;
+            reject_reparse(&information, &self.path)?;
+            if handle_identity(&reopened)? != self.identity {
+                return Err(format!(
+                    "Workspace path was replaced while copying: {}",
+                    self.path.display()
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    fn open_or_create_directory_chain(path: &Path) -> Result<OwnedHandle, String> {
+        let path = lexical_absolute(path)?;
+        let (anchor, components) = filesystem_anchor_and_components(&path)?;
+        let mut directory = open_filesystem_anchor(&anchor, &path)?;
+        for name in components {
+            let opened = open_relative(
+                &directory,
+                &name,
+                DIRECTORY_READ_ACCESS,
+                FILE_OPEN_IF,
+                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                true,
+            )
+            .map_err(|error| {
+                format!(
+                    "Cannot securely create workspace parent {}: {error}",
+                    path.display()
+                )
+            })?;
+            let information = handle_information(&opened)?;
+            reject_reparse(&information, &path)?;
+            if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(format!(
+                    "Workspace parent is not a directory: {}",
+                    path.display()
+                ));
+            }
+            directory = opened;
+        }
+        Ok(directory)
+    }
+
+    fn open_absolute_directory_strict(path: &Path, access: u32) -> Result<OwnedHandle, String> {
+        let path = lexical_absolute(path)?;
+        let (anchor, components) = filesystem_anchor_and_components(&path)?;
+        let mut directory = open_filesystem_anchor(&anchor, &path)?;
+        for name in components {
+            let opened = open_relative(
+                &directory,
+                &name,
+                access,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                false,
+            )
+            .map_err(|error| {
+                format!("Cannot securely open directory {}: {error}", path.display())
+            })?;
+            let information = handle_information(&opened)?;
+            reject_reparse(&information, &path)?;
+            if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(format!("Not a directory: {}", path.display()));
+            }
+            directory = opened;
+        }
+        Ok(directory)
+    }
+
+    fn open_filesystem_anchor(
+        anchor: &[u16],
+        requested_path: &Path,
+    ) -> Result<OwnedHandle, String> {
+        let handle = unsafe {
+            CreateFileW(
+                anchor.as_ptr(),
+                DIRECTORY_READ_ACCESS,
+                SHARE_ALL,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "Cannot securely open directory {}: {}",
+                requested_path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle.cast()) };
+        let information = handle_information(&handle)?;
+        reject_reparse(&information, requested_path)?;
+        if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(format!("Not a directory: {}", requested_path.display()));
+        }
+        Ok(handle)
+    }
+
+    fn filesystem_anchor_and_components(path: &Path) -> Result<(Vec<u16>, Vec<OsString>), String> {
+        let mut components = path.components();
+        let prefix = match components.next() {
+            Some(Component::Prefix(prefix)) => prefix.kind(),
+            _ => {
+                return Err(format!(
+                    "Windows path has no filesystem prefix: {}",
+                    path.display()
+                ))
+            }
+        };
+        if !matches!(components.next(), Some(Component::RootDir)) {
+            return Err(format!("Windows path is not rooted: {}", path.display()));
+        }
+
+        let mut anchor = match prefix {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                vec![drive as u16, b':' as u16, b'\\' as u16]
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                let mut anchor = vec![b'\\' as u16, b'\\' as u16];
+                append_anchor_component(&mut anchor, server, path)?;
+                anchor.push(b'\\' as u16);
+                append_anchor_component(&mut anchor, share, path)?;
+                anchor.push(b'\\' as u16);
+                anchor
+            }
+            _ => {
+                return Err(format!(
+                    "Unsupported Windows filesystem prefix: {}",
+                    path.display()
+                ))
+            }
+        };
+        anchor.push(0);
+
+        let mut relative = Vec::new();
+        for component in components {
+            match component {
+                Component::Normal(name) => relative.push(name.to_os_string()),
+                Component::CurDir => {}
+                _ => return Err(format!("Unsafe Windows path: {}", path.display())),
+            }
+        }
+        Ok((anchor, relative))
+    }
+
+    fn append_anchor_component(
+        anchor: &mut Vec<u16>,
+        component: &OsStr,
+        path: &Path,
+    ) -> Result<(), String> {
+        for unit in component.encode_wide() {
+            if unit == 0 || unit == b'\\' as u16 || unit == b'/' as u16 {
+                return Err(format!("Unsafe Windows share root: {}", path.display()));
+            }
+            anchor.push(unit);
+        }
+        Ok(())
+    }
+
+    fn open_relative(
+        parent: &OwnedHandle,
+        name: &OsStr,
+        access: u32,
+        disposition: u32,
+        options: u32,
+        directory_attribute: bool,
+    ) -> Result<OwnedHandle, String> {
+        if name.is_empty()
+            || name == OsStr::new(".")
+            || name == OsStr::new("..")
+            || name
+                .encode_wide()
+                .any(|unit| unit == b'/' as u16 || unit == b'\\' as u16 || unit == 0)
+        {
+            return Err("Unsafe Windows path component".to_string());
+        }
+        let mut name = name.encode_wide().collect::<Vec<_>>();
+        let byte_length = name
+            .len()
+            .checked_mul(size_of::<u16>())
+            .and_then(|length| u16::try_from(length).ok())
+            .ok_or_else(|| "Windows path component is too long".to_string())?;
+        let unicode = UNICODE_STRING {
+            Length: byte_length,
+            MaximumLength: byte_length,
+            Buffer: name.as_mut_ptr(),
+        };
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: raw_handle(parent),
+            ObjectName: &unicode,
+            Attributes: OBJ_CASE_INSENSITIVE,
+            SecurityDescriptor: null(),
+            SecurityQualityOfService: null(),
+        };
+        let mut io_status = IO_STATUS_BLOCK::default();
+        let mut handle: HANDLE = null_mut();
+        let status = unsafe {
+            NtCreateFile(
+                &mut handle,
+                access,
+                &attributes,
+                &mut io_status,
+                null(),
+                if directory_attribute {
+                    FILE_ATTRIBUTE_DIRECTORY
+                } else {
+                    FILE_ATTRIBUTE_NORMAL
+                },
+                SHARE_ALL,
+                disposition,
+                options,
+                null(),
+                0,
+            )
+        };
+        if status < 0 || handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(format!("NTSTATUS 0x{:08x}", status as u32));
+        }
+        Ok(unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
+    }
+
+    fn normal_components(path: &Path, label: &str) -> Result<Vec<OsString>, String> {
+        let mut result = Vec::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(name) => result.push(name.to_os_string()),
+                _ => return Err(format!("Unsafe {label} path: {}", path.display())),
+            }
+        }
+        Ok(result)
+    }
+
+    fn handle_information(handle: &OwnedHandle) -> Result<BY_HANDLE_FILE_INFORMATION, String> {
+        let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+        if unsafe { GetFileInformationByHandle(raw_handle(handle), information.as_mut_ptr()) } == 0
+        {
+            return Err(format!(
+                "Cannot inspect Windows filesystem handle: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(unsafe { information.assume_init() })
+    }
+
+    fn reject_reparse(information: &BY_HANDLE_FILE_INFORMATION, path: &Path) -> Result<(), String> {
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            Err(format!("Reparse point is not allowed: {}", path.display()))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct WindowsIdentity {
+        volume: u64,
+        file_id: [u8; 16],
+    }
+
+    fn handle_identity(handle: &OwnedHandle) -> Result<WindowsIdentity, String> {
+        let mut identity = FILE_ID_INFO::default();
+        if unsafe {
+            GetFileInformationByHandleEx(
+                raw_handle(handle),
+                FileIdInfo,
+                (&mut identity as *mut FILE_ID_INFO).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "Cannot identify Windows filesystem handle: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(WindowsIdentity {
+            volume: identity.VolumeSerialNumber,
+            file_id: identity.FileId.Identifier,
+        })
+    }
+
+    fn lexical_absolute(path: &Path) -> Result<PathBuf, String> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| format!("Cannot resolve Windows path: {error}"))?
+                .join(path)
+        };
+        let mut normalized = PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                    normalized.push(component.as_os_str())
+                }
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !normalized.pop() {
+                        return Err(format!("Unsafe Windows path: {}", path.display()));
+                    }
+                }
+            }
+        }
+        Ok(normalized)
+    }
+
+    fn raw_handle(handle: &OwnedHandle) -> HANDLE {
+        handle.as_raw_handle().cast()
     }
 }
 
@@ -2070,10 +2781,14 @@ fn commands(files: &[ScannedFile]) -> Vec<ProjectCommand> {
         let cwd = parent(&file.path);
         match filename(Path::new(&file.path)).as_str() {
             "pom.xml" => {
-                result.insert((cwd, "test".to_string(), "mvn test".to_string()));
+                if !has_file(files, &cwd, "mvnw") && !has_file(files, &cwd, "mvnw.cmd") {
+                    result.insert((cwd, "test".to_string(), "mvn test".to_string()));
+                }
             }
             "build.gradle" | "build.gradle.kts" => {
-                result.insert((cwd, "test".to_string(), "gradle test".to_string()));
+                if !has_file(files, &cwd, "gradlew") && !has_file(files, &cwd, "gradlew.bat") {
+                    result.insert((cwd, "test".to_string(), "gradle test".to_string()));
+                }
             }
             "cargo.toml" => {
                 result.insert((cwd, "test".to_string(), "cargo test".to_string()));
@@ -2090,12 +2805,15 @@ fn commands(files: &[ScannedFile]) -> Vec<ProjectCommand> {
                     if let Some(scripts) =
                         value.get("scripts").and_then(|scripts| scripts.as_object())
                     {
-                        for name in ["test", "lint", "typecheck", "build"] {
-                            if scripts.contains_key(name) {
+                        for name in scripts.keys() {
+                            if scripts.get(name).is_some_and(|value| value.is_string()) {
+                                let Some(argument) = safe_command_argument(name, false) else {
+                                    continue;
+                                };
                                 result.insert((
                                     cwd.clone(),
                                     name.to_string(),
-                                    format!("{manager} run {name}"),
+                                    format!("{manager} run {argument}"),
                                 ));
                             }
                         }
@@ -2105,10 +2823,99 @@ fn commands(files: &[ScannedFile]) -> Vec<ProjectCommand> {
             _ => {}
         }
     }
+    for file in files {
+        let path = Path::new(&file.path);
+        let file_name = filename(path);
+        let cwd = parent(&file.path);
+        let wrapper = match file_name.as_str() {
+            "mvnw" => Some(("test", "./mvnw test")),
+            "mvnw.cmd" => Some(("test", "./mvnw.cmd test")),
+            "gradlew" => Some(("test", "./gradlew test")),
+            "gradlew.bat" => Some(("test", "./gradlew.bat test")),
+            _ => None,
+        };
+        if let Some((name, command)) = wrapper {
+            result.insert((cwd, name.to_string(), command.to_string()));
+            continue;
+        }
+
+        let extension = extension(path);
+        if !matches!(extension.as_str(), "sh" | "ps1" | "cmd" | "bat") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default();
+        if safe_command_argument(name, false).is_none() {
+            continue;
+        }
+        let scope = command_scope(files, &file.path);
+        let relative = if scope == "." {
+            file.path.clone()
+        } else {
+            file.path
+                .strip_prefix(&format!("{scope}/"))
+                .unwrap_or(&file.path)
+                .to_string()
+        };
+        let Some(relative_argument) = safe_command_argument(&relative, true) else {
+            continue;
+        };
+        let command = match extension.as_str() {
+            "sh" => {
+                let Some(argument) = safe_command_argument(&format!("./{relative}"), true) else {
+                    continue;
+                };
+                argument
+            }
+            "ps1" => format!("powershell -File {relative_argument}"),
+            _ => relative_argument,
+        };
+        result.insert((scope, name.to_string(), command));
+    }
     result
         .into_iter()
         .map(|(cwd, name, command)| ProjectCommand { name, command, cwd })
         .collect()
+}
+
+fn has_file(files: &[ScannedFile], directory: &str, name: &str) -> bool {
+    let path = if directory == "." {
+        name.to_string()
+    } else {
+        format!("{directory}/{name}")
+    };
+    files.iter().any(|file| file.path == path)
+}
+
+fn safe_command_argument(value: &str, allow_path_separator: bool) -> Option<String> {
+    if value.is_empty() || value.trim() != value {
+        return None;
+    }
+    if !value.chars().all(|character| {
+        character.is_alphanumeric()
+            || matches!(character, ' ' | '-' | '_' | ':' | '.')
+            || (allow_path_separator && character == '/')
+    }) {
+        return None;
+    }
+    if value.contains(' ') {
+        Some(format!("\"{value}\""))
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn command_scope(files: &[ScannedFile], script: &str) -> String {
+    let script_directory = parent(script);
+    files
+        .iter()
+        .filter(|file| file.kind == "manifest")
+        .map(|file| parent(&file.path))
+        .filter(|directory| contains_path(directory, &script_directory))
+        .max_by_key(|directory| directory.len())
+        .unwrap_or_else(|| ".".to_string())
 }
 
 fn package_manager(files: &[ScannedFile], module: &str) -> &'static str {
@@ -3155,6 +3962,70 @@ mod tests {
         }
 
         #[test]
+        fn records_only_real_wrapper_package_and_repository_script_commands_with_their_cwd() {
+            let fixture = Fixture::new("commands");
+            fixture.write("mvnw", "#!/bin/sh\nexec mvn \"$@\"\n");
+            fixture.write("mvnw.cmd", "@mvn %*\r\n");
+            fixture.write("pom.xml", "<project/>\n");
+            fixture.write("services/jobs/gradlew", "#!/bin/sh\nexec gradle \"$@\"\n");
+            fixture.write("services/jobs/gradlew.bat", "@gradle %*\r\n");
+            fixture.write("services/jobs/build.gradle", "plugins {}\n");
+            fixture.write(
+                "apps/web/package.json",
+                r#"{"scripts":{"dev":"vite","test:unit":"vitest","test unit":"vitest","bad;name":"echo no"}}"#,
+            );
+            fixture.write("apps/web/pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            fixture.write("scripts/check.sh", "#!/bin/sh\nexit 0\n");
+            fixture.write("scripts/check all.sh", "#!/bin/sh\nexit 0\n");
+            for marker in [';', '&', '|', '<', '>', '^', '%', '!', '`'] {
+                fixture.write(&format!("scripts/bad{marker}run.sh"), "#!/bin/sh\nexit 0\n");
+            }
+            fixture.write("scripts/check.ps1", "exit 0\n");
+            fixture.write("tools/windows/verify.cmd", "@exit /b 0\r\n");
+            fixture.write("tools/windows/package.bat", "@exit /b 0\r\n");
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let commands = inventory
+                .commands
+                .iter()
+                .map(|command| {
+                    (
+                        command.cwd.as_str(),
+                        command.name.as_str(),
+                        command.command.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            for expected in [
+                (".", "test", "./mvnw test"),
+                (".", "test", "./mvnw.cmd test"),
+                ("services/jobs", "test", "./gradlew test"),
+                ("services/jobs", "test", "./gradlew.bat test"),
+                ("apps/web", "dev", "pnpm run dev"),
+                ("apps/web", "test:unit", "pnpm run test:unit"),
+                ("apps/web", "test unit", "pnpm run \"test unit\""),
+                (".", "check", "./scripts/check.sh"),
+                (".", "check all", "\"./scripts/check all.sh\""),
+                (".", "check", "powershell -File scripts/check.ps1"),
+                (".", "verify", "tools/windows/verify.cmd"),
+                (".", "package", "tools/windows/package.bat"),
+            ] {
+                assert!(
+                    commands.contains(&expected),
+                    "missing command {expected:?}: {commands:?}"
+                );
+            }
+            assert!(!commands.iter().any(|(_, name, _)| *name == "bad;name"));
+            for marker in [';', '&', '|', '<', '>', '^', '%', '!', '`'] {
+                assert!(
+                    !commands.iter().any(|(_, name, _)| name.contains(marker)),
+                    "unsafe command marker was inventoried: {marker}: {commands:?}"
+                );
+            }
+        }
+
+        #[test]
         fn rejects_an_external_workspace_parent_symlink_without_writing_outside() {
             use std::os::unix::fs::symlink;
 
@@ -3230,35 +4101,103 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_inventory_and_workspace_are_explicitly_unsupported_until_handle_safe() {
-        let fixture = Fixture::new("windows-unsupported");
+    fn windows_inventory_reader_and_workspace_use_handle_safe_paths() {
+        let fixture = Fixture::new("windows-handles");
+        fixture.write(
+            "Cargo.toml",
+            "[package]\nname = \"windows-safe\"\nversion = \"0.1.0\"\n",
+        );
         fixture.write("src/main.rs", "fn main() {}\n");
-        let inventory_error = inspect_project(fixture.path()).expect_err("unsupported scan");
-        assert!(inventory_error.contains("unsupported"));
 
-        let inventory = ProjectInventory {
-            schema_version: 1,
-            project_name: "fixture".to_string(),
-            layers: ProjectLayers {
-                frontend: false,
-                backend: false,
-            },
-            modules: Vec::new(),
-            source_roots: Vec::new(),
-            files: Vec::new(),
-            commands: Vec::new(),
-            risk_keys: Vec::new(),
-        };
-        let error = create_filtered_workspace(
+        let inventory = inspect_project(fixture.path()).expect("Windows inventory");
+        assert!(inventory
+            .files
+            .iter()
+            .any(|file| file.path == "src/main.rs"));
+        assert_eq!(
+            read_project_bytes_handle_safe(fixture.path(), Path::new("src/main.rs"))
+                .expect("Windows safe read"),
+            Some(b"fn main() {}\n".to_vec())
+        );
+
+        let destination = Fixture::new("windows-workspace");
+        let workspace = destination.path().join("runs/missing/workspace");
+        create_filtered_workspace(fixture.path(), &workspace, &inventory)
+            .expect("Windows workspace");
+        assert_eq!(
+            fs::read(workspace.join("src/main.rs")).expect("workspace source"),
+            b"fn main() {}\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_inventory_skips_file_reparse_points() {
+        use std::os::windows::fs::symlink_file;
+
+        let fixture = Fixture::new("windows-file-reparse");
+        let outside = Fixture::new("windows-file-reparse-outside");
+        fixture.write("src/main.rs", "fn main() {}\n");
+        outside.write("secret.txt", "must not be read\n");
+        if symlink_file(
+            outside.path().join("secret.txt"),
+            fixture.path().join("linked-secret.txt"),
+        )
+        .is_err()
+        {
+            // Creating symlinks requires Developer Mode or SeCreateSymbolicLinkPrivilege on
+            // older Windows installations. The positive handle-safe test still runs there.
+            return;
+        }
+
+        let inventory = inspect_project(fixture.path()).expect("inventory skips reparses");
+        assert!(!inventory
+            .files
+            .iter()
+            .any(|file| file.path.contains("linked-")));
+        assert!(
+            read_project_bytes_handle_safe(fixture.path(), Path::new("linked-secret.txt")).is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reader_rejects_directory_reparse_points() {
+        use std::os::windows::fs::symlink_dir;
+
+        let fixture = Fixture::new("windows-directory-reparse");
+        let outside = Fixture::new("windows-directory-reparse-outside");
+        outside.write("secret.txt", "must not be read\n");
+        if symlink_dir(outside.path(), fixture.path().join("linked-directory")).is_err() {
+            return;
+        }
+        assert!(read_project_bytes_handle_safe(
             fixture.path(),
-            &fixture.path().join("workspace"),
+            Path::new("linked-directory/secret.txt")
+        )
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_workspace_rejects_parent_reparse_points() {
+        use std::os::windows::fs::symlink_dir;
+
+        let fixture = Fixture::new("windows-workspace-reparse-source");
+        let outside = Fixture::new("windows-workspace-reparse-outside");
+        fixture.write("src/main.rs", "fn main() {}\n");
+        let inventory = inspect_project(fixture.path()).expect("inventory");
+
+        let workspace_base = Fixture::new("windows-workspace-reparse");
+        if symlink_dir(outside.path(), workspace_base.path().join("linked-parent")).is_err() {
+            return;
+        }
+        assert!(create_filtered_workspace(
+            fixture.path(),
+            &workspace_base.path().join("linked-parent/workspace"),
             &inventory,
         )
-        .expect_err("unsupported workspace");
-        assert!(error.contains("unsupported"));
-
-        let read_error = read_project_bytes_handle_safe(fixture.path(), Path::new("src/main.rs"))
-            .expect_err("unsupported handle-safe reader");
-        assert!(read_error.contains("unsupported"));
+        .is_err());
+        assert!(!outside.path().join("workspace").exists());
     }
 }

@@ -5262,6 +5262,7 @@ dependencies = [
  "toml 0.8.2",
  "ureq",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
