@@ -232,6 +232,75 @@ pub struct SensitiveFinding {
     pub kind: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactKind {
+    Document,
+    Rule,
+    Skill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceReference {
+    pub path: String,
+    #[serde(default)]
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactPlanItem {
+    pub id: String,
+    pub kind: ArtifactKind,
+    pub layer: String,
+    pub topic: String,
+    pub target_path: String,
+    pub rationale: String,
+    pub evidence: Vec<EvidenceReference>,
+    pub covers: Vec<String>,
+    pub required_sections: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageExclusion {
+    pub target: String,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence: Vec<EvidenceReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactPlan {
+    pub schema_version: u32,
+    pub project_name: String,
+    pub artifacts: Vec<ArtifactPlanItem>,
+    #[serde(default)]
+    pub exclusions: Vec<CoverageExclusion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationIssue {
+    pub code: String,
+    pub detail: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactTotals {
+    pub documents: usize,
+    pub rules: usize,
+    pub skills: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExistingProjectInitResult {

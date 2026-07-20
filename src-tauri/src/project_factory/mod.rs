@@ -1,5 +1,6 @@
 mod ai_rules;
 mod analysis;
+mod artifact_plan;
 mod docs;
 mod env;
 mod existing;
@@ -12,6 +13,9 @@ mod scaffold;
 mod types;
 
 pub use analysis::{analyze_with_agent, analyze_with_agent_progress, build_analysis_prompt};
+pub use artifact_plan::{
+    artifact_totals, read_artifact_plan, validate_artifact_plan, validate_staged_artifacts,
+};
 pub use env::{check_environment, program_path};
 pub use existing::{
     existing_project_init_status, finalize_existing_project_initialization,
@@ -28,11 +32,12 @@ pub use scaffold::{
     create_project, create_project_with_verification, spring_initializr_dependencies,
 };
 pub use types::{
-    AgentAnalysisProgress, AgentAnalysisResult, AnalyzeProjectRequest, ClarificationAnswer,
-    ClarifyingOption, ClarifyingQuestion, CreateProjectRequest, CreateProjectResult, EnvCheckItem,
+    AgentAnalysisProgress, AgentAnalysisResult, AnalyzeProjectRequest, ArtifactKind, ArtifactPlan,
+    ArtifactPlanItem, ArtifactTotals, ClarificationAnswer, ClarifyingOption, ClarifyingQuestion,
+    CoverageExclusion, CreateProjectRequest, CreateProjectResult, EnvCheckItem, EvidenceReference,
     ExistingProjectInitPreparation, ExistingProjectInitResult, ExistingProjectInitStatus,
     ExistingProjectInitializationProgress, InventoryFile, ProjectCommand, ProjectInventory,
     ProjectModule, ProjectProfilePayload, ProjectVerificationResult, RecognizedConstraint,
     RequirementMaterialBundle, RequirementMaterialFile, SensitiveFinding,
-    StackRecommendationPayload, TechnologyDecision,
+    StackRecommendationPayload, TechnologyDecision, ValidationIssue,
 };
