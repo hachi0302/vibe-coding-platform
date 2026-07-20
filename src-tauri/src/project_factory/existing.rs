@@ -1,1072 +1,114 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use super::ai_rules::{install_doc_sync_review, validate_skill_designer, write_skill_designer};
 use super::docs::{project_file_contents, project_files_named, project_layers, ProjectLayers};
+use super::initialization_state::{
+    load_initialization_state, load_ownership_manifest, verify_ownership_manifest,
+    MANAGED_BLOCK_START,
+};
 use super::types::{
     ExistingProjectInitPreparation, ExistingProjectInitResult, ExistingProjectInitStatus,
+    InitializationRunState, InitializationState, ValidationIssue,
 };
 
-const PLATFORM_INIT_MARKER: &str = "<!-- vibe-coding-platform:init:v3 -->";
-const DETAIL_DESIGN_TEMPLATE: &str =
-    include_str!("../../../docs/规范约束/文档模板/公共/详设文档模板.md");
-const PROGRESS_TEMPLATE: &str =
-    include_str!("../../../docs/规范约束/文档模板/公共/开发进度文档模板.md");
-const FRONTEND_INTEGRATION_TEMPLATE: &str =
-    include_str!("../../../docs/规范约束/文档模板/公共/前端接入说明模板.md");
-const INIT_REFERENCE_DIR: &str = ".vibe-coding-platform/init-reference-v3";
-const FRONTEND_FORMAL_OUTPUTS: &[&str] = &[
-    "docs/frontend/MOC.md",
-    "docs/frontend/latest/index.md",
-    "docs/frontend/latest/业务/业务功能总览.md",
-    "docs/frontend/latest/系统架构/前端架构.md",
-    "docs/frontend/latest/公共能力/组件与公共能力.md",
-    "docs/frontend/latest/规范约束/详设文档模板.md",
-    "docs/frontend/latest/规范约束/开发进度文档模板.md",
-    ".claude/rules/前端/前端工程规则.md",
-    ".claude/rules/前端/前端验证规则.md",
-    ".claude/skills/frontend-self-test/SKILL.md",
-];
-const BACKEND_FORMAL_OUTPUTS: &[&str] = &[
-    "docs/backend/MOC.md",
-    "docs/backend/latest/index.md",
-    "docs/backend/latest/业务/业务功能总览.md",
-    "docs/backend/latest/系统架构/系统架构详解.md",
-    "docs/backend/latest/接口文档/API接口总览.md",
-    "docs/backend/latest/接口文档/回调接口总览.md",
-    "docs/backend/latest/接口文档/枚举值总览.md",
-    "docs/backend/latest/接口文档/物理模型总览.md",
-    "docs/backend/latest/第三方集成/第三方集成总览.md",
-    "docs/backend/latest/规范约束/详设文档模板.md",
-    "docs/backend/latest/规范约束/开发进度文档模板.md",
-    "docs/backend/latest/规范约束/前端接入说明模板.md",
-    ".claude/rules/后端/API与业务实现规则.md",
-    ".claude/rules/后端/持久化与迁移规则.md",
-    ".claude/rules/后端/异步与第三方规则.md",
-    ".claude/skills/backend-self-test/SKILL.md",
-    ".claude/skills/backend-log-diagnose/SKILL.md",
-    ".claude/skills/database-read-diagnose/SKILL.md",
-    ".claude/skills/ddl-review/SKILL.md",
-    ".claude/skills/external-integration/SKILL.md",
-];
-
-/// 初始化 Agent 的只读参考包。正式长期文档不能直接复制空模板，因此参考包只在初始化期间
-/// 存在；最终真实产物校验通过后立即删除。
-const INIT_REFERENCE_FILES: &[(&str, &str)] = &[
-    (
-        "文档模板/公共/Agent入口文档模板.md",
-        include_str!("../../../docs/规范约束/文档模板/公共/Agent入口文档模板.md"),
-    ),
-    (
-        "文档模板/公共/前端接入说明模板.md",
-        FRONTEND_INTEGRATION_TEMPLATE,
-    ),
-    ("文档模板/公共/开发进度文档模板.md", PROGRESS_TEMPLATE),
-    ("文档模板/公共/详设文档模板.md", DETAIL_DESIGN_TEMPLATE),
-    (
-        "文档模板/前端/MOC模板.md",
-        include_str!("../../../docs/规范约束/文档模板/前端/MOC模板.md"),
-    ),
-    (
-        "文档模板/前端/index模板.md",
-        include_str!("../../../docs/规范约束/文档模板/前端/index模板.md"),
-    ),
-    (
-        "文档模板/前端/业务功能总览模板.md",
-        include_str!("../../../docs/规范约束/文档模板/前端/业务功能总览模板.md"),
-    ),
-    (
-        "文档模板/前端/前端架构模板.md",
-        include_str!("../../../docs/规范约束/文档模板/前端/前端架构模板.md"),
-    ),
-    (
-        "文档模板/前端/变更记录模板.md",
-        include_str!("../../../docs/规范约束/文档模板/前端/变更记录模板.md"),
-    ),
-    (
-        "文档模板/前端/组件与公共能力模板.md",
-        include_str!("../../../docs/规范约束/文档模板/前端/组件与公共能力模板.md"),
-    ),
-    (
-        "文档模板/后端/API接口总览模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/API接口总览模板.md"),
-    ),
-    (
-        "文档模板/后端/MOC模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/MOC模板.md"),
-    ),
-    (
-        "文档模板/后端/index模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/index模板.md"),
-    ),
-    (
-        "文档模板/后端/业务功能总览模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/业务功能总览模板.md"),
-    ),
-    (
-        "文档模板/后端/回调接口总览模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/回调接口总览模板.md"),
-    ),
-    (
-        "文档模板/后端/枚举值总览模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/枚举值总览模板.md"),
-    ),
-    (
-        "文档模板/后端/物理模型总览模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/物理模型总览模板.md"),
-    ),
-    (
-        "文档模板/后端/第三方集成模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/第三方集成模板.md"),
-    ),
-    (
-        "文档模板/后端/系统架构详解模板.md",
-        include_str!("../../../docs/规范约束/文档模板/后端/系统架构详解模板.md"),
-    ),
-    (
-        "规则模板/公共/Git协作与历史保护.md",
-        include_str!("../../../docs/规范约束/规则模板/公共/Git协作与历史保护.md"),
-    ),
-    (
-        "规则模板/公共/事实与兜底边界.md",
-        include_str!("../../../docs/规范约束/规则模板/公共/事实与兜底边界.md"),
-    ),
-    (
-        "规则模板/公共/复用与影响面.md",
-        include_str!("../../../docs/规范约束/规则模板/公共/复用与影响面.md"),
-    ),
-    (
-        "规则模板/公共/开发基线.md",
-        include_str!("../../../docs/规范约束/规则模板/公共/开发基线.md"),
-    ),
-    (
-        "规则模板/公共/开发流程与文档同步.md",
-        include_str!("../../../docs/规范约束/规则模板/公共/开发流程与文档同步.md"),
-    ),
-    (
-        "规则模板/公共/自测与交付.md",
-        include_str!("../../../docs/规范约束/规则模板/公共/自测与交付.md"),
-    ),
-    (
-        "规则模板/公共/doc-sync-review.md",
-        include_str!("../../../docs/规范约束/规则模板/公共/doc-sync-review.md"),
-    ),
-    (
-        "规则模板/前端/前端工程规则.md",
-        include_str!("../../../docs/规范约束/规则模板/前端/前端工程规则.md"),
-    ),
-    (
-        "规则模板/前端/前端验证规则.md",
-        include_str!("../../../docs/规范约束/规则模板/前端/前端验证规则.md"),
-    ),
-    (
-        "规则模板/后端/API与业务实现规则.md",
-        include_str!("../../../docs/规范约束/规则模板/后端/API与业务实现规则.md"),
-    ),
-    (
-        "规则模板/后端/异步与第三方规则.md",
-        include_str!("../../../docs/规范约束/规则模板/后端/异步与第三方规则.md"),
-    ),
-    (
-        "规则模板/后端/持久化与迁移规则.md",
-        include_str!("../../../docs/规范约束/规则模板/后端/持久化与迁移规则.md"),
-    ),
-    (
-        "技能模板/公共/code-review/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/公共/code-review/SKILL.md"),
-    ),
-    (
-        "技能模板/公共/detail-design-writer/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/公共/detail-design-writer/SKILL.md"),
-    ),
-    (
-        "技能模板/公共/developer/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/公共/developer/SKILL.md"),
-    ),
-    (
-        "技能模板/公共/problem-diagnose/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/公共/problem-diagnose/SKILL.md"),
-    ),
-    (
-        "技能模板/公共/review-feedback-handler/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/公共/review-feedback-handler/SKILL.md"),
-    ),
-    (
-        "技能模板/公共/doc-sync-review/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/公共/doc-sync-review/SKILL.md"),
-    ),
-    (
-        "技能模板/公共/doc-sync-review/scripts/doc-sync-gate.sh",
-        include_str!(
-            "../../../docs/规范约束/技能模板/公共/doc-sync-review/scripts/doc-sync-gate.sh"
-        ),
-    ),
-    (
-        "技能模板/前端/frontend-self-test/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/前端/frontend-self-test/SKILL.md"),
-    ),
-    (
-        "技能模板/后端/backend-self-test/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/后端/backend-self-test/SKILL.md"),
-    ),
-    (
-        "技能模板/可选/backend-log-diagnose/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/可选/backend-log-diagnose/SKILL.md"),
-    ),
-    (
-        "技能模板/可选/database-read-diagnose/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/可选/database-read-diagnose/SKILL.md"),
-    ),
-    (
-        "技能模板/可选/ddl-review/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/可选/ddl-review/SKILL.md"),
-    ),
-    (
-        "技能模板/可选/external-integration/SKILL.md",
-        include_str!("../../../docs/规范约束/技能模板/可选/external-integration/SKILL.md"),
-    ),
-];
-
-fn contains_any(source: &str, candidates: &[&str]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| source.contains(candidate))
-}
+const PLATFORM_INIT_V3_MARKER: &str = "<!-- vibe-coding-platform:init:v3 -->";
+const MAX_DISCOVERY_DEPTH: usize = 6;
 
 fn detected_stack(root: &Path, layers: ProjectLayers) -> Vec<String> {
     let package = project_file_contents(root, "package.json");
-    let python = format!(
-        "{}\n{}",
-        project_file_contents(root, "pyproject.toml"),
-        project_file_contents(root, "requirements.txt")
-    );
-    let pom = project_file_contents(root, "pom.xml");
+    let cargo = project_file_contents(root, "Cargo.toml");
+    let maven = project_file_contents(root, "pom.xml");
     let gradle = format!(
         "{}\n{}",
         project_file_contents(root, "build.gradle"),
         project_file_contents(root, "build.gradle.kts")
     );
-    let cargo = project_file_contents(root, "Cargo.toml");
-    let go_mod = project_file_contents(root, "go.mod");
-    let ruby = project_file_contents(root, "Gemfile");
-    let php = project_file_contents(root, "composer.json");
-    let scala = project_file_contents(root, "build.sbt");
+    let python = format!(
+        "{}\n{}",
+        project_file_contents(root, "pyproject.toml"),
+        project_file_contents(root, "requirements.txt")
+    );
     let mut stack = Vec::new();
-
-    if layers.frontend {
-        for (needle, label) in [
-            ("\"vue\"", "Vue"),
-            ("\"react\"", "React"),
-            ("\"next\"", "Next.js"),
-            ("\"svelte\"", "Svelte"),
-            ("\"nuxt\"", "Nuxt"),
-            ("\"astro\"", "Astro"),
-            ("\"@angular/core\"", "Angular"),
-            ("typescript", "TypeScript"),
-            ("vite", "Vite"),
-        ] {
-            if package.contains(needle) {
-                stack.push(label.to_string());
-            }
-        }
-        if !project_files_named(root, "tauri.conf.json").is_empty() || cargo.contains("tauri") {
-            stack.push("Tauri".to_string());
-        }
-    }
-    if layers.backend {
-        if pom.contains("spring-boot") || gradle.contains("org.springframework.boot") {
-            stack.push("Spring Boot".to_string());
-        }
-        if !project_files_named(root, "pom.xml").is_empty() || !gradle.is_empty() {
-            stack.push("Java".to_string());
-        }
-        if gradle.contains("kotlin") {
-            stack.push("Kotlin".to_string());
-        }
-        if python.contains("fastapi") {
-            stack.push("FastAPI".to_string());
-        } else if python.contains("django") {
-            stack.push("Django".to_string());
-        } else if python.contains("flask") {
-            stack.push("Flask".to_string());
-        }
-        if !python.trim().is_empty() || !project_files_named(root, "manage.py").is_empty() {
-            stack.push("Python".to_string());
-        }
-        if !go_mod.is_empty() {
-            stack.push("Go".to_string());
-        }
-        if !cargo.is_empty() {
-            stack.push("Rust".to_string());
-        }
-        if contains_any(
-            &package,
-            &["nestjs", "@nestjs", "express", "fastify", "koa"],
-        ) {
-            stack.push("Node.js".to_string());
-        }
-        if !project_files_named(root, "Program.cs").is_empty() {
-            stack.push(".NET".to_string());
-        }
-        if !ruby.is_empty() {
-            stack.push(
-                if ruby.contains("rails") {
-                    "Ruby on Rails"
-                } else {
-                    "Ruby"
-                }
-                .to_string(),
-            );
-        }
-        if !php.is_empty() {
-            stack.push(
-                if php.contains("laravel/framework") {
-                    "Laravel"
-                } else {
-                    "PHP"
-                }
-                .to_string(),
-            );
-        }
-        if !scala.is_empty() {
-            stack.push("Scala".to_string());
+    for (name, found) in [
+        ("Vue", package.contains("\"vue\"")),
+        ("React", package.contains("\"react\"")),
+        ("Angular", package.contains("@angular/core")),
+        ("Svelte", package.contains("\"svelte\"")),
+        ("Node.js", !package.is_empty()),
+        ("Rust", !cargo.is_empty()),
+        (
+            "Spring Boot",
+            maven.contains("spring-boot") || gradle.contains("spring-boot"),
+        ),
+        ("Java/Kotlin", !maven.is_empty() || !gradle.is_empty()),
+        ("Python", !python.is_empty()),
+        ("Go", !project_files_named(root, "go.mod").is_empty()),
+        (".NET", !project_files_named(root, "Program.cs").is_empty()),
+    ] {
+        if found && !stack.iter().any(|item| item == name) {
+            stack.push(name.to_string());
         }
     }
-    stack.sort();
-    stack.dedup();
     if stack.is_empty() {
-        stack.push("待 Agent 根据项目文件补充识别".to_string());
+        if layers.frontend {
+            stack.push("Frontend".to_string());
+        }
+        if layers.backend {
+            stack.push("Backend".to_string());
+        }
     }
     stack
 }
 
-fn has_database_dependency(root: &Path) -> bool {
-    let source = [
-        "package.json",
-        "pyproject.toml",
-        "requirements.txt",
-        "pom.xml",
-        "build.gradle",
-        "build.gradle.kts",
-        "Cargo.toml",
-        "go.mod",
-        "Gemfile",
-        "composer.json",
-        "build.sbt",
-    ]
-    .iter()
-    .map(|name| project_file_contents(root, name))
-    .collect::<Vec<_>>()
-    .join("\n");
-    contains_any(
-        &source,
-        &[
-            "mysql",
-            "postgres",
-            "postgresql",
-            "sqlite",
-            "mongodb",
-            "prisma",
-            "typeorm",
-            "sqlalchemy",
-            "sqlx",
-            "jooq",
-            "mybatis",
-            "jpa",
-        ],
-    ) || has_database_connection_evidence(root)
-        || has_database_model_evidence(root)
-}
-
-fn should_scan_evidence_dir(name: &str) -> bool {
-    !matches!(
+fn should_skip(name: &str) -> bool {
+    matches!(
         name,
-        ".git"
-            | ".claude"
-            | ".agents"
-            | "docs"
-            | "node_modules"
-            | "target"
-            | "dist"
-            | "build"
-            | "vendor"
+        ".git" | "node_modules" | "target" | "dist" | "build" | "vendor"
     )
 }
 
-fn is_text_evidence_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "java"
-                    | "kt"
-                    | "kts"
-                    | "rs"
-                    | "go"
-                    | "py"
-                    | "ts"
-                    | "tsx"
-                    | "js"
-                    | "jsx"
-                    | "vue"
-                    | "svelte"
-                    | "cs"
-                    | "sql"
-                    | "xml"
-                    | "yaml"
-                    | "yml"
-                    | "toml"
-                    | "json"
-                    | "conf"
-                    | "env"
-                    | "properties"
-                    | "prisma"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn any_project_source_file(root: &Path, mut predicate: impl FnMut(&Path, &str) -> bool) -> bool {
-    fn visit(path: &Path, depth: usize, predicate: &mut impl FnMut(&Path, &str) -> bool) -> bool {
-        if depth > 8 {
-            return false;
-        }
-        let Ok(entries) = fs::read_dir(path) else {
-            return false;
-        };
-        for entry in entries.flatten() {
-            let child = entry.path();
-            if child.is_dir() {
-                if should_scan_evidence_dir(&entry.file_name().to_string_lossy())
-                    && visit(&child, depth + 1, predicate)
-                {
-                    return true;
-                }
-                continue;
-            }
-            if !is_text_evidence_file(&child) {
-                continue;
-            }
-            let Ok(metadata) = child.metadata() else {
-                continue;
-            };
-            if metadata.len() > 2 * 1024 * 1024 {
-                continue;
-            }
-            let Ok(content) = fs::read_to_string(&child) else {
-                continue;
-            };
-            let normalized = content.to_ascii_lowercase();
-            if predicate(&child, &normalized) {
-                return true;
-            }
-        }
-        false
+fn collect_existing(root: &Path, current: &Path, depth: usize, output: &mut Vec<String>) {
+    if depth > MAX_DISCOVERY_DEPTH {
+        return;
     }
-    visit(root, 0, &mut predicate)
-}
-
-#[derive(Clone, Debug)]
-struct SourceFact {
-    relative: String,
-    extension: String,
-    normalized: String,
-    symbols: Vec<String>,
-}
-
-fn source_symbols(path: &Path, content: &str) -> Vec<String> {
-    let mut symbols = Vec::new();
-    let tokens = content
-        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    for pair in tokens.windows(2) {
-        if matches!(
-            pair[0],
-            "class"
-                | "interface"
-                | "enum"
-                | "record"
-                | "struct"
-                | "trait"
-                | "type"
-                | "fn"
-                | "def"
-                | "function"
-                | "const"
-        ) && pair[1].len() >= 3
-        {
-            symbols.push(pair[1].to_string());
-        }
-    }
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if matches!(extension.as_str(), "vue" | "svelte" | "tsx" | "jsx") {
-        if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
-            if stem.len() >= 3 && stem != "index" {
-                symbols.push(stem.to_string());
-            }
-        }
-    }
-    symbols.sort();
-    symbols.dedup();
-    symbols
-}
-
-fn project_source_facts(root: &Path) -> Vec<SourceFact> {
-    fn visit(root: &Path, path: &Path, depth: usize, facts: &mut Vec<SourceFact>) {
-        if depth > 8 {
-            return;
-        }
-        let Ok(entries) = fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let child = entry.path();
-            if child.is_dir() {
-                if should_scan_evidence_dir(&entry.file_name().to_string_lossy()) {
-                    visit(root, &child, depth + 1, facts);
-                }
-                continue;
-            }
-            if !is_text_evidence_file(&child) {
-                continue;
-            }
-            let Ok(metadata) = child.metadata() else {
-                continue;
-            };
-            if metadata.len() > 2 * 1024 * 1024 {
-                continue;
-            }
-            let Ok(content) = fs::read_to_string(&child) else {
-                continue;
-            };
-            let Ok(relative) = child.strip_prefix(root) else {
-                continue;
-            };
-            let extension = child
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            facts.push(SourceFact {
-                relative: relative.to_string_lossy().replace('\\', "/"),
-                extension,
-                normalized: content.to_ascii_lowercase(),
-                symbols: source_symbols(&child, &content),
-            });
-        }
-    }
-    let mut facts = Vec::new();
-    visit(root, root, 0, &mut facts);
-    facts
-}
-
-fn layer_rule_contents(root: &Path, layer: &str) -> Result<String, String> {
-    let directory = root.join(".claude/rules").join(layer);
-    let entries = fs::read_dir(&directory)
-        .map_err(|_| format!("缺少项目专属{layer}规则目录：{}", directory.display()))?;
-    let mut contents = Vec::new();
-    for entry in entries.flatten() {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
             continue;
         }
-        contents.push(
-            fs::read_to_string(&path)
-                .map_err(|_| format!("无法读取项目专属{layer}规则：{}", path.display()))?,
-        );
-    }
-    Ok(contents.join("\n"))
-}
-
-fn fact_is_referenced(rules: &str, fact: &SourceFact) -> bool {
-    rules.contains(&fact.relative)
-        && fact
-            .symbols
-            .iter()
-            .any(|symbol| rules.contains(symbol.as_str()))
-}
-
-fn validate_layer_rule_evidence(
-    root: &Path,
-    layer: &str,
-    facts: &[SourceFact],
-) -> Result<String, String> {
-    let rules = layer_rule_contents(root, layer)?;
-    let generic = ["以源码为准", "未识别", "通用约束"]
-        .iter()
-        .filter(|phrase| rules.contains(**phrase))
-        .copied()
-        .collect::<Vec<_>>();
-    if !generic.is_empty() {
-        return Err(format!(
-            "{layer}项目规则仍用空壳措辞冒充实填（{}）；必须改为当前项目真实证据",
-            generic.join("、")
-        ));
-    }
-    if !facts.iter().any(|fact| fact_is_referenced(&rules, fact)) {
-        return Err(format!(
-            "{layer}项目规则缺少成对的真实源码路径与真实符号/类名证据"
-        ));
-    }
-    Ok(rules)
-}
-
-fn require_category_evidence(
-    layer: &str,
-    label: &str,
-    rules: &str,
-    facts: &[SourceFact],
-    predicate: impl Fn(&SourceFact) -> bool,
-    errors: &mut Vec<String>,
-) {
-    let category = facts
-        .iter()
-        .filter(|fact| predicate(fact))
-        .collect::<Vec<_>>();
-    if !category.is_empty() && !category.iter().any(|fact| fact_is_referenced(rules, fact)) {
-        errors.push(format!(
-            "{layer}项目规则缺少已检测到的{label}真实路径与符号证据"
-        ));
-    }
-}
-
-fn validate_project_rule_evidence(root: &Path, layers: ProjectLayers) -> Result<(), String> {
-    let facts = project_source_facts(root);
-    let backend_facts = facts
-        .iter()
-        .filter(|fact| !matches!(fact.extension.as_str(), "vue" | "svelte" | "tsx" | "jsx"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let frontend_facts = facts
-        .iter()
-        .filter(|fact| {
-            matches!(
-                fact.extension.as_str(),
-                "vue" | "svelte" | "tsx" | "jsx" | "ts" | "js"
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut errors = Vec::new();
-    if layers.backend {
-        match validate_layer_rule_evidence(root, "后端", &backend_facts) {
-            Ok(rules) => {
-                require_category_evidence(
-                    "后端",
-                    "项目模块",
-                    &rules,
-                    &backend_facts,
-                    |fact| {
-                        let components = fact.relative.split('/').collect::<Vec<_>>();
-                        components.len() > 3
-                            && components[0] != "src"
-                            && components.contains(&"src")
-                    },
-                    &mut errors,
-                );
-                require_category_evidence(
-                    "后端",
-                    "框架扩展点",
-                    &rules,
-                    &facts,
-                    |fact| {
-                        contains_any(
-                            &fact.normalized,
-                            &[
-                                "@service",
-                                "@component",
-                                "@controller",
-                                "@repository",
-                                "@configuration",
-                                " implements ",
-                                " extends ",
-                                "#[tauri::command]",
-                                "app.get(",
-                                "app.post(",
-                                "router.get(",
-                                "router.post(",
-                            ],
-                        )
-                    },
-                    &mut errors,
-                );
-                require_category_evidence(
-                    "后端",
-                    "异常处理",
-                    &rules,
-                    &facts,
-                    |fact| {
-                        fact.relative.to_ascii_lowercase().contains("exception")
-                            || fact.relative.to_ascii_lowercase().contains("error")
-                            || contains_any(
-                                &fact.normalized,
-                                &["extends runtimeexception", "extends exception", "errorcode"],
-                            )
-                    },
-                    &mut errors,
-                );
-                require_category_evidence(
-                    "后端",
-                    "公共复用",
-                    &rules,
-                    &facts,
-                    |fact| {
-                        let path = fact.relative.to_ascii_lowercase();
-                        [
-                            "/common/",
-                            "/util/",
-                            "/utils/",
-                            "/helper/",
-                            "/shared/",
-                            "/support/",
-                        ]
-                        .iter()
-                        .any(|segment| path.contains(segment))
-                    },
-                    &mut errors,
-                );
-            }
-            Err(error) => errors.push(error),
+        if let Ok(relative) = path.strip_prefix(root) {
+            output.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+        if metadata.is_dir() && !should_skip(&entry.file_name().to_string_lossy()) {
+            collect_existing(root, &path, depth + 1, output);
         }
     }
-    if layers.frontend {
-        match validate_layer_rule_evidence(root, "前端", &frontend_facts) {
-            Ok(rules) => {
-                require_category_evidence(
-                    "前端",
-                    "组件",
-                    &rules,
-                    &facts,
-                    |fact| matches!(fact.extension.as_str(), "vue" | "svelte" | "tsx" | "jsx"),
-                    &mut errors,
-                );
-                require_category_evidence(
-                    "前端",
-                    "路由",
-                    &rules,
-                    &facts,
-                    |fact| {
-                        let path = fact.relative.to_ascii_lowercase();
-                        path.contains("/router/")
-                            || path.contains("/routes/")
-                            || contains_any(
-                                &fact.normalized,
-                                &["createRouter", "createrouter", "react-router", "vue-router"],
-                            )
-                    },
-                    &mut errors,
-                );
-                require_category_evidence(
-                    "前端",
-                    "状态管理",
-                    &rules,
-                    &facts,
-                    |fact| {
-                        let path = fact.relative.to_ascii_lowercase();
-                        path.contains("/store/")
-                            || path.contains("/stores/")
-                            || contains_any(
-                                &fact.normalized,
-                                &["definestore", "createstore", "redux", "zustand", "vuex"],
-                            )
-                    },
-                    &mut errors,
-                );
-                require_category_evidence(
-                    "前端",
-                    "API client",
-                    &rules,
-                    &facts,
-                    |fact| {
-                        let path = fact.relative.to_ascii_lowercase();
-                        path.contains("/api/")
-                            || path.contains("/client/")
-                            || contains_any(
-                                &fact.normalized,
-                                &["axios.create", "fetch(", "createapi("],
-                            )
-                    },
-                    &mut errors,
-                );
-            }
-            Err(error) => errors.push(error),
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "项目规则缺少真实代码证据：\n- {}",
-            errors.join("\n- ")
-        ))
-    }
-}
-
-fn project_source_contains(root: &Path, candidates: &[&str]) -> bool {
-    any_project_source_file(root, |_, source| {
-        candidates
-            .iter()
-            .any(|candidate| source.contains(candidate))
-    })
-}
-
-fn source_has_api_evidence(source: &str) -> bool {
-    contains_any(
-        source,
-        &[
-            "@restcontroller",
-            "@requestmapping",
-            "@getmapping",
-            "@postmapping",
-            "@putmapping",
-            "@deletemapping",
-            "@patchmapping",
-            "fastapi(",
-            "apirouter(",
-            "@app.get(",
-            "@app.post(",
-            "@app.put(",
-            "@app.delete(",
-            "@app.patch(",
-            "@router.get(",
-            "@router.post(",
-            "@router.put(",
-            "@router.delete(",
-            "@router.patch(",
-            "app.get(",
-            "app.post(",
-            "app.put(",
-            "app.delete(",
-            "app.patch(",
-            "router.get(",
-            "router.post(",
-            "router.put(",
-            "router.delete(",
-            "router.patch(",
-            "axum::router",
-            "actix_web::",
-            "#[get(\"/",
-            "#[post(\"/",
-            "http.handlefunc(",
-            ".handlefunc(",
-            "gin.default(",
-            "echo.new(",
-            "mapget(",
-            "mappost(",
-            "mapput(",
-            "mapdelete(",
-            "[apicontroller]",
-        ],
-    )
-}
-
-fn has_api_evidence(root: &Path) -> bool {
-    any_project_source_file(root, |_, source| source_has_api_evidence(source))
-}
-
-fn has_callback_evidence(root: &Path) -> bool {
-    any_project_source_file(root, |_, source| {
-        source_has_api_evidence(source)
-            && contains_any(source, &["/callback", "/webhook", "/notify"])
-    })
-}
-
-fn has_boundary_enum_evidence(root: &Path) -> bool {
-    any_project_source_file(root, |path, source| {
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        match extension.as_str() {
-            "java" | "kt" | "kts" | "cs" => contains_any(
-                source,
-                &["public enum ", "enum class ", "sealed interface "],
-            ),
-            "ts" | "tsx" => contains_any(source, &["export enum ", " enum "]),
-            "rs" => contains_any(source, &["pub enum ", "#[serde", "#[repr("]),
-            "py" => contains_any(source, &["class ", "(enum):", "(str, enum):"]),
-            _ => false,
-        }
-    })
-}
-
-fn has_external_integration_evidence(root: &Path) -> bool {
-    any_project_source_file(root, |_, source| {
-        contains_any(
-            source,
-            &[
-                "@feignclient",
-                "stripe-java",
-                "stripe-python",
-                "paypal-sdk",
-                "wechatpay",
-                "alipay-sdk",
-                "yop-java-sdk",
-                "twilio",
-                "sendgrid",
-                "aws-sdk",
-                "software.amazon.awssdk",
-            ],
-        ) || (contains_any(
-            source,
-            &[
-                "webclient.builder",
-                "resttemplate",
-                "okhttpclient",
-                "axios.create",
-                "httpx.client",
-                "requests.session",
-                "reqwest::client",
-            ],
-        ) && contains_any(
-            source,
-            &["https://", "http://", "baseurl", "base_url", "external"],
-        ))
-    })
-}
-
-fn has_database_connection_evidence(root: &Path) -> bool {
-    project_source_contains(
-        root,
-        &[
-            "spring.datasource",
-            "datasource.url",
-            "jdbc:",
-            "database_url",
-            "db_host",
-            "db_url",
-            "mongodb.uri",
-            "mongodb://",
-            "mongodb+srv://",
-            "postgres://",
-            "postgresql://",
-            "mysql://",
-            "sqlite://",
-        ],
-    )
-}
-
-fn has_database_model_evidence(root: &Path) -> bool {
-    !project_files_named(root, "schema.prisma").is_empty()
-        || project_source_contains(
-            root,
-            &[
-                "create table ",
-                "create table\n",
-                "createtable",
-                "create_table ",
-                "@entity",
-                "@table(",
-                "@tablename(",
-                "__tablename__",
-                "models.model",
-                ".define(",
-                "dbset<",
-                "sqlx::fromrow",
-                "gorm.model",
-                "diesel::table!",
-            ],
-        )
 }
 
 fn list_existing(root: &Path, relative: &str) -> Vec<String> {
-    root.join(relative)
-        .exists()
-        .then(|| relative.to_string())
-        .into_iter()
-        .collect()
+    let path = root.join(relative);
+    if !path.exists() {
+        return Vec::new();
+    }
+    let mut output = vec![relative.to_string()];
+    if path.is_dir() {
+        collect_existing(root, &path, 0, &mut output);
+    }
+    output.sort();
+    output.dedup();
+    output
 }
 
-fn write_if_missing(path: &Path, content: &str) -> Result<(), String> {
-    if path.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    fs::write(path, content).map_err(|error| error.to_string())
-}
-
-fn reference_file_matches_layers(relative: &str, layers: ProjectLayers) -> bool {
-    if relative == "文档模板/公共/前端接入说明模板.md" {
-        return layers.frontend && layers.backend;
-    }
-    if relative.starts_with("文档模板/前端/")
-        || relative.starts_with("规则模板/前端/")
-        || relative.starts_with("技能模板/前端/")
-    {
-        return layers.frontend;
-    }
-    if relative.starts_with("文档模板/后端/")
-        || relative.starts_with("规则模板/后端/")
-        || relative.starts_with("技能模板/后端/")
-        || relative.starts_with("技能模板/可选/")
-    {
-        return layers.backend;
-    }
-    true
-}
-
-fn write_initialization_reference_bundle(root: &Path, layers: ProjectLayers) -> Result<(), String> {
-    let base = root.join(INIT_REFERENCE_DIR);
-    if base.exists() {
-        fs::remove_dir_all(&base).map_err(|error| error.to_string())?;
-    }
-    for (relative, content) in INIT_REFERENCE_FILES
-        .iter()
-        .filter(|(relative, _)| reference_file_matches_layers(relative, layers))
-    {
-        let path = base.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        fs::write(path, content).map_err(|error| error.to_string())?;
-    }
-    fs::write(
-        base.join("README.md"),
-        format!(
-            "# 初始化只读参考包\n\n本目录由平台临时生成。识别结果：前端层={}，后端层={}。后台 Agent 只能读取这里与当前代码层匹配的文档、规则和 skill 模板，再依据目标项目真实代码填充正式产物。禁止把模板占位符或空表复制进正式长期文档。最终校验成功后平台会自动删除本目录。\n",
-            layers.frontend, layers.backend
-        ),
-    )
-    .map_err(|error| error.to_string())
-}
-
-fn remove_initialization_reference_bundle(root: &Path) -> Result<(), String> {
-    let base = root.join(INIT_REFERENCE_DIR);
-    if base.exists() {
-        fs::remove_dir_all(base).map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-fn install_project_document_templates(root: &Path, layers: ProjectLayers) -> Result<(), String> {
-    if layers.frontend {
-        let base = root.join("docs/frontend/latest/规范约束");
-        write_if_missing(&base.join("详设文档模板.md"), DETAIL_DESIGN_TEMPLATE)?;
-        write_if_missing(&base.join("开发进度文档模板.md"), PROGRESS_TEMPLATE)?;
-    }
-    if layers.backend {
-        let base = root.join("docs/backend/latest/规范约束");
-        write_if_missing(&base.join("详设文档模板.md"), DETAIL_DESIGN_TEMPLATE)?;
-        write_if_missing(&base.join("开发进度文档模板.md"), PROGRESS_TEMPLATE)?;
-        if layers.frontend {
-            write_if_missing(
-                &base.join("前端接入说明模板.md"),
-                FRONTEND_INTEGRATION_TEMPLATE,
-            )?;
-        }
-    }
-    Ok(())
-}
-
+/// Discovery only. This function deliberately performs no writes and installs no templates,
+/// hooks, entries, rules, skills, or `.agents` assets.
 pub fn prepare_existing_project_initialization(
     project_path: &str,
 ) -> Result<ExistingProjectInitPreparation, String> {
@@ -1078,519 +120,129 @@ pub fn prepare_existing_project_initialization(
     if !layers.frontend && !layers.backend {
         return Err("未识别到前端或后端代码层；请确认项目根目录后再初始化".to_string());
     }
-    // 先原样安装平台内置的 skill-designer，随后 Agent 必须用它设计项目专属 skills。
-    // 这里只写入这一项初始化工具，不复制整套模板库，也不触碰业务代码和既有 docs。
-    write_skill_designer(root)?;
-    install_doc_sync_review(root, layers)?;
-    // 业务总览、架构、API、物理模型、规则与 skills 都需要严格参照平台模板，但不能把空模板
-    // 当成正式项目产物。故这里只提供初始化期间的隐藏只读参考包，成功后自动清理。
-    write_initialization_reference_bundle(root, layers)?;
-    // 详设、进度、前端接入本来就是目标项目长期保留的规范模板；只在缺失时补齐，绝不
-    // 覆盖项目已有版本。其他长期文档必须由 Agent 读取完整源码后填写，不能预铺空壳。
-    install_project_document_templates(root, layers)?;
-    let agents_skills = root.join(".agents/skills");
-    if fs::symlink_metadata(&agents_skills).is_err() {
-        fs::create_dir_all(root.join(".agents")).map_err(|error| error.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-            symlink("../.claude/skills", &agents_skills).map_err(|error| error.to_string())?;
-        }
-        #[cfg(not(unix))]
-        fs::create_dir_all(&agents_skills).map_err(|error| error.to_string())?;
+    let existing_docs = list_existing(root, "docs");
+    let mut existing_agent_material = Vec::new();
+    for relative in ["CLAUDE.md", "AGENTS.md", ".claude", ".agents"] {
+        existing_agent_material.extend(list_existing(root, relative));
     }
+    existing_agent_material.sort();
+    existing_agent_material.dedup();
     Ok(ExistingProjectInitPreparation {
         project_path: root.to_string_lossy().to_string(),
         layers,
         detected_stack: detected_stack(root, layers),
-        existing_docs: list_existing(root, "docs"),
-        existing_agent_material: ["CLAUDE.md", "AGENTS.md", ".claude", ".agents"]
-            .iter()
-            .flat_map(|relative| list_existing(root, relative))
-            .collect(),
+        existing_docs,
+        existing_agent_material,
     })
 }
 
-fn file_is_real_document(root: &Path, relative: &str) -> Result<(), String> {
-    let content = fs::read_to_string(root.join(relative))
-        .map_err(|_| format!("缺少初始化后的真实文档：{relative}"))?;
-    let compact = content.split_whitespace().collect::<String>();
-    if content
-        .chars()
-        .filter(|character| ('\u{4e00}'..='\u{9fff}').contains(character))
-        .count()
-        < 10
-    {
-        return Err(format!("文档不是中文实填内容：{relative}"));
+fn issue(code: &str, detail: impl Into<String>, stage: &str) -> ValidationIssue {
+    ValidationIssue {
+        code: code.to_string(),
+        detail: detail.into(),
+        path: None,
+        stage: Some(stage.to_string()),
     }
-    if compact.len() < 60
-        || [
-            "{{",
-            "待填写",
-            "初始化扫描未发现对应证据",
-            "|  |",
-            "TODO",
-            "TBD",
-        ]
+}
+
+fn phase_for_state(state: InitializationRunState) -> &'static str {
+    match state {
+        InitializationRunState::Preflight => "scan",
+        InitializationRunState::SnapshotReady => "plan",
+        InitializationRunState::PlanReady => "documents",
+        InitializationRunState::DocumentsReady => "rules",
+        InitializationRunState::RulesReady => "skills",
+        InitializationRunState::SkillsReady | InitializationRunState::Installing => "install",
+        InitializationRunState::Verifying => "verify",
+        InitializationRunState::Completed => "complete",
+        InitializationRunState::Failed => "failed",
+        InitializationRunState::Interrupted => "interrupted",
+        InitializationRunState::Conflict => "conflict",
+    }
+}
+
+fn percent_for_phase(phase: &str) -> u8 {
+    match phase {
+        "scan" => 5,
+        "plan" => 18,
+        "documents" => 34,
+        "rules" => 50,
+        "skills" => 64,
+        "install" => 78,
+        "verify" => 90,
+        "complete" => 100,
+        _ => 0,
+    }
+}
+
+fn warning_details(state: &InitializationState) -> Vec<String> {
+    state
+        .warnings
         .iter()
-        .any(|token| content.contains(token))
-    {
-        return Err(format!("文档仍是空模板或内容不足：{relative}"));
-    }
-    Ok(())
+        .map(|warning| warning.detail.clone())
+        .collect()
 }
 
-fn require_document_template(root: &Path, relative: &str, headings: &[&str]) -> Result<(), String> {
-    let content = fs::read_to_string(root.join(relative))
-        .map_err(|_| format!("缺少项目规范模板：{relative}"))?;
-    if content.lines().count() < 80 {
-        return Err(format!("项目规范模板内容不完整：{relative}"));
-    }
-    for heading in headings {
-        if !content.contains(heading) {
-            return Err(format!("项目规范模板缺少章节“{heading}”：{relative}"));
-        }
-    }
-    Ok(())
-}
-
-fn require_real_file(root: &Path, relative: &str, kind: &str) -> Result<(), String> {
-    let content = fs::read_to_string(root.join(relative))
-        .map_err(|_| format!("缺少项目专属{kind}：{relative}"))?;
-    if content
-        .chars()
-        .filter(|character| ('\u{4e00}'..='\u{9fff}').contains(character))
-        .count()
-        < 10
-    {
-        return Err(format!("{kind}不是中文实填内容：{relative}"));
-    }
-    if content.split_whitespace().collect::<String>().len() < 60
-        || content.contains("{{")
-        || content.contains("待填写")
-    {
-        return Err(format!("{kind}仍是空模板或内容不足：{relative}"));
-    }
-    Ok(())
-}
-
-fn require_project_skill(root: &Path, relative: &str) -> Result<(), String> {
-    let content = fs::read_to_string(root.join(relative))
-        .map_err(|_| format!("缺少项目专属skill：{relative}"))?;
-    let compact = content.split_whitespace().collect::<String>();
-    if content
-        .chars()
-        .filter(|character| ('\u{4e00}'..='\u{9fff}').contains(character))
-        .count()
-        < 10
-    {
-        return Err(format!("skill不是中文实填内容：{relative}"));
-    }
-    if compact.len() < 300
-        || ["{{", "待填写", "初始化扫描未发现对应证据"]
-            .iter()
-            .any(|token| content.contains(token))
-    {
-        return Err(format!("skill仍是空模板或内容不足：{relative}"));
-    }
-    for required in [
-        "metadata:",
-        "pattern:",
-        "## 项目资源",
-        "## 执行流程",
-        "## 完成 Gate",
-        "## 失败处理",
-        "CLAUDE.md",
-        "docs/",
-        ".claude/rules/",
-    ] {
-        if !content.contains(required) {
-            return Err(format!("skill缺少项目化内容“{required}”：{relative}"));
-        }
-    }
-    Ok(())
-}
-
-fn require_runtime_assets(
-    root: &Path,
-    layers: ProjectLayers,
-    database_dependency: bool,
-    database_model: bool,
-    database_connection: bool,
-    external_integration: bool,
-) -> Result<(), String> {
-    let errors = runtime_asset_errors(
-        root,
-        layers,
-        database_dependency,
-        database_model,
-        database_connection,
-        external_integration,
+fn status_from_state(state: InitializationState) -> ExistingProjectInitStatus {
+    let phase = phase_for_state(state.state).to_string();
+    let warnings = warning_details(&state);
+    let needs_attention = matches!(
+        state.state,
+        InitializationRunState::Failed
+            | InitializationRunState::Conflict
+            | InitializationRunState::Completed
     );
-    if errors.is_empty() {
-        Ok(())
+    let status = if needs_attention {
+        "needs-attention"
     } else {
-        Err(format!(
-            "项目规则与 skills 共有 {} 个校验缺口：\n- {}",
-            errors.len(),
-            errors.join("\n- ")
-        ))
-    }
-}
-
-fn runtime_asset_errors(
-    root: &Path,
-    layers: ProjectLayers,
-    database_dependency: bool,
-    database_model: bool,
-    database_connection: bool,
-    external_integration: bool,
-) -> Vec<String> {
-    let mut errors = Vec::new();
-    let mut collect = |result: Result<(), String>| {
-        if let Err(error) = result {
-            errors.push(error);
-        }
+        "incomplete"
     };
-    collect(require_real_file(
-        root,
-        ".claude/rules/README.md",
-        "规则索引",
-    ));
-    for rule in [
-        ".claude/rules/公共/开发基线.md",
-        ".claude/rules/公共/复用与影响面.md",
-        ".claude/rules/公共/事实与兜底边界.md",
-        ".claude/rules/公共/开发流程与文档同步.md",
-        ".claude/rules/公共/自测与交付.md",
-        ".claude/rules/code/doc-sync-review.md",
-    ] {
-        collect(require_real_file(root, rule, "规则"));
+    ExistingProjectInitStatus {
+        initialized: false,
+        status: status.to_string(),
+        phase: phase.clone(),
+        marker_version: None,
+        run_id: Some(state.run_id.clone()),
+        percent: percent_for_phase(&phase),
+        detail: state
+            .conflicts
+            .first()
+            .or_else(|| state.issues.first())
+            .map(|item| item.detail.clone())
+            .unwrap_or_else(|| "已有未完成初始化，可从最后有效节点继续".to_string()),
+        attempt: state.attempt,
+        sequence: state.updated_at_unix_ms,
+        recoverable: !matches!(
+            state.state,
+            InitializationRunState::Conflict | InitializationRunState::Completed
+        ),
+        issues: state.issues,
+        conflicts: state.conflicts,
+        warnings,
+        artifact_totals: (state.artifact_totals.total > 0).then_some(state.artifact_totals),
     }
-    if root.join(".git").exists() {
-        collect(require_real_file(
-            root,
-            ".claude/rules/公共/Git协作与历史保护.md",
-            "规则",
-        ));
-    }
-    if layers.frontend {
-        collect(require_real_file(
-            root,
-            ".claude/rules/前端/前端工程规则.md",
-            "规则",
-        ));
-        collect(require_real_file(
-            root,
-            ".claude/rules/前端/前端验证规则.md",
-            "规则",
-        ));
-    }
-    if layers.backend {
-        collect(require_real_file(
-            root,
-            ".claude/rules/后端/API与业务实现规则.md",
-            "规则",
-        ));
-        if database_dependency {
-            collect(require_real_file(
-                root,
-                ".claude/rules/后端/持久化与迁移规则.md",
-                "规则",
-            ));
-        }
-        if external_integration {
-            collect(require_real_file(
-                root,
-                ".claude/rules/后端/异步与第三方规则.md",
-                "规则",
-            ));
-        }
-    }
-    for skill in [
-        "detail-design-writer",
-        "developer",
-        "problem-diagnose",
-        "code-review",
-        "review-feedback-handler",
-    ] {
-        collect(require_project_skill(
-            root,
-            &format!(".claude/skills/{skill}/SKILL.md"),
-        ));
-    }
-    collect(require_real_file(
-        root,
-        ".claude/skills/doc-sync-review/SKILL.md",
-        "提交前文档审核 skill",
-    ));
-    collect(require_real_file(
-        root,
-        ".claude/skills/doc-sync-review/scripts/doc-sync-gate.sh",
-        "提交前文档审核脚本",
-    ));
-    if layers.frontend {
-        collect(require_project_skill(
-            root,
-            ".claude/skills/frontend-self-test/SKILL.md",
-        ));
-    }
-    if layers.backend {
-        collect(require_project_skill(
-            root,
-            ".claude/skills/backend-self-test/SKILL.md",
-        ));
-        collect(require_project_skill(
-            root,
-            ".claude/skills/backend-log-diagnose/SKILL.md",
-        ));
-        if database_model {
-            collect(require_project_skill(
-                root,
-                ".claude/skills/ddl-review/SKILL.md",
-            ));
-        }
-        if database_connection {
-            collect(require_project_skill(
-                root,
-                ".claude/skills/database-read-diagnose/SKILL.md",
-            ));
-        }
-        if external_integration {
-            collect(require_project_skill(
-                root,
-                ".claude/skills/external-integration/SKILL.md",
-            ));
-        }
-    }
-    collect(validate_skill_designer(root));
-    errors
 }
 
-fn ensure_agent_links(root: &Path) -> Result<(), String> {
-    fs::create_dir_all(root.join(".claude/scripts")).map_err(|error| error.to_string())?;
-    fs::create_dir_all(root.join(".agents")).map_err(|error| error.to_string())?;
-    for name in ["rules", "skills", "scripts"] {
-        let target = root.join(".agents").join(name);
-        if fs::symlink_metadata(&target).is_ok() {
-            let metadata = fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
-            if !metadata.file_type().is_symlink() {
-                return Err(format!(
-                    ".agents/{name} 必须合并现有内容后软链接到 .claude/{name}"
-                ));
-            }
-            let actual = fs::read_link(&target).map_err(|error| error.to_string())?;
-            let expected = std::path::PathBuf::from(format!("../.claude/{name}"));
-            if actual != expected {
-                return Err(format!(
-                    ".agents/{name} 软链接目标错误：应为 {}，实际为 {}",
-                    expected.display(),
-                    actual.display()
-                ));
-            }
-            continue;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-            symlink(format!("../.claude/{name}"), target).map_err(|error| error.to_string())?;
-        }
-        #[cfg(not(unix))]
-        fs::create_dir_all(target).map_err(|error| error.to_string())?;
+fn attention_status(detail: impl Into<String>, code: &str) -> ExistingProjectInitStatus {
+    let detail = detail.into();
+    ExistingProjectInitStatus {
+        initialized: false,
+        status: "needs-attention".to_string(),
+        phase: "failed".to_string(),
+        marker_version: None,
+        run_id: None,
+        percent: 0,
+        detail: detail.clone(),
+        attempt: 0,
+        sequence: 0,
+        recoverable: false,
+        issues: vec![issue(code, detail, "verify")],
+        conflicts: Vec::new(),
+        warnings: Vec::new(),
+        artifact_totals: None,
     }
-    Ok(())
 }
 
-fn validate_layer_formal_outputs(root: &Path, layers: ProjectLayers) -> Result<(), String> {
-    let (label, unexpected) = match (layers.frontend, layers.backend) {
-        (false, true) => ("纯后端", FRONTEND_FORMAL_OUTPUTS),
-        (true, false) => ("纯前端", BACKEND_FORMAL_OUTPUTS),
-        _ => return Ok(()),
-    };
-    let existing = unexpected
-        .iter()
-        .filter(|relative| root.join(relative).exists())
-        .copied()
-        .collect::<Vec<_>>();
-    if existing.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "{label}项目存在另一代码层的平台正式产物，请确认项目层识别或移走这些文件后重试；平台不会自动删除用户原文档：{}",
-        existing.join("、")
-    ))
-}
-
-fn validate_agent_entry_and_link(root: &Path) -> Result<String, String> {
-    let entry = root.join("CLAUDE.md");
-    let content =
-        fs::read_to_string(&entry).map_err(|_| "缺少已按当前项目填写的 CLAUDE.md".to_string())?;
-    if content.contains("{{")
-        || content.contains("待填写")
-        || content
-            .chars()
-            .filter(|character| ('\u{4e00}'..='\u{9fff}').contains(character))
-            .count()
-            < 20
-        || content.split_whitespace().collect::<String>().len() < 120
-    {
-        return Err("CLAUDE.md 仍是空模板、泛化入口或非中文实填内容".to_string());
-    }
-    for required in ["docs/", ".claude/rules/", ".claude/skills/", "构建"] {
-        if !content.contains(required) {
-            return Err(format!("CLAUDE.md 缺少项目导航或开发命令：{required}"));
-        }
-    }
-    if ![
-        "测试",
-        "自测",
-        "TDD",
-        "mvn test",
-        "cargo test",
-        "npm test",
-        "pnpm test",
-    ]
-    .iter()
-    .any(|keyword| content.contains(keyword))
-    {
-        return Err("CLAUDE.md 缺少项目测试或自测命令导航".to_string());
-    }
-    let agents = root.join("AGENTS.md");
-    if agents.exists() || fs::symlink_metadata(&agents).is_ok() {
-        let metadata = fs::symlink_metadata(&agents).map_err(|error| error.to_string())?;
-        if !metadata.file_type().is_symlink() {
-            return Err("AGENTS.md 必须软链接到 CLAUDE.md；请先合并已有双份入口内容".to_string());
-        }
-        let actual = fs::read_link(&agents).map_err(|error| error.to_string())?;
-        if actual != Path::new("CLAUDE.md") {
-            return Err(format!(
-                "AGENTS.md 软链接目标错误：应为 CLAUDE.md，实际为 {}",
-                actual.display()
-            ));
-        }
-    } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-            symlink("CLAUDE.md", &agents).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(content)
-}
-
-fn append_initialization_marker(root: &Path, mut content: String) -> Result<(), String> {
-    let entry = root.join("CLAUDE.md");
-    if !content.contains(PLATFORM_INIT_MARKER) {
-        content.push_str(&format!("\n{PLATFORM_INIT_MARKER}\n"));
-        fs::write(&entry, &content).map_err(|error| error.to_string())?;
-    }
-    #[cfg(not(unix))]
-    fs::write(root.join("AGENTS.md"), content).map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-pub fn finalize_existing_project_initialization(
-    project_path: &str,
-) -> Result<ExistingProjectInitResult, String> {
-    let preparation = prepare_existing_project_initialization(project_path)?;
-    let root = Path::new(project_path);
-    let database_dependency = has_database_dependency(root);
-    let database_model = has_database_model_evidence(root);
-    let database_connection = has_database_connection_evidence(root);
-    let api = has_api_evidence(root);
-    let callback = has_callback_evidence(root);
-    let boundary_enum = has_boundary_enum_evidence(root);
-    let external_integration = has_external_integration_evidence(root);
-    validate_layer_formal_outputs(root, preparation.layers)?;
-    let mut required = Vec::new();
-    if preparation.layers.frontend {
-        required.extend([
-            "docs/frontend/MOC.md",
-            "docs/frontend/latest/index.md",
-            "docs/frontend/latest/业务/业务功能总览.md",
-            "docs/frontend/latest/系统架构/前端架构.md",
-            "docs/frontend/latest/公共能力/组件与公共能力.md",
-        ]);
-    }
-    if preparation.layers.backend {
-        required.extend([
-            "docs/backend/MOC.md",
-            "docs/backend/latest/index.md",
-            "docs/backend/latest/业务/业务功能总览.md",
-            "docs/backend/latest/系统架构/系统架构详解.md",
-        ]);
-        if api {
-            required.push("docs/backend/latest/接口文档/API接口总览.md");
-        }
-        if callback {
-            required.push("docs/backend/latest/接口文档/回调接口总览.md");
-        }
-        if boundary_enum {
-            required.push("docs/backend/latest/接口文档/枚举值总览.md");
-        }
-        if database_model {
-            required.push("docs/backend/latest/接口文档/物理模型总览.md");
-        }
-        if external_integration {
-            required.push("docs/backend/latest/第三方集成/第三方集成总览.md");
-        }
-    }
-    for relative in &required {
-        file_is_real_document(root, relative)?;
-    }
-    if preparation.layers.frontend {
-        require_document_template(
-            root,
-            "docs/frontend/latest/规范约束/详设文档模板.md",
-            &["前置材料", "变更摘要", "自测"],
-        )?;
-        require_document_template(
-            root,
-            "docs/frontend/latest/规范约束/开发进度文档模板.md",
-            &["完成状态", "用户反馈", "文档同步"],
-        )?;
-    }
-    if preparation.layers.backend {
-        require_document_template(
-            root,
-            "docs/backend/latest/规范约束/详设文档模板.md",
-            &["前置材料", "变更摘要", "自测"],
-        )?;
-        require_document_template(
-            root,
-            "docs/backend/latest/规范约束/开发进度文档模板.md",
-            &["完成状态", "用户反馈", "文档同步"],
-        )?;
-        if preparation.layers.frontend {
-            require_document_template(
-                root,
-                "docs/backend/latest/规范约束/前端接入说明模板.md",
-                &["变更概览", "接口清单", "联调验收"],
-            )?;
-        }
-    }
-    require_runtime_assets(
-        root,
-        preparation.layers,
-        database_dependency,
-        database_model,
-        database_connection,
-        external_integration,
-    )?;
-    validate_project_rule_evidence(root, preparation.layers)?;
-    ensure_agent_links(root)?;
-    let entry_content = validate_agent_entry_and_link(root)?;
-    remove_initialization_reference_bundle(root)?;
-    append_initialization_marker(root, entry_content)?;
-    Ok(ExistingProjectInitResult {
-        project_path: preparation.project_path,
-        layers: preparation.layers,
-        detected_stack: preparation.detected_stack,
-        generated: required.into_iter().map(str::to_string).collect(),
-    })
-}
-
-/// 初始化状态只认 Agent 入口中的平台机器标识，不使用浏览器缓存推测。
 pub fn existing_project_init_status(
     project_path: &str,
 ) -> Result<ExistingProjectInitStatus, String> {
@@ -1598,52 +250,201 @@ pub fn existing_project_init_status(
     if !root.is_dir() {
         return Err("项目路径不存在或不是目录".to_string());
     }
-    let initialized = fs::read_to_string(root.join("CLAUDE.md"))
-        .map(|content| content.contains(PLATFORM_INIT_MARKER))
+    let manifest_path = root.join("docs/ai/.initialization-manifest.json");
+    if manifest_path.exists() {
+        let manifest = match load_ownership_manifest(root) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => {
+                return Ok(attention_status(
+                    "v4 所有权 manifest 消失，无法确认初始化结果",
+                    "manifest.missing",
+                ));
+            }
+            Err(error) => {
+                return Ok(attention_status(error, "manifest.invalid"));
+            }
+        };
+        let issues = verify_ownership_manifest(root, &manifest);
+        if !issues.is_empty() {
+            let detail = issues
+                .iter()
+                .map(|item| format!("{}: {}", item.code, item.detail))
+                .collect::<Vec<_>>()
+                .join("；");
+            let mut status = attention_status(detail, "manifest.verification-failed");
+            status.issues = issues;
+            status.run_id = Some(manifest.run_id);
+            status.artifact_totals = Some(manifest.artifact_totals);
+            return Ok(status);
+        }
+        return Ok(ExistingProjectInitStatus {
+            initialized: true,
+            status: "current-v4".to_string(),
+            phase: "complete".to_string(),
+            marker_version: Some("v4".to_string()),
+            run_id: Some(manifest.run_id),
+            percent: 100,
+            detail: "初始化已完成并通过所有权校验".to_string(),
+            attempt: 0,
+            sequence: manifest.completed_at_unix_ms,
+            recoverable: false,
+            issues: Vec::new(),
+            conflicts: manifest.conflicts,
+            warnings: manifest
+                .diagnostics
+                .iter()
+                .map(|warning| warning.detail.clone())
+                .collect(),
+            artifact_totals: Some(manifest.artifact_totals),
+        });
+    }
+
+    match load_initialization_state(root) {
+        Ok(Some(state)) => return Ok(status_from_state(state)),
+        Ok(None) => {}
+        Err(error) => return Ok(attention_status(error, "state.invalid")),
+    }
+
+    let has_v3_marker = fs::read_to_string(root.join("CLAUDE.md"))
+        .map(|content| content.contains(PLATFORM_INIT_V3_MARKER))
         .unwrap_or(false);
+    if has_v3_marker {
+        return Ok(ExistingProjectInitStatus {
+            initialized: true,
+            status: "legacy-v3".to_string(),
+            phase: "scan".to_string(),
+            marker_version: Some("v3".to_string()),
+            run_id: None,
+            percent: 0,
+            detail: "检测到旧版 v3 标记；文件保持不变，可显式启动 v4 初始化".to_string(),
+            attempt: 0,
+            sequence: 0,
+            recoverable: true,
+            issues: Vec::new(),
+            conflicts: Vec::new(),
+            warnings: Vec::new(),
+            artifact_totals: None,
+        });
+    }
+    let has_unowned_v4_block = ["CLAUDE.md", "AGENTS.md"].iter().any(|relative| {
+        fs::read_to_string(root.join(relative))
+            .map(|content| content.contains(MANAGED_BLOCK_START))
+            .unwrap_or(false)
+    });
+    if has_unowned_v4_block {
+        return Ok(attention_status(
+            "发现 v4 托管入口但缺少 completed manifest，无法证明文件所有权",
+            "manifest.entry-without-ownership",
+        ));
+    }
     Ok(ExistingProjectInitStatus {
-        initialized,
-        marker_version: initialized.then(|| "v3".to_string()),
+        initialized: false,
+        status: "not-initialized".to_string(),
+        phase: "scan".to_string(),
+        marker_version: None,
+        run_id: None,
+        percent: 0,
+        detail: "尚未初始化".to_string(),
+        attempt: 0,
+        sequence: 0,
+        recoverable: true,
+        issues: Vec::new(),
+        conflicts: Vec::new(),
+        warnings: Vec::new(),
+        artifact_totals: None,
+    })
+}
+
+/// Finalize is now a read-only compatibility command. Installation and verification happen
+/// atomically in the v4 orchestrator; this function never calls prepare or recreates v3 assets.
+pub fn finalize_existing_project_initialization(
+    project_path: &str,
+) -> Result<ExistingProjectInitResult, String> {
+    let status = existing_project_init_status(project_path)?;
+    if status.status != "current-v4" {
+        return Err(format!(
+            "项目不是已验证的 current-v4 状态：{}",
+            status.detail
+        ));
+    }
+    let root = PathBuf::from(project_path);
+    let manifest = load_ownership_manifest(&root)?
+        .ok_or_else(|| "current-v4 状态缺少所有权 manifest".to_string())?;
+    let layers = project_layers(&root);
+    Ok(ExistingProjectInitResult {
+        project_path: root.to_string_lossy().to_string(),
+        status: status.status,
+        phase: status.phase,
+        run_id: manifest.run_id,
+        percent: 100,
+        detail: status.detail,
+        attempt: status.attempt,
+        sequence: status.sequence,
+        recoverable: false,
+        issues: status.issues,
+        conflicts: status.conflicts,
+        warnings: status.warnings,
+        artifact_totals: manifest.artifact_totals,
+        layers: Some(layers),
+        detected_stack: detected_stack(&root, layers),
+        generated: manifest
+            .artifacts
+            .into_iter()
+            .map(|artifact| artifact.path)
+            .collect(),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{runtime_asset_errors, ProjectLayers};
+    use super::{existing_project_init_status, prepare_existing_project_initialization};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn runtime_asset_validation_reports_all_missing_project_skills_at_once() {
+    fn fixture(name: &str) -> std::path::PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("vibe-runtime-assets-{suffix}"));
-        fs::create_dir_all(&root).expect("temp project");
+        let root = std::env::temp_dir().join(format!("vibe-existing-{name}-{suffix}"));
+        fs::create_dir_all(&root).expect("fixture root");
+        root
+    }
 
-        let errors = runtime_asset_errors(
-            &root,
-            ProjectLayers {
-                frontend: false,
-                backend: true,
-            },
-            true,
-            true,
-            true,
-            true,
+    #[test]
+    fn prepare_is_discovery_only() {
+        let root = fixture("pure-prepare");
+        fs::write(root.join("package.json"), r#"{"dependencies":{"vue":"3"}}"#).expect("package");
+        let before = fs::read_dir(&root).expect("before").count();
+        let preparation =
+            prepare_existing_project_initialization(&root.to_string_lossy()).expect("prepare");
+        let after = fs::read_dir(&root).expect("after").count();
+
+        assert!(preparation.layers.frontend);
+        assert_eq!(before, after);
+        assert!(!root.join(".claude").exists());
+        assert!(!root.join(".agents").exists());
+        assert!(!root.join("docs").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn v3_marker_is_read_only_legacy_classification() {
+        let root = fixture("legacy");
+        fs::write(
+            root.join("CLAUDE.md"),
+            "<!-- vibe-coding-platform:init:v3 -->\n",
+        )
+        .expect("legacy entry");
+        let status = existing_project_init_status(&root.to_string_lossy()).expect("status");
+
+        assert_eq!(status.status, "legacy-v3");
+        assert_eq!(status.marker_version.as_deref(), Some("v3"));
+        assert_eq!(
+            fs::read_to_string(root.join("CLAUDE.md")).expect("unchanged"),
+            "<!-- vibe-coding-platform:init:v3 -->\n"
         );
-
-        let joined = errors.join("\n");
-        assert!(joined.contains("backend-log-diagnose"));
-        assert!(joined.contains("ddl-review"));
-        assert!(joined.contains("database-read-diagnose"));
-        assert!(joined.contains("external-integration"));
-        assert!(
-            errors.len() > 4,
-            "应一次返回全部缺口，而不是遇到首个错误就停止"
-        );
-
-        fs::remove_dir_all(root).expect("cleanup temp project");
+        assert!(!root.join("docs").exists());
+        let _ = fs::remove_dir_all(root);
     }
 }

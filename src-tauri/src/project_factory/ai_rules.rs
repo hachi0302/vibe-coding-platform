@@ -1281,32 +1281,6 @@ pub(super) fn write_skill_designer(root: &Path) -> Result<(), String> {
     write_file(&base.join("evals/evals.json"), SKILL_DESIGNER_EVALS)
 }
 
-pub(super) fn validate_skill_designer(root: &Path) -> Result<(), String> {
-    let base = root.join(".claude/skills/skill-designer");
-    for (relative, expected) in [
-        ("SKILL.md", SKILL_DESIGNER),
-        ("references/decision-tree.md", SKILL_DESIGNER_DECISION_TREE),
-        ("references/generator-example.md", SKILL_DESIGNER_GENERATOR),
-        ("references/inversion-example.md", SKILL_DESIGNER_INVERSION),
-        ("references/pipeline-example.md", SKILL_DESIGNER_PIPELINE),
-        ("references/reviewer-example.md", SKILL_DESIGNER_REVIEWER),
-        (
-            "references/tool-wrapper-example.md",
-            SKILL_DESIGNER_TOOL_WRAPPER,
-        ),
-        ("evals/evals.json", SKILL_DESIGNER_EVALS),
-    ] {
-        let actual = fs::read_to_string(base.join(relative))
-            .map_err(|_| format!("缺少平台 skill-designer 文件：{relative}"))?;
-        if actual != expected {
-            return Err(format!(
-                "skill-designer 文件与平台内置模板不一致：{relative}"
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn write_runtime_skills(root: &Path, request: &CreateProjectRequest) -> Result<(), String> {
     let layers = project_layers(root);
     write_skill_designer(root)?;

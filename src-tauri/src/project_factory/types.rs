@@ -480,8 +480,26 @@ impl Default for OwnershipManifest {
 #[serde(rename_all = "camelCase")]
 pub struct ExistingProjectInitResult {
     pub project_path: String,
-    pub layers: super::docs::ProjectLayers,
+    pub status: String,
+    pub phase: String,
+    pub run_id: String,
+    pub percent: u8,
+    pub detail: String,
+    pub attempt: u32,
+    pub sequence: u64,
+    pub recoverable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<ValidationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<ValidationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    pub artifact_totals: ArtifactTotals,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layers: Option<super::docs::ProjectLayers>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detected_stack: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated: Vec<String>,
 }
 
@@ -499,16 +517,46 @@ pub struct ExistingProjectInitPreparation {
 #[serde(rename_all = "camelCase")]
 pub struct ExistingProjectInitStatus {
     pub initialized: bool,
+    pub status: String,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub percent: u8,
+    pub detail: String,
+    pub attempt: u32,
+    pub sequence: u64,
+    pub recoverable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<ValidationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<ValidationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_totals: Option<ArtifactTotals>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExistingProjectInitializationProgress {
     pub project_path: String,
+    pub run_id: Option<String>,
     pub phase: String,
     pub percent: u8,
     pub detail: String,
+    pub attempt: u32,
+    pub sequence: u64,
+    pub recoverable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<ValidationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<ValidationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_totals: Option<ArtifactTotals>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

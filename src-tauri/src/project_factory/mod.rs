@@ -23,7 +23,9 @@ pub use existing::{
     prepare_existing_project_initialization,
 };
 pub use initialization::{
-    build_headless_initialization_prompt, initialize_existing_project_with_agent_progress,
+    build_headless_initialization_prompt, build_v4_stage_prompt, evaluate_agent_stage,
+    initialize_existing_project_with_agent_progress, AgentRunOutcome, InitializationStage,
+    RepairDecision, RepairTracker, StageDecision,
 };
 pub use initialization_state::{
     install_managed_entries, install_planned_artifacts, load_initialization_state,

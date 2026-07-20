@@ -1,6 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -9,75 +11,391 @@ use tauri::Emitter;
 
 use crate::agent_command::{build_agent_process, AgentCommand};
 
-use super::existing::{
-    finalize_existing_project_initialization, prepare_existing_project_initialization,
+use super::existing::prepare_existing_project_initialization;
+use super::types::{
+    ArtifactKind, ArtifactPlan, ExistingProjectInitResult, ExistingProjectInitializationProgress,
+    InitializationRunState, InitializationState, InventoryFile, ProjectCommand, ProjectInventory,
+    ProjectModule, SensitiveFinding, ValidationIssue,
 };
-use super::types::{ExistingProjectInitResult, ExistingProjectInitializationProgress};
 
 const MAX_REPAIR_ATTEMPTS: usize = 2;
+const INVENTORY_SNAPSHOT_FILE: &str = "inventory.json";
+static PROGRESS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Copy)]
-enum InitializationStage {
-    Documents,
-    RulesAndSkills,
-    Repair,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredProjectInventory {
+    schema_version: u32,
+    project_name: String,
+    frontend: bool,
+    backend: bool,
+    modules: Vec<ProjectModule>,
+    source_roots: Vec<String>,
+    files: Vec<InventoryFile>,
+    commands: Vec<ProjectCommand>,
+    risk_keys: Vec<SensitiveFinding>,
 }
 
-impl InitializationStage {
-    fn instruction(self) -> &'static str {
-        match self {
-            Self::Documents => {
-                "本轮只完成项目分析与长期文档：完整读取项目后，按真实代码填充命中的前端/后端长期文档；保留既有真实资料，不修改业务代码。"
-            }
-            Self::RulesAndSkills => {
-                "本轮完成项目入口、规则与项目专属 skills：先读取刚生成的长期文档和真实代码，再填充 CLAUDE.md、rules 与 skills；不得修改业务代码。"
-            }
-            Self::Repair => {
-                "本轮是产物修复：只补齐校验指出的缺口并重新自检，不重写已经合格的真实文档，不修改业务代码。"
-            }
+impl From<&ProjectInventory> for StoredProjectInventory {
+    fn from(inventory: &ProjectInventory) -> Self {
+        Self {
+            schema_version: inventory.schema_version,
+            project_name: inventory.project_name.clone(),
+            frontend: inventory.layers.frontend,
+            backend: inventory.layers.backend,
+            modules: inventory.modules.clone(),
+            source_roots: inventory.source_roots.clone(),
+            files: inventory.files.clone(),
+            commands: inventory.commands.clone(),
+            risk_keys: inventory.risk_keys.clone(),
         }
     }
 }
 
-/// 给无 UI、无会话持久化的 Agent CLI 使用。初始化过程不得依赖聊天框、`/init` 回显或
-/// 模型自行声明 checkpoint；是否完成只由后端的真实文件校验决定。
-pub fn build_headless_initialization_prompt(base: &str, validation_error: Option<&str>) -> String {
-    let repair = validation_error
-        .map(|error| {
+impl From<StoredProjectInventory> for ProjectInventory {
+    fn from(inventory: StoredProjectInventory) -> Self {
+        Self {
+            schema_version: inventory.schema_version,
+            project_name: inventory.project_name,
+            layers: super::docs::ProjectLayers {
+                frontend: inventory.frontend,
+                backend: inventory.backend,
+            },
+            modules: inventory.modules,
+            source_roots: inventory.source_roots,
+            files: inventory.files,
+            commands: inventory.commands,
+            risk_keys: inventory.risk_keys,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitializationStage {
+    Scan,
+    Plan,
+    Documents,
+    Rules,
+    Skills,
+    Install,
+    Verify,
+    Complete,
+    Failed,
+    Interrupted,
+    Conflict,
+}
+
+impl InitializationStage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Scan => "scan",
+            Self::Plan => "plan",
+            Self::Documents => "documents",
+            Self::Rules => "rules",
+            Self::Skills => "skills",
+            Self::Install => "install",
+            Self::Verify => "verify",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::Conflict => "conflict",
+        }
+    }
+
+    fn kind(self) -> Option<ArtifactKind> {
+        match self {
+            Self::Documents => Some(ArtifactKind::Document),
+            Self::Rules => Some(ArtifactKind::Rule),
+            Self::Skills => Some(ArtifactKind::Skill),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunOutcome {
+    pub exit_code: Option<i32>,
+    pub diagnostic_tail: String,
+}
+
+impl AgentRunOutcome {
+    pub fn success() -> Self {
+        Self {
+            exit_code: Some(0),
+            diagnostic_tail: String::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn non_zero(exit_code: i32, diagnostic: impl Into<String>) -> Self {
+        Self {
+            exit_code: Some(exit_code),
+            diagnostic_tail: diagnostic.into(),
+        }
+    }
+
+    fn succeeded(&self) -> bool {
+        self.exit_code == Some(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageDecision {
+    Advance,
+    AdvanceWithWarning,
+    Repair,
+}
+
+pub fn evaluate_agent_stage(
+    outcome: &AgentRunOutcome,
+    issues: &[ValidationIssue],
+) -> StageDecision {
+    if !issues.is_empty() {
+        StageDecision::Repair
+    } else if outcome.succeeded() {
+        StageDecision::Advance
+    } else {
+        StageDecision::AdvanceWithWarning
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairDecision {
+    Retry,
+    NoProgress,
+    Exhausted,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepairTracker {
+    max_attempts: usize,
+    attempts: usize,
+    previous_fingerprint: Option<String>,
+    previous_digest: Option<String>,
+}
+
+impl RepairTracker {
+    pub fn new(max_attempts: usize) -> Self {
+        Self {
+            max_attempts,
+            attempts: 0,
+            previous_fingerprint: None,
+            previous_digest: None,
+        }
+    }
+
+    pub fn observe(&mut self, issues: &[ValidationIssue], staged_digest: &str) -> RepairDecision {
+        let fingerprint = issue_fingerprint(issues);
+        if self.previous_fingerprint.as_deref() == Some(&fingerprint)
+            && self.previous_digest.as_deref() == Some(staged_digest)
+        {
+            return RepairDecision::NoProgress;
+        }
+        if self.attempts >= self.max_attempts {
+            return RepairDecision::Exhausted;
+        }
+        self.attempts += 1;
+        self.previous_fingerprint = Some(fingerprint);
+        self.previous_digest = Some(staged_digest.to_string());
+        RepairDecision::Retry
+    }
+}
+
+fn issue_fingerprint(issues: &[ValidationIssue]) -> String {
+    let mut keys = issues
+        .iter()
+        .map(|issue| {
             format!(
-                "\n上一次产物校验失败：\n{error}\n只补齐校验指出的缺口；不要删除、覆盖或泛化改写已经存在的真实项目资料。\n"
+                "{}|{}|{}|{}",
+                issue.code,
+                issue.path.as_deref().unwrap_or_default(),
+                issue.stage.as_deref().unwrap_or_default(),
+                issue.detail
             )
         })
-        .unwrap_or_default();
-    format!(
-        r#"你正在执行 Vibe Coding Platform 的后台非会话任务。用户界面不会展示你的内部思考、命令或交互，因此不要询问用户、不要等待确认，也不要创建聊天会话。
+        .collect::<Vec<_>>();
+    keys.sort();
+    super::inventory::content_sha256(keys.join("\n").as_bytes())
+}
 
-总要求：
-- 完整读取项目根目录、源码、构建与测试脚本、配置、已有 docs、CLAUDE.md、AGENTS.md、.claude 和 .agents，再根据真实证据生成产物。
-- 第一动作必须逐份读取 `.vibe-coding-platform/init-reference-v3/` 下命中当前代码层的文档、规则与 skill 模板；正式产物保持模板章节、表格和 Gate，但必须用目标项目真实内容填满，禁止复制空模板。
-- 所有面向用户的新文档、规则和项目专属 skill 必须使用中文；技术名、类名、方法名、文件路径可保留原文。
-- 不得修改业务代码，不得删除或覆盖既有真实业务文档、规则和 skill；仅补缺或合并平台旧空壳。
-- 后端固定生成中文实填的业务功能总览与系统架构；只有扫描到真实服务端 Controller / Router / Handler 时才生成 `API接口总览.md`，不得把前端路由当成 API；存在真实回调入口或跨边界枚举证据时才生成对应总览。条件不成立时不创建空文件。
-- 检测到真实第三方客户端或 SDK 调用时，生成 `docs/backend/latest/第三方集成/第三方集成总览.md`、项目化 `.claude/rules/后端/异步与第三方规则.md` 与 `.claude/skills/external-integration/SKILL.md`；三者必须引用同一条真实集成链路。
-- 存在数据库实体、迁移或 schema 证据时生成物理模型总览，内容是表用途以及字段、类型、是否为空、含义、约束；前端项目不得生成后端或数据库文档。
-- 必须保留平台安装的 skill-designer 原始目录和字节，不得改写 skill-designer。
-- Worktree 是平台产品能力，不得生成 worktree skill；Git/worktree 纪律只在项目真实存在 Git 时写入 Git 协作规则或入口。
-- 不得生成运维、部署、监控或 CI 运维文档和 skill；发现实体、迁移或 schema 证据时用 skill-designer 生成项目专属 `ddl-review` skill。所有后端项目都生成项目专属 `backend-log-diagnose` skill；控制台、本地文件、容器、集中日志和远程日志只登记真实可用来源，未配置来源明确写不可用及接入条件。
-- 检测到数据库连接配置时生成项目专属 `database-read-diagnose` skill，只记录配置文件、配置键与脱敏状态，禁止写入账号、密码、token 或连接串；只有安全只读探测成功才标记“可用”，否则写“有证据但需配置 / 不适用”。任何数据库诊断只允许 SELECT / SHOW / DESCRIBE / EXPLAIN 等只读动作。
-- 禁止留下 {{占位符}}、待填写、空表和“以后补充”等空壳；正式详设/进度/前端接入模板中的模板占位符除外。
-- 禁止吞异常、伪造默认值、模拟成功、自动降级或猜测配置等兜底逻辑。
+#[cfg(test)]
+pub fn resume_stage(state: InitializationRunState) -> InitializationStage {
+    match state {
+        InitializationRunState::Preflight => InitializationStage::Scan,
+        InitializationRunState::SnapshotReady => InitializationStage::Plan,
+        InitializationRunState::PlanReady => InitializationStage::Documents,
+        InitializationRunState::DocumentsReady => InitializationStage::Rules,
+        InitializationRunState::RulesReady => InitializationStage::Skills,
+        InitializationRunState::SkillsReady => InitializationStage::Install,
+        InitializationRunState::Installing => InitializationStage::Install,
+        InitializationRunState::Verifying | InitializationRunState::Completed => {
+            InitializationStage::Verify
+        }
+        InitializationRunState::Failed
+        | InitializationRunState::Interrupted
+        | InitializationRunState::Conflict => InitializationStage::Scan,
+    }
+}
 
-{base}
-{repair}
-完成后直接退出。完成状态由平台读取并校验真实文件决定，不需要输出任何工作流检查点。"#
+fn active_state(state: InitializationRunState) -> bool {
+    !matches!(
+        state,
+        InitializationRunState::Completed
+            | InitializationRunState::Failed
+            | InitializationRunState::Interrupted
+            | InitializationRunState::Conflict
     )
 }
 
-fn stage_prompt(base: &str, stage: InitializationStage, validation_error: Option<&str>) -> String {
+pub fn interrupt_stale_state(state: &mut InitializationState, current_pid: u32) -> bool {
+    if active_state(state.state)
+        && state
+            .process_id
+            .is_some_and(|process_id| process_id != current_pid)
+    {
+        state.state = InitializationRunState::Interrupted;
+        state.process_id = None;
+        state.issues.push(ValidationIssue {
+            code: "run.interrupted".to_string(),
+            detail: "检测到上一次初始化进程已经结束，可从最后有效 checkpoint 恢复".to_string(),
+            path: None,
+            stage: Some("interrupted".to_string()),
+        });
+        true
+    } else {
+        false
+    }
+}
+
+pub fn sanitize_user_intent(intent: &str, project_path: &str) -> String {
+    let mut sanitized = intent.replace(project_path, "<project-root>");
+    if let Ok(canonical) = fs::canonicalize(project_path) {
+        sanitized = sanitized.replace(&canonical.to_string_lossy().to_string(), "<project-root>");
+    }
+    sanitized
+}
+
+fn artifact_kind_name(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Document => "document",
+        ArtifactKind::Rule => "rule",
+        ArtifactKind::Skill => "skill",
+    }
+}
+
+const ARTIFACT_PLAN_SCHEMA: &str = r#"{
+  "schemaVersion": 1,
+  "projectName": "inventory.projectName",
+  "artifacts": [{
+    "id": "english-kebab-case-logical-id",
+    "kind": "document | rule | skill",
+    "layer": "common | frontend | backend | database | integration",
+    "topic": "project-specific-topic",
+    "targetPath": "allowed English ASCII kebab-case path",
+    "rationale": "Chinese project-specific reason",
+    "evidence": [{"path": "real/relative/path", "symbol": "realSymbol"}],
+    "covers": ["project-specific-capability"],
+    "requiredSections": ["Chinese required section"]
+  }],
+  "exclusions": [{
+    "target": "conditional-area",
+    "reason": "Chinese evidence-based exclusion",
+    "evidence": [{"path": "real/relative/path", "symbol": "realSymbol"}]
+  }]
+}"#;
+
+pub fn build_v4_stage_prompt(
+    stage: InitializationStage,
+    inventory: &ProjectInventory,
+    plan: Option<&ArtifactPlan>,
+    issues: &[ValidationIssue],
+) -> String {
+    let inventory_json = serde_json::to_string_pretty(inventory)
+        .unwrap_or_else(|_| "{\"error\":\"inventory serialization failed\"}".to_string());
+    let issue_json = serde_json::to_string_pretty(issues).unwrap_or_else(|_| "[]".to_string());
+    let stage_contract = match stage {
+        InitializationStage::Plan => format!(
+            "请只创建 `.vibe-coding-platform/artifact-plan.json`，严格匹配以下 exact JSON schema：\n{ARTIFACT_PLAN_SCHEMA}"
+        ),
+        InitializationStage::Documents
+        | InitializationStage::Rules
+        | InitializationStage::Skills => {
+            let kind = stage.kind().expect("generation stage has a kind");
+            let scoped = plan
+                .map(|plan| {
+                    plan.artifacts
+                        .iter()
+                        .filter(|item| item.kind == kind)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let scoped_json = serde_json::to_string_pretty(&scoped)
+                .unwrap_or_else(|_| "[]".to_string());
+            format!(
+                "本阶段类型：{}。只允许编辑本阶段 JSON 中的 targetPath，禁止编辑其他计划产物：\n{}",
+                artifact_kind_name(kind), scoped_json
+            )
+        }
+        _ => "该阶段不调用智能体。".to_string(),
+    };
     format!(
-        "{}\n\n当前阶段强制要求：{}",
-        build_headless_initialization_prompt(base, validation_error),
-        stage.instruction()
+        r#"你正在隔离的过滤工作区中执行无交互的项目初始化阶段 `{stage}`。不要询问用户或等待确认。
+
+{stage_contract}
+
+质量与安全契约：
+- 所有产物目录与文件名使用 English ASCII kebab-case；SKILL.md 为唯一允许的固定大写文件名，正文必须中文实填。
+- 每条关键结论必须给出真实 path + symbol 证据；先识别既有框架、入口和可复用资产，明确复用优先、禁止替代方案、影响面与真实验证命令。
+- 只有发现前端证据才规划前端路由、状态、API 客户端、类型、组件、布局、composable、directive、主题、测试等；只有发现后端证据才规划模块、API、回调、枚举、业务生命周期等。
+- 只有发现数据库证据才规划物理模型、约束与迁移；只有发现第三方集成证据才规划集成边界、失败处理与安全约束。条件不成立必须在 exclusions 中用证据说明，不得创建空壳。
+- rules 必须项目专属，包含触发路由、路径/符号证据、复用优先、禁止替代、影响面、历史陷阱和可执行验证。
+- skills 只用于本项目复杂或高风险工作流，包含明确触发条件、前置证据、步骤、失败处理和验证；禁止通用 developer/debug/review/worktree/skill-designer/bug-fix/refactor 套件。
+- 禁止敏感值、占位符、空表、杜撰命令、杜撰框架、业务代码修改、源码重写、Git hook/config 修改、固定 IPS 路径或复制 IPS 目录结构。IPS 仅是质量基准。
+- 只能读取工作区内文件并写入本阶段允许目标；不得访问或提及原始项目的绝对路径。
+
+项目清单（已脱敏）：
+{inventory_json}
+
+上次校验问题（仅修复这些真实问题，不重写已合格产物）：
+{issue_json}
+
+完成后直接退出；平台将独立校验文件，退出码不代表完成。"#,
+        stage = stage.name(),
+    )
+}
+
+pub fn aggregate_stage_failure(
+    stage: InitializationStage,
+    issues: &[ValidationIssue],
+    outcome: &AgentRunOutcome,
+) -> String {
+    let exit = outcome
+        .exit_code
+        .map(|code| format!("exit code {code}"))
+        .unwrap_or_else(|| "exit code unavailable".to_string());
+    let mut parts = vec![format!("{} stage failed ({exit})", stage.name())];
+    if !outcome.diagnostic_tail.trim().is_empty() {
+        parts.push(outcome.diagnostic_tail.trim().to_string());
+    }
+    parts.extend(issues.iter().map(|issue| {
+        let path = issue
+            .path
+            .as_deref()
+            .map(|path| format!(" [{path}]"))
+            .unwrap_or_default();
+        format!("{}{}: {}", issue.code, path, issue.detail)
+    }));
+    parts.join("；")
+}
+
+/// Compatibility wrapper retained for callers that still build a headless prompt directly.
+/// V4 orchestration uses `build_v4_stage_prompt`, whose schema is owned by the backend.
+pub fn build_headless_initialization_prompt(base: &str, validation_error: Option<&str>) -> String {
+    let repair = validation_error
+        .map(|error| format!("\n校验问题：{error}"))
+        .unwrap_or_default();
+    format!(
+        "后台非会话任务；不要询问用户或等待确认。\n{base}{repair}\n完成状态只由平台文件校验决定。"
     )
 }
 
@@ -103,18 +421,14 @@ fn build_codex_process(project_path: &str, prompt: &str) -> std::process::Comman
     build_agent_process(project_path, &command, false)
 }
 
-fn run_codex(project_path: &str, prompt: &str) -> Result<(), String> {
+fn run_codex(project_path: &str, prompt: &str) -> Result<AgentRunOutcome, String> {
     let output = build_codex_process(project_path, prompt)
         .output()
         .map_err(|error| format!("无法启动 Codex CLI：{error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Codex 后台初始化失败：{}",
-            concise_cli_error(&output.stderr)
-        ))
-    }
+    Ok(AgentRunOutcome {
+        exit_code: output.status.code(),
+        diagnostic_tail: concise_cli_error(&output.stderr),
+    })
 }
 
 fn build_claude_process(project_path: &str, prompt: &str) -> std::process::Command {
@@ -128,21 +442,17 @@ fn build_claude_process(project_path: &str, prompt: &str) -> std::process::Comma
     build_agent_process(project_path, &command, false)
 }
 
-fn run_claude(project_path: &str, prompt: &str) -> Result<(), String> {
+fn run_claude(project_path: &str, prompt: &str) -> Result<AgentRunOutcome, String> {
     let output = build_claude_process(project_path, prompt)
         .output()
         .map_err(|error| format!("无法启动 Claude Code：{error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Claude Code 后台初始化失败：{}",
-            concise_cli_error(&output.stderr)
-        ))
-    }
+    Ok(AgentRunOutcome {
+        exit_code: output.status.code(),
+        diagnostic_tail: concise_cli_error(&output.stderr),
+    })
 }
 
-fn run_agent(agent: &str, project_path: &str, prompt: &str) -> Result<(), String> {
+fn run_agent(agent: &str, project_path: &str, prompt: &str) -> Result<AgentRunOutcome, String> {
     match agent {
         "codex" => run_codex(project_path, prompt),
         "claude" => run_claude(project_path, prompt),
@@ -150,230 +460,1044 @@ fn run_agent(agent: &str, project_path: &str, prompt: &str) -> Result<(), String
     }
 }
 
-fn stage_start_progress(stage: InitializationStage) -> (&'static str, u8, &'static str) {
-    match stage {
-        InitializationStage::Documents => ("documents", 18, "正在生成并填充项目文档"),
-        InitializationStage::RulesAndSkills => ("rules", 62, "正在生成项目规则与 skills"),
-        InitializationStage::Repair => ("validate", 92, "正在修复产物校验发现的缺口"),
-    }
+trait AgentRunner {
+    fn run(
+        &mut self,
+        agent: &str,
+        workspace: &Path,
+        prompt: &str,
+        heartbeat: &mut dyn FnMut(),
+    ) -> Result<AgentRunOutcome, String>;
 }
 
-fn progress_for_artifact_changes(stage: InitializationStage, changed_files: usize) -> u8 {
-    match stage {
-        InitializationStage::Documents => 18 + (changed_files.saturating_mul(4).min(38) as u8),
-        InitializationStage::RulesAndSkills => 62 + (changed_files.saturating_mul(3).min(22) as u8),
-        InitializationStage::Repair => 92 + (changed_files.saturating_mul(2).min(6) as u8),
-    }
-}
+struct ProcessAgentRunner;
 
-fn progress_for_stage_activity(
-    stage: InitializationStage,
-    changed_files: usize,
-    elapsed_seconds: u64,
-) -> u8 {
-    let artifact_progress = progress_for_artifact_changes(stage, changed_files);
-    let (start, cap) = match stage {
-        InitializationStage::Documents => (18, 56),
-        InitializationStage::RulesAndSkills => (62, 84),
-        InitializationStage::Repair => (92, 98),
-    };
-    // Agent 可能先长时间分析、最后一次性落盘。活动进度只在当前阶段内移动，
-    // 真正跨阶段仍以 Agent 退出和产物校验通过为准。
-    let activity_progress = start + (elapsed_seconds / 5).min(u64::from(cap - start)) as u8;
-    artifact_progress.max(activity_progress).min(cap)
-}
-
-type ArtifactState = HashMap<PathBuf, (u64, Option<SystemTime>)>;
-
-fn collect_artifacts(path: &Path, files: &mut ArtifactState) {
-    let Ok(entries) = fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if metadata.is_dir() {
-            collect_artifacts(&path, files);
-        } else if metadata.is_file() {
-            files.insert(path, (metadata.len(), metadata.modified().ok()));
-        }
-    }
-}
-
-fn artifact_snapshot(root: &Path, stage: InitializationStage) -> ArtifactState {
-    let mut files = HashMap::new();
-    match stage {
-        InitializationStage::Documents => {
-            collect_artifacts(&root.join("docs/frontend"), &mut files);
-            collect_artifacts(&root.join("docs/backend"), &mut files);
-        }
-        InitializationStage::RulesAndSkills | InitializationStage::Repair => {
-            collect_artifacts(&root.join(".claude/rules"), &mut files);
-            collect_artifacts(&root.join(".claude/skills"), &mut files);
-            if let Ok(metadata) = fs::metadata(root.join("CLAUDE.md")) {
-                files.insert(
-                    root.join("CLAUDE.md"),
-                    (metadata.len(), metadata.modified().ok()),
-                );
-            }
-        }
-    }
-    files
-}
-
-fn changed_artifact_count(before: &ArtifactState, after: &ArtifactState) -> usize {
-    after
-        .iter()
-        .filter(|(path, state)| before.get(*path) != Some(*state))
-        .count()
-}
-
-fn run_agent_with_progress<F>(
-    agent: &str,
-    project_path: &str,
-    prompt: &str,
-    stage: InitializationStage,
-    reporter: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(ExistingProjectInitializationProgress),
-{
-    let (phase, start_percent, detail) = stage_start_progress(stage);
-    report(reporter, project_path, phase, start_percent, detail);
-    let baseline = artifact_snapshot(Path::new(project_path), stage);
-    let agent = agent.to_string();
-    let project_path_owned = project_path.to_string();
-    let prompt = prompt.to_string();
-    let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let _ = sender.send(run_agent(&agent, &project_path_owned, &prompt));
-    });
-
-    let mut last_percent = start_percent;
-    let mut elapsed_seconds = 0_u64;
-    loop {
-        match receiver.recv_timeout(Duration::from_secs(1)) {
-            Ok(result) => return result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                elapsed_seconds = elapsed_seconds.saturating_add(1);
-                let current = artifact_snapshot(Path::new(project_path), stage);
-                let percent = progress_for_stage_activity(
-                    stage,
-                    changed_artifact_count(&baseline, &current),
-                    elapsed_seconds,
-                );
-                if percent > last_percent {
-                    last_percent = percent;
-                    report(reporter, project_path, phase, percent, detail);
+impl AgentRunner for ProcessAgentRunner {
+    fn run(
+        &mut self,
+        agent: &str,
+        workspace: &Path,
+        prompt: &str,
+        heartbeat: &mut dyn FnMut(),
+    ) -> Result<AgentRunOutcome, String> {
+        let agent = agent.to_string();
+        let workspace = workspace.to_string_lossy().to_string();
+        let prompt = prompt.to_string();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(run_agent(&agent, &workspace, &prompt));
+        });
+        loop {
+            match receiver.recv_timeout(Duration::from_secs(1)) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => heartbeat(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("项目初始化 Agent 进程意外中断".to_string());
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("项目初始化 Agent 进程意外中断".to_string());
-            }
         }
     }
 }
 
-fn report<F>(reporter: &mut F, project_path: &str, phase: &str, percent: u8, detail: &str)
-where
+fn stage_progress(stage: InitializationStage) -> (u8, &'static str) {
+    match stage {
+        InitializationStage::Scan => (5, "正在安全扫描项目"),
+        InitializationStage::Plan => (18, "正在规划项目专属工程上下文"),
+        InitializationStage::Documents => (35, "正在生成项目专属文档"),
+        InitializationStage::Rules => (53, "正在生成项目专属规则"),
+        InitializationStage::Skills => (68, "正在生成项目专属 skills"),
+        InitializationStage::Install => (84, "正在进行冲突检查并安装产物"),
+        InitializationStage::Verify => (94, "正在校验已安装产物与所有权"),
+        InitializationStage::Complete => (100, "初始化完成"),
+        InitializationStage::Failed => (0, "初始化失败"),
+        InitializationStage::Interrupted => (0, "初始化已中断"),
+        InitializationStage::Conflict => (0, "检测到安装冲突"),
+    }
+}
+
+fn report<F>(
+    reporter: &mut F,
+    project_path: &str,
+    stage: InitializationStage,
+    percent: u8,
+    detail: &str,
+    state: Option<&InitializationState>,
+) where
     F: FnMut(ExistingProjectInitializationProgress),
 {
     reporter(ExistingProjectInitializationProgress {
         project_path: project_path.to_string(),
-        phase: phase.to_string(),
+        run_id: state.map(|state| state.run_id.clone()),
+        phase: stage.name().to_string(),
         percent,
         detail: detail.to_string(),
+        attempt: state.map(|state| state.attempt).unwrap_or_default(),
+        sequence: next_progress_sequence(),
+        recoverable: state.is_none_or(|state| {
+            !matches!(
+                state.state,
+                InitializationRunState::Completed | InitializationRunState::Conflict
+            )
+        }),
+        issues: state.map(|state| state.issues.clone()).unwrap_or_default(),
+        conflicts: state
+            .map(|state| state.conflicts.clone())
+            .unwrap_or_default(),
+        warnings: state
+            .map(|state| {
+                state
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.detail.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        artifact_totals: state
+            .filter(|state| state.artifact_totals.total > 0)
+            .map(|state| state.artifact_totals),
     });
 }
 
-fn initialize_with_progress<F>(
-    project_path: &str,
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
+}
+
+fn next_progress_sequence() -> u64 {
+    let now = unix_time_ms();
+    loop {
+        let previous = PROGRESS_SEQUENCE.load(Ordering::Relaxed);
+        let next = now.max(previous.saturating_add(1));
+        if PROGRESS_SEQUENCE
+            .compare_exchange_weak(previous, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
+fn inventory_hash(inventory: &ProjectInventory) -> Result<String, String> {
+    serde_json::to_vec(inventory)
+        .map(|bytes| super::inventory::content_sha256(&bytes))
+        .map_err(|error| format!("无法序列化项目清单：{error}"))
+}
+
+fn inventory_snapshot_path(project: &Path) -> Result<PathBuf, String> {
+    Ok(super::initialization_state::state_directory(project)?.join(INVENTORY_SNAPSHOT_FILE))
+}
+
+fn save_inventory_snapshot(project: &Path, inventory: &ProjectInventory) -> Result<(), String> {
+    let path = inventory_snapshot_path(project)?;
+    if path.exists() {
+        let existing = load_inventory_snapshot(project)?;
+        if inventory_hash(&existing)? == inventory_hash(inventory)? {
+            return Ok(());
+        }
+        return Err("初始化 inventory 快照已存在且内容不一致，拒绝覆盖".to_string());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "inventory 快照缺少父目录".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建状态目录：{error}"))?;
+    let temporary = parent.join(format!(
+        ".inventory-{}-{}.tmp",
+        std::process::id(),
+        unix_time_ms()
+    ));
+    let bytes = serde_json::to_vec_pretty(&StoredProjectInventory::from(inventory))
+        .map_err(|error| format!("无法序列化 inventory 快照：{error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| format!("无法创建 inventory 临时文件：{error}"))?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("无法持久化 inventory 快照：{error}"))?;
+    fs::rename(&temporary, &path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("无法原子安装 inventory 快照：{error}")
+    })
+}
+
+fn load_inventory_snapshot(project: &Path) -> Result<ProjectInventory, String> {
+    let path = inventory_snapshot_path(project)?;
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("无法读取 inventory 快照 {}：{error}", path.display()))?;
+    serde_json::from_slice::<StoredProjectInventory>(&bytes)
+        .map(ProjectInventory::from)
+        .map_err(|error| format!("inventory 快照 JSON 无法解析：{error}"))
+}
+
+fn managed_recovery_path(path: &str, plan: &ArtifactPlan) -> bool {
+    matches!(
+        path,
+        "CLAUDE.md" | "AGENTS.md" | "docs/ai/.initialization-manifest.json"
+    ) || path.starts_with(".agents/rules/")
+        || path.starts_with(".agents/skills/")
+        || path.starts_with(".agents/scripts/")
+        || plan
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.target_path == path)
+}
+
+fn source_inventory_signature(
+    inventory: &ProjectInventory,
+    plan: &ArtifactPlan,
+) -> BTreeSet<(String, u64, String)> {
+    inventory
+        .files
+        .iter()
+        .filter(|file| !managed_recovery_path(&file.path, plan))
+        .map(|file| (file.path.clone(), file.size, file.sha256.clone()))
+        .collect()
+}
+
+fn only_recoverable_install_changes(
+    baseline: &ProjectInventory,
+    current: &ProjectInventory,
+    plan: &ArtifactPlan,
+) -> bool {
+    baseline.layers == current.layers
+        && source_inventory_signature(baseline, plan) == source_inventory_signature(current, plan)
+}
+
+fn plan_hash(plan: &ArtifactPlan) -> Result<String, String> {
+    serde_json::to_vec(plan)
+        .map(|bytes| super::inventory::content_sha256(&bytes))
+        .map_err(|error| format!("无法序列化产物计划：{error}"))
+}
+
+fn make_run_id() -> String {
+    format!("{}-{}", unix_time_ms(), std::process::id())
+}
+
+fn persist_state(project: &Path, state: &mut InitializationState) -> Result<(), String> {
+    state.updated_at_unix_ms = unix_time_ms();
+    super::initialization_state::save_initialization_state(project, state)
+}
+
+fn checkpoint(
+    project: &Path,
+    state: &mut InitializationState,
+    run_state: InitializationRunState,
+) -> Result<(), String> {
+    state.state = run_state;
+    state.process_id = None;
+    state.issues.clear();
+    state.attempt = 0;
+    let completed_at_unix_ms = unix_time_ms();
+    if state
+        .checkpoints
+        .last()
+        .is_none_or(|entry| entry.state != run_state)
+    {
+        state
+            .checkpoints
+            .push(super::types::InitializationCheckpoint {
+                state: run_state,
+                artifact_totals: state.artifact_totals,
+                completed_at_unix_ms,
+            });
+    }
+    persist_state(project, state)
+}
+
+fn checkpoint_state(state: &InitializationState) -> InitializationRunState {
+    state
+        .checkpoints
+        .last()
+        .map(|checkpoint| checkpoint.state)
+        .unwrap_or_else(|| {
+            if matches!(
+                state.state,
+                InitializationRunState::Failed
+                    | InitializationRunState::Interrupted
+                    | InitializationRunState::Conflict
+            ) {
+                InitializationRunState::Preflight
+            } else {
+                state.state
+            }
+        })
+}
+
+fn reached(current: InitializationRunState, target: InitializationRunState) -> bool {
+    fn rank(state: InitializationRunState) -> u8 {
+        match state {
+            InitializationRunState::Preflight => 0,
+            InitializationRunState::SnapshotReady => 1,
+            InitializationRunState::PlanReady => 2,
+            InitializationRunState::DocumentsReady => 3,
+            InitializationRunState::RulesReady => 4,
+            InitializationRunState::SkillsReady => 5,
+            InitializationRunState::Installing => 6,
+            InitializationRunState::Verifying => 7,
+            InitializationRunState::Completed => 8,
+            InitializationRunState::Failed
+            | InitializationRunState::Interrupted
+            | InitializationRunState::Conflict => 0,
+        }
+    }
+    rank(current) >= rank(target)
+}
+
+fn stage_digest(
+    workspace: &Path,
+    plan: Option<&ArtifactPlan>,
+    stage: InitializationStage,
+) -> String {
+    let paths = match stage {
+        InitializationStage::Plan => vec![".vibe-coding-platform/artifact-plan.json".to_string()],
+        _ => plan
+            .into_iter()
+            .flat_map(|plan| plan.artifacts.iter())
+            .filter(|item| stage.kind() == Some(item.kind))
+            .map(|item| item.target_path.clone())
+            .collect(),
+    };
+    let mut records = paths
+        .into_iter()
+        .map(|path| {
+            let digest = fs::read(workspace.join(&path))
+                .map(|bytes| super::inventory::content_sha256(&bytes))
+                .unwrap_or_else(|_| "missing".to_string());
+            format!("{path}:{digest}")
+        })
+        .collect::<Vec<_>>();
+    records.sort();
+    super::inventory::content_sha256(records.join("\n").as_bytes())
+}
+
+type StageSurface = BTreeMap<String, String>;
+
+fn collect_stage_surface(root: &Path, relative: &Path, output: &mut StageSurface) {
+    let path = root.join(relative);
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() {
+        output.insert(
+            relative.to_string_lossy().replace('\\', "/"),
+            "unsafe-link".to_string(),
+        );
+        return;
+    }
+    if metadata.is_file() {
+        let digest = fs::read(&path)
+            .map(|bytes| super::inventory::content_sha256(&bytes))
+            .unwrap_or_else(|_| "unreadable".to_string());
+        output.insert(relative.to_string_lossy().replace('\\', "/"), digest);
+        return;
+    }
+    if !metadata.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&path) else {
+        return;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        collect_stage_surface(root, &relative.join(entry.file_name()), output);
+    }
+}
+
+fn stage_surface(workspace: &Path) -> StageSurface {
+    let mut output = BTreeMap::new();
+    for relative in [
+        ".vibe-coding-platform/artifact-plan.json",
+        "docs/ai",
+        ".claude/rules/project",
+        ".claude/skills",
+    ] {
+        collect_stage_surface(workspace, Path::new(relative), &mut output);
+    }
+    output
+}
+
+fn stage_scope_issues(
+    before: &StageSurface,
+    after: &StageSurface,
+    stage: InitializationStage,
+    plan: Option<&ArtifactPlan>,
+) -> Vec<ValidationIssue> {
+    let allowed = if stage == InitializationStage::Plan {
+        [".vibe-coding-platform/artifact-plan.json".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    } else {
+        plan.into_iter()
+            .flat_map(|plan| plan.artifacts.iter())
+            .filter(|item| stage.kind() == Some(item.kind))
+            .map(|item| item.target_path.clone())
+            .collect()
+    };
+    before
+        .keys()
+        .chain(after.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|path| before.get(*path) != after.get(*path) && !allowed.contains(path.as_str()))
+        .map(|path| ValidationIssue {
+            code: "stage.scope.violation".to_string(),
+            detail: "Agent 修改了当前阶段计划之外的工程上下文产物".to_string(),
+            path: Some(path.clone()),
+            stage: Some(stage.name().to_string()),
+        })
+        .collect()
+}
+
+fn unplanned_surface_issues(
+    surface: &StageSurface,
+    inventory: &ProjectInventory,
+    plan: Option<&ArtifactPlan>,
+    stage: InitializationStage,
+) -> Vec<ValidationIssue> {
+    let mut known = inventory
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    known.insert(".vibe-coding-platform/artifact-plan.json");
+    if let Some(plan) = plan {
+        known.extend(plan.artifacts.iter().map(|item| item.target_path.as_str()));
+    }
+    surface
+        .keys()
+        .filter(|path| !known.contains(path.as_str()))
+        .map(|path| ValidationIssue {
+            code: "stage.output.unplanned".to_string(),
+            detail: "隔离工作区包含未列入项目清单或产物计划的新增文件".to_string(),
+            path: Some(path.clone()),
+            stage: Some(stage.name().to_string()),
+        })
+        .collect()
+}
+
+fn runner_failure_issue(stage: InitializationStage, detail: String) -> ValidationIssue {
+    ValidationIssue {
+        code: "agent.spawn.failed".to_string(),
+        detail,
+        path: None,
+        stage: Some(stage.name().to_string()),
+    }
+}
+
+fn agent_warning(stage: InitializationStage, outcome: &AgentRunOutcome) -> ValidationIssue {
+    ValidationIssue {
+        code: "agent.exit.non-zero-valid".to_string(),
+        detail: format!(
+            "{} 阶段 Agent 以 {} 退出，但暂存产物独立校验通过",
+            stage.name(),
+            outcome
+                .exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+        path: None,
+        stage: Some(stage.name().to_string()),
+    }
+}
+
+fn fail_stage(
+    project: &Path,
+    state: &mut InitializationState,
+    stage: InitializationStage,
+    issues: Vec<ValidationIssue>,
+    outcome: &AgentRunOutcome,
+) -> Result<(), String> {
+    let error = aggregate_stage_failure(stage, &issues, outcome);
+    state.state = InitializationRunState::Failed;
+    state.process_id = None;
+    state.issues = issues;
+    persist_state(project, state)?;
+    Err(error)
+}
+
+fn mark_install_conflict(
+    project: &Path,
+    state: &mut InitializationState,
+    issues: Vec<ValidationIssue>,
+) -> String {
+    let error = aggregate_stage_failure(
+        InitializationStage::Install,
+        &issues,
+        &AgentRunOutcome::success(),
+    );
+    state.state = InitializationRunState::Conflict;
+    state.conflicts = issues;
+    state.process_id = None;
+    if let Err(save_error) = persist_state(project, state) {
+        return format!("{error}；状态持久化失败：{save_error}");
+    }
+    error
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_plan_stage<R, F>(
+    runner: &mut R,
     agent: &str,
-    base_prompt: &str,
-    mut reporter: F,
-) -> Result<ExistingProjectInitResult, String>
+    project: &Path,
+    workspace: &Path,
+    inventory: &ProjectInventory,
+    user_intent: &str,
+    state: &mut InitializationState,
+    reporter: &mut F,
+) -> Result<ArtifactPlan, String>
 where
+    R: AgentRunner,
     F: FnMut(ExistingProjectInitializationProgress),
 {
-    if !Path::new(project_path).is_dir() {
-        return Err("项目路径不存在或不是目录".to_string());
-    }
-    report(
-        &mut reporter,
-        project_path,
-        "analyze",
-        8,
-        "正在分析项目代码、配置与已有资料",
-    );
-    prepare_existing_project_initialization(project_path)?;
-
-    run_agent_with_progress(
-        agent,
-        project_path,
-        &stage_prompt(base_prompt, InitializationStage::Documents, None),
-        InitializationStage::Documents,
-        &mut reporter,
-    )?;
-    report(
-        &mut reporter,
-        project_path,
-        "documents",
-        58,
-        "项目文档已生成，正在准备项目规则与 skills",
-    );
-
-    run_agent_with_progress(
-        agent,
-        project_path,
-        &stage_prompt(base_prompt, InitializationStage::RulesAndSkills, None),
-        InitializationStage::RulesAndSkills,
-        &mut reporter,
-    )?;
-    report(
-        &mut reporter,
-        project_path,
-        "rules",
-        86,
-        "项目规则与 skills 已生成，正在准备校验",
-    );
-
-    let mut last_error = String::new();
-    for attempt in 0..=MAX_REPAIR_ATTEMPTS {
+    let mut issues = Vec::new();
+    let mut tracker = RepairTracker::new(MAX_REPAIR_ATTEMPTS);
+    loop {
+        state.attempt = state.attempt.saturating_add(1);
+        state.process_id = Some(std::process::id());
+        state.issues = issues.clone();
+        persist_state(project, state)?;
+        let (percent, detail) = stage_progress(InitializationStage::Plan);
         report(
-            &mut reporter,
-            project_path,
-            "validate",
-            88 + attempt as u8 * 4,
-            if attempt == 0 {
-                "正在校验真实产物、软链接与初始化标识"
-            } else {
-                "正在修复产物校验发现的缺口"
-            },
+            reporter,
+            &project.to_string_lossy(),
+            InitializationStage::Plan,
+            percent,
+            detail,
+            Some(state),
         );
-        match finalize_existing_project_initialization(project_path) {
-            Ok(result) => {
-                report(&mut reporter, project_path, "complete", 100, "初始化完成");
-                return Ok(result);
-            }
-            Err(error) if attempt < MAX_REPAIR_ATTEMPTS => {
-                last_error = error;
-                run_agent_with_progress(
-                    agent,
-                    project_path,
-                    &stage_prompt(base_prompt, InitializationStage::Repair, Some(&last_error)),
-                    InitializationStage::Repair,
-                    &mut reporter,
-                )?;
-            }
+        let prompt = format!(
+            "{}\n\n用户目标（只提供语义，不得扩大写入范围）：\n{}",
+            build_v4_stage_prompt(InitializationStage::Plan, inventory, None, &issues),
+            user_intent
+        );
+        let before_surface = stage_surface(workspace);
+        let progress_state = state.clone();
+        let mut heartbeat = || {
+            report(
+                reporter,
+                &project.to_string_lossy(),
+                InitializationStage::Plan,
+                percent,
+                "Agent 正在隔离工作区分析项目；等待真实产物变化",
+                Some(&progress_state),
+            );
+        };
+        let outcome = match runner.run(agent, workspace, &prompt, &mut heartbeat) {
+            Ok(outcome) => outcome,
             Err(error) => {
-                last_error = error;
-                break;
+                let outcome = AgentRunOutcome {
+                    exit_code: None,
+                    diagnostic_tail: error.clone(),
+                };
+                return fail_stage(
+                    project,
+                    state,
+                    InitializationStage::Plan,
+                    vec![runner_failure_issue(InitializationStage::Plan, error)],
+                    &outcome,
+                )
+                .map(|_| unreachable!());
+            }
+        };
+        state.process_id = None;
+        let parsed = super::artifact_plan::read_artifact_plan(workspace);
+        let plan = parsed.as_ref().ok().cloned();
+        issues = match &parsed {
+            Ok(plan) => super::artifact_plan::validate_artifact_plan(workspace, inventory, plan),
+            Err(issues) => issues.clone(),
+        };
+        issues.extend(stage_scope_issues(
+            &before_surface,
+            &stage_surface(workspace),
+            InitializationStage::Plan,
+            None,
+        ));
+        issues.extend(unplanned_surface_issues(
+            &stage_surface(workspace),
+            inventory,
+            None,
+            InitializationStage::Plan,
+        ));
+        match evaluate_agent_stage(&outcome, &issues) {
+            StageDecision::Advance | StageDecision::AdvanceWithWarning => {
+                let plan = plan.expect("valid plan stage has a parsed plan");
+                if !outcome.succeeded() {
+                    state
+                        .warnings
+                        .push(agent_warning(InitializationStage::Plan, &outcome));
+                }
+                state.plan_sha256 = Some(plan_hash(&plan)?);
+                state.artifact_totals = super::artifact_plan::artifact_totals(&plan);
+                checkpoint(project, state, InitializationRunState::PlanReady)?;
+                return Ok(plan);
+            }
+            StageDecision::Repair => {
+                let digest = stage_digest(workspace, None, InitializationStage::Plan);
+                match tracker.observe(&issues, &digest) {
+                    RepairDecision::Retry => persist_state(project, state)?,
+                    RepairDecision::NoProgress | RepairDecision::Exhausted => {
+                        return fail_stage(
+                            project,
+                            state,
+                            InitializationStage::Plan,
+                            issues,
+                            &outcome,
+                        )
+                        .map(|_| unreachable!());
+                    }
+                }
             }
         }
     }
-    Err(format!("初始化产物校验仍未通过：{last_error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_artifact_stage<R, F>(
+    runner: &mut R,
+    agent: &str,
+    project: &Path,
+    workspace: &Path,
+    inventory: &ProjectInventory,
+    plan: &ArtifactPlan,
+    user_intent: &str,
+    stage: InitializationStage,
+    state: &mut InitializationState,
+    reporter: &mut F,
+) -> Result<(), String>
+where
+    R: AgentRunner,
+    F: FnMut(ExistingProjectInitializationProgress),
+{
+    let kind = stage.kind().expect("artifact stage has a kind");
+    if !plan.artifacts.iter().any(|item| item.kind == kind) {
+        return Ok(());
+    }
+    let mut issues = Vec::new();
+    let mut tracker = RepairTracker::new(MAX_REPAIR_ATTEMPTS);
+    loop {
+        state.attempt = state.attempt.saturating_add(1);
+        state.process_id = Some(std::process::id());
+        state.issues = issues.clone();
+        persist_state(project, state)?;
+        let (percent, detail) = stage_progress(stage);
+        report(
+            reporter,
+            &project.to_string_lossy(),
+            stage,
+            percent,
+            detail,
+            Some(state),
+        );
+        let prompt = format!(
+            "{}\n\n用户目标（只提供语义，不得扩大写入范围）：\n{}",
+            build_v4_stage_prompt(stage, inventory, Some(plan), &issues),
+            user_intent
+        );
+        let before_surface = stage_surface(workspace);
+        let progress_state = state.clone();
+        let mut heartbeat = || {
+            report(
+                reporter,
+                &project.to_string_lossy(),
+                stage,
+                percent,
+                "Agent 正在隔离工作区工作；等待真实产物变化与校验",
+                Some(&progress_state),
+            );
+        };
+        let outcome = match runner.run(agent, workspace, &prompt, &mut heartbeat) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let outcome = AgentRunOutcome {
+                    exit_code: None,
+                    diagnostic_tail: error.clone(),
+                };
+                return fail_stage(
+                    project,
+                    state,
+                    stage,
+                    vec![runner_failure_issue(stage, error)],
+                    &outcome,
+                );
+            }
+        };
+        state.process_id = None;
+        issues =
+            super::artifact_plan::validate_staged_artifacts(workspace, inventory, plan, Some(kind));
+        issues.extend(stage_scope_issues(
+            &before_surface,
+            &stage_surface(workspace),
+            stage,
+            Some(plan),
+        ));
+        issues.extend(unplanned_surface_issues(
+            &stage_surface(workspace),
+            inventory,
+            Some(plan),
+            stage,
+        ));
+        match evaluate_agent_stage(&outcome, &issues) {
+            StageDecision::Advance | StageDecision::AdvanceWithWarning => {
+                if !outcome.succeeded() {
+                    state.warnings.push(agent_warning(stage, &outcome));
+                }
+                return Ok(());
+            }
+            StageDecision::Repair => {
+                let digest = stage_digest(workspace, Some(plan), stage);
+                match tracker.observe(&issues, &digest) {
+                    RepairDecision::Retry => persist_state(project, state)?,
+                    RepairDecision::NoProgress | RepairDecision::Exhausted => {
+                        return fail_stage(project, state, stage, issues, &outcome);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn initialization_summary(inventory: &ProjectInventory) -> super::types::InventorySummary {
+    super::types::InventorySummary {
+        modules: inventory.modules.len(),
+        source_roots: inventory.source_roots.len(),
+        files: inventory.files.len(),
+        frontend: inventory.layers.frontend,
+        backend: inventory.layers.backend,
+    }
+}
+
+fn initialize_with_runner<R, F>(
+    project_path: &str,
+    agent: &str,
+    base_prompt: &str,
+    runner: &mut R,
+    mut reporter: F,
+) -> Result<ExistingProjectInitResult, String>
+where
+    R: AgentRunner,
+    F: FnMut(ExistingProjectInitializationProgress),
+{
+    let project = Path::new(project_path);
+    if !project.is_dir() {
+        return Err("项目路径不存在或不是目录".to_string());
+    }
+    if !matches!(agent, "codex" | "claude") {
+        return Err("项目初始化只支持 Claude 或 Codex".to_string());
+    }
+    let current_status = super::existing::existing_project_init_status(project_path)?;
+    if current_status.status == "current-v4" {
+        return super::existing::finalize_existing_project_initialization(project_path);
+    }
+    if current_status.status == "needs-attention" && !current_status.recoverable {
+        return Err(current_status.detail);
+    }
+    let preparation = prepare_existing_project_initialization(project_path)?;
+    let (percent, detail) = stage_progress(InitializationStage::Scan);
+    report(
+        &mut reporter,
+        project_path,
+        InitializationStage::Scan,
+        percent,
+        detail,
+        None,
+    );
+    let current_inventory = super::inventory::inspect_project(project)?;
+    let current_inventory_sha256 = inventory_hash(&current_inventory)?;
+    let user_intent = sanitize_user_intent(base_prompt, project_path);
+    let saved_state = super::initialization_state::load_initialization_state(project)?;
+    let new_run = saved_state.is_none();
+    let mut state = saved_state.unwrap_or_else(|| InitializationState {
+        schema_version: super::initialization_state::INITIALIZATION_STATE_SCHEMA_VERSION,
+        run_id: make_run_id(),
+        state: InitializationRunState::Preflight,
+        started_at_unix_ms: unix_time_ms(),
+        ..InitializationState::default()
+    });
+    PROGRESS_SEQUENCE.fetch_max(state.updated_at_unix_ms, Ordering::Relaxed);
+    let inventory = if new_run {
+        save_inventory_snapshot(project, &current_inventory)?;
+        current_inventory.clone()
+    } else {
+        load_inventory_snapshot(project).map_err(|error| {
+            format!("无法安全恢复初始化：{error}。缺少原始清单时不会猜测项目是否变化")
+        })?
+    };
+    if interrupt_stale_state(&mut state, std::process::id()) {
+        persist_state(project, &mut state)?;
+    }
+    let checkpoint_before_resume = checkpoint_state(&state);
+    let inventory_changed = state
+        .inventory_sha256
+        .as_deref()
+        .is_some_and(|hash| hash != current_inventory_sha256);
+    let recoverable_install_change = inventory_changed
+        && reached(
+            checkpoint_before_resume,
+            InitializationRunState::SkillsReady,
+        )
+        && !state.workspace_path.is_empty()
+        && Path::new(&state.workspace_path).is_dir()
+        && super::artifact_plan::read_artifact_plan(Path::new(&state.workspace_path)).is_ok_and(
+            |plan| only_recoverable_install_changes(&inventory, &current_inventory, &plan),
+        );
+    if inventory_changed
+        && checkpoint_before_resume != InitializationRunState::Preflight
+        && !recoverable_install_change
+    {
+        state.state = InitializationRunState::Conflict;
+        state.conflicts.push(ValidationIssue {
+            code: "resume.inventory.changed".to_string(),
+            detail: "项目在未完成初始化期间发生变化，拒绝复用旧工作区".to_string(),
+            path: None,
+            stage: Some("scan".to_string()),
+        });
+        persist_state(project, &mut state)?;
+        return Err(
+            "项目在未完成初始化期间发生变化；请处理 needs-attention 冲突后重试".to_string(),
+        );
+    }
+    if state.inventory_sha256.is_none() {
+        state.inventory_sha256 = Some(inventory_hash(&inventory)?);
+    }
+    let mut completed_checkpoint = checkpoint_state(&state);
+    let workspace = if reached(completed_checkpoint, InitializationRunState::SnapshotReady)
+        && !state.workspace_path.is_empty()
+        && Path::new(&state.workspace_path).is_dir()
+    {
+        PathBuf::from(&state.workspace_path)
+    } else {
+        let workspace = super::initialization_state::state_directory(project)?
+            .join(format!("workspace-{}", state.run_id));
+        state.workspace_path = workspace.to_string_lossy().to_string();
+        persist_state(project, &mut state)?;
+        super::inventory::create_filtered_workspace(project, &workspace, &inventory)?;
+        checkpoint(project, &mut state, InitializationRunState::SnapshotReady)?;
+        completed_checkpoint = InitializationRunState::SnapshotReady;
+        workspace
+    };
+
+    let mut plan = if reached(completed_checkpoint, InitializationRunState::PlanReady) {
+        super::artifact_plan::read_artifact_plan(&workspace).map_err(|issues| {
+            aggregate_stage_failure(
+                InitializationStage::Plan,
+                &issues,
+                &AgentRunOutcome::success(),
+            )
+        })?
+    } else {
+        run_plan_stage(
+            runner,
+            agent,
+            project,
+            &workspace,
+            &inventory,
+            &user_intent,
+            &mut state,
+            &mut reporter,
+        )?
+    };
+    let plan_issues = super::artifact_plan::validate_artifact_plan(&workspace, &inventory, &plan);
+    if !plan_issues.is_empty() {
+        plan = run_plan_stage(
+            runner,
+            agent,
+            project,
+            &workspace,
+            &inventory,
+            &user_intent,
+            &mut state,
+            &mut reporter,
+        )?;
+    }
+    completed_checkpoint = checkpoint_state(&state);
+
+    for (stage, ready) in [
+        (
+            InitializationStage::Documents,
+            InitializationRunState::DocumentsReady,
+        ),
+        (
+            InitializationStage::Rules,
+            InitializationRunState::RulesReady,
+        ),
+        (
+            InitializationStage::Skills,
+            InitializationRunState::SkillsReady,
+        ),
+    ] {
+        if !reached(completed_checkpoint, ready) {
+            run_artifact_stage(
+                runner,
+                agent,
+                project,
+                &workspace,
+                &inventory,
+                &plan,
+                &user_intent,
+                stage,
+                &mut state,
+                &mut reporter,
+            )?;
+            checkpoint(project, &mut state, ready)?;
+            completed_checkpoint = ready;
+        }
+    }
+
+    let staged_issues =
+        super::artifact_plan::validate_staged_artifacts(&workspace, &inventory, &plan, None);
+    if !staged_issues.is_empty() {
+        return fail_stage(
+            project,
+            &mut state,
+            InitializationStage::Verify,
+            staged_issues,
+            &AgentRunOutcome::success(),
+        )
+        .map(|_| unreachable!());
+    }
+
+    let (percent, detail) = stage_progress(InitializationStage::Install);
+    report(
+        &mut reporter,
+        project_path,
+        InitializationStage::Install,
+        percent,
+        detail,
+        Some(&state),
+    );
+    state.state = InitializationRunState::Installing;
+    persist_state(project, &mut state)?;
+    let previous = super::initialization_state::load_ownership_manifest(project)?;
+    let mut manifest = match super::initialization_state::install_planned_artifacts(
+        project,
+        &workspace,
+        &plan,
+        previous.as_ref(),
+    ) {
+        Ok(manifest) => manifest,
+        Err(issues) => {
+            let error = mark_install_conflict(project, &mut state, issues);
+            report(
+                &mut reporter,
+                project_path,
+                InitializationStage::Conflict,
+                0,
+                &error,
+                Some(&state),
+            );
+            return Err(error);
+        }
+    };
+    manifest.inventory_summary = Some(initialization_summary(&inventory));
+    if let Err(issues) =
+        super::initialization_state::install_managed_entries(project, &mut manifest)
+    {
+        let error = mark_install_conflict(project, &mut state, issues);
+        report(
+            &mut reporter,
+            project_path,
+            InitializationStage::Conflict,
+            0,
+            &error,
+            Some(&state),
+        );
+        return Err(error);
+    }
+    if let Err(issues) = super::initialization_state::share_agent_assets(project, &mut manifest) {
+        let error = mark_install_conflict(project, &mut state, issues);
+        report(
+            &mut reporter,
+            project_path,
+            InitializationStage::Conflict,
+            0,
+            &error,
+            Some(&state),
+        );
+        return Err(error);
+    }
+
+    let (percent, detail) = stage_progress(InitializationStage::Verify);
+    report(
+        &mut reporter,
+        project_path,
+        InitializationStage::Verify,
+        percent,
+        detail,
+        Some(&state),
+    );
+    state.state = InitializationRunState::Verifying;
+    persist_state(project, &mut state)?;
+    manifest.state = InitializationRunState::Completed;
+    manifest.completed_at_unix_ms = unix_time_ms();
+    manifest
+        .checkpoints
+        .push(super::types::InitializationCheckpoint {
+            state: InitializationRunState::Completed,
+            artifact_totals: manifest.artifact_totals,
+            completed_at_unix_ms: manifest.completed_at_unix_ms,
+        });
+    let verification = super::initialization_state::verify_ownership_manifest(project, &manifest);
+    if !verification.is_empty() {
+        return fail_stage(
+            project,
+            &mut state,
+            InitializationStage::Verify,
+            verification,
+            &AgentRunOutcome::success(),
+        )
+        .map(|_| unreachable!());
+    }
+    super::initialization_state::save_ownership_manifest(project, &manifest)?;
+    state.artifact_totals = manifest.artifact_totals;
+    checkpoint(project, &mut state, InitializationRunState::Completed)?;
+    let state_root = super::initialization_state::state_directory(project)?;
+    if workspace.starts_with(&state_root) && workspace.is_dir() {
+        fs::remove_dir_all(&workspace)
+            .map_err(|error| format!("初始化已验证，但无法清理隔离工作区：{error}"))?;
+    }
+    state.workspace_path.clear();
+    persist_state(project, &mut state)?;
+    if let Ok(path) = inventory_snapshot_path(project) {
+        let _ = fs::remove_file(path);
+    }
+    report(
+        &mut reporter,
+        project_path,
+        InitializationStage::Complete,
+        100,
+        "初始化完成并通过所有权校验",
+        Some(&state),
+    );
+    Ok(ExistingProjectInitResult {
+        project_path: project.to_string_lossy().to_string(),
+        status: "current-v4".to_string(),
+        phase: "complete".to_string(),
+        run_id: state.run_id.clone(),
+        percent: 100,
+        detail: "初始化完成并通过所有权校验".to_string(),
+        attempt: state.attempt,
+        sequence: next_progress_sequence(),
+        recoverable: false,
+        issues: Vec::new(),
+        conflicts: Vec::new(),
+        warnings: state
+            .warnings
+            .iter()
+            .map(|warning| warning.detail.clone())
+            .collect(),
+        artifact_totals: manifest.artifact_totals,
+        layers: Some(preparation.layers),
+        detected_stack: preparation.detected_stack,
+        generated: plan
+            .artifacts
+            .into_iter()
+            .map(|item| item.target_path)
+            .collect(),
+    })
 }
 
 pub fn initialize_existing_project_with_agent_progress(
@@ -382,17 +1506,33 @@ pub fn initialize_existing_project_with_agent_progress(
     agent: &str,
     prompt: &str,
 ) -> Result<ExistingProjectInitResult, String> {
-    initialize_with_progress(project_path, agent, prompt, |progress| {
-        let _ = app.emit("project-factory://initialization-progress", progress);
-    })
+    initialize_with_runner(
+        project_path,
+        agent,
+        prompt,
+        &mut ProcessAgentRunner,
+        |progress| {
+            let _ = app.emit("project-factory://initialization-progress", progress);
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_claude_process, build_codex_process, progress_for_artifact_changes,
-        progress_for_stage_activity, stage_start_progress, InitializationStage,
+        aggregate_stage_failure, build_claude_process, build_codex_process, build_v4_stage_prompt,
+        evaluate_agent_stage, initialize_with_runner, interrupt_stale_state, resume_stage,
+        sanitize_user_intent, stage_scope_issues, AgentRunOutcome, AgentRunner,
+        InitializationStage, RepairDecision, RepairTracker, StageDecision, StageSurface,
     };
+    use crate::project_factory::types::{
+        ArtifactKind, ArtifactPlan, ArtifactPlanItem, CoverageExclusion, EvidenceReference,
+        InitializationRunState, InitializationState, ProjectCommand, ProjectInventory,
+        ProjectModule, ValidationIssue,
+    };
+    use std::fs;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn rendered_process(process: &std::process::Command) -> String {
         process
@@ -423,68 +1563,674 @@ mod tests {
         }
     }
 
+    fn inventory() -> ProjectInventory {
+        ProjectInventory {
+            schema_version: 1,
+            project_name: "sample-service".to_string(),
+            layers: crate::project_factory::docs::ProjectLayers {
+                frontend: false,
+                backend: true,
+            },
+            modules: vec![ProjectModule {
+                name: "service".to_string(),
+                path: ".".to_string(),
+                kind: "rust".to_string(),
+                manifests: vec!["Cargo.toml".to_string()],
+                source_roots: vec!["src".to_string()],
+            }],
+            source_roots: vec!["src".to_string()],
+            files: vec![],
+            commands: vec![ProjectCommand {
+                name: "test".to_string(),
+                command: "cargo test".to_string(),
+                cwd: ".".to_string(),
+            }],
+            risk_keys: vec![],
+        }
+    }
+
+    fn plan() -> ArtifactPlan {
+        ArtifactPlan {
+            schema_version: 1,
+            project_name: "sample-service".to_string(),
+            artifacts: vec![ArtifactPlanItem {
+                id: "auth-boundary".to_string(),
+                kind: ArtifactKind::Rule,
+                layer: "backend".to_string(),
+                topic: "authorization".to_string(),
+                target_path: ".claude/rules/project/auth-boundary.md".to_string(),
+                rationale: "记录真实鉴权边界".to_string(),
+                evidence: vec![EvidenceReference {
+                    path: "src/auth.rs".to_string(),
+                    symbol: Some("authorize".to_string()),
+                }],
+                covers: vec!["authorization".to_string()],
+                required_sections: vec!["触发条件".to_string(), "禁止替代".to_string()],
+            }],
+            exclusions: Vec::<CoverageExclusion>::new(),
+        }
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vibe-init-{name}-{suffix}"));
+        fs::create_dir_all(root.join("src")).expect("fixture source");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"sample-auth-service\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\naxum = \"0.8\"\n",
+        )
+        .expect("fixture manifest");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn auth_service() -> bool { true }\n",
+        )
+        .expect("fixture source");
+        root
+    }
+
+    fn complete_plan(inventory: &ProjectInventory) -> ArtifactPlan {
+        let covers = inventory
+            .modules
+            .iter()
+            .map(|module| module.name.clone())
+            .chain(inventory.source_roots.iter().cloned())
+            .collect::<Vec<_>>();
+        let item = |id: &str, kind: ArtifactKind, target: &str, topic: &str| ArtifactPlanItem {
+            id: id.to_string(),
+            kind,
+            layer: "backend".to_string(),
+            topic: topic.to_string(),
+            target_path: target.to_string(),
+            rationale: "记录当前认证服务的真实工程边界与复用约束".to_string(),
+            evidence: vec![EvidenceReference {
+                path: "src/lib.rs".to_string(),
+                symbol: Some("auth_service".to_string()),
+            }],
+            covers: covers.clone(),
+            required_sections: vec!["真实证据".to_string(), "验证方式".to_string()],
+        };
+        let mut skill = item(
+            "auth-change-review",
+            ArtifactKind::Skill,
+            ".claude/skills/sample-auth-change-review/SKILL.md",
+            "authentication-change-review",
+        );
+        skill.rationale = "项目资源全部内嵌在 SKILL.md 中，避免未受计划约束的旁路文件".to_string();
+        skill.required_sections.push("项目资源".to_string());
+        ArtifactPlan {
+            schema_version: 1,
+            project_name: inventory.project_name.clone(),
+            artifacts: vec![
+                item(
+                    "project-map",
+                    ArtifactKind::Document,
+                    "docs/ai/project-map.md",
+                    "project-map",
+                ),
+                item(
+                    "architecture-boundaries",
+                    ArtifactKind::Document,
+                    "docs/ai/architecture-boundaries.md",
+                    "architecture",
+                ),
+                item(
+                    "reusable-assets",
+                    ArtifactKind::Document,
+                    "docs/ai/reusable-assets.md",
+                    "reuse",
+                ),
+                item(
+                    "verification-playbook",
+                    ArtifactKind::Document,
+                    "docs/ai/verification-playbook.md",
+                    "verification",
+                ),
+                item(
+                    "known-risks",
+                    ArtifactKind::Document,
+                    "docs/ai/known-risks-and-document-drift.md",
+                    "known-risks",
+                ),
+                item(
+                    "rule-router",
+                    ArtifactKind::Rule,
+                    ".claude/rules/project/README.md",
+                    "rule-router",
+                ),
+                item(
+                    "auth-lifecycle",
+                    ArtifactKind::Rule,
+                    ".claude/rules/project/backend/auth-lifecycle.md",
+                    "authentication-lifecycle",
+                ),
+                skill,
+            ],
+            exclusions: vec![],
+        }
+    }
+
+    fn artifact_content(item: &ArtifactPlanItem) -> String {
+        let evidence = "`src/lib.rs` 与 `auth_service` 共同证明当前认证服务的真实入口。";
+        match item.kind {
+            ArtifactKind::Document => format!(
+                "# 项目工程事实\n\n## 真实证据\n\n{evidence}\n\n## 验证方式\n\n使用项目清单中的 `cargo test` 核验认证行为。\n\n{}",
+                "当前认证服务的模块边界、复用入口、风险与验证方式均以源码为准。".repeat(8)
+            ),
+            ArtifactKind::Rule => format!(
+                "# 认证生命周期规则\n\n## 真实证据\n\n{evidence}\n\n## 验证方式\n\npaths: src/**\n\n触发：认证入口变化时执行。复用：优先沿现有函数扩展。禁止：不得创建平行认证框架。影响：检查调用方与测试。验证：运行 `cargo test`。\n\n{}",
+                "本规则只约束当前认证服务的真实生命周期。".repeat(8)
+            ),
+            ArtifactKind::Skill => format!(
+                "---\nname: sample-auth-change-review\ndescription: Use when changing the sample authentication boundary.\n---\n\n# 认证变更审查\n\n## 真实证据\n\n{evidence}\n\n## 验证方式\n\n运行 `cargo test`。\n\n## 项目资源\n\n读取认证入口与现有测试。\n\n## 执行流程\n\n1. 沿真实入口检查调用链。\n2. 复用当前错误与测试结构。\n\n## 完成 Gate\n\n源码证据与测试结果一致。\n\n## 失败处理\n\n验证失败立即停止并保留真实错误。\n\n{}",
+                "该流程只处理当前认证服务的高风险认证边界变更。".repeat(8)
+            ),
+        }
+    }
+
+    struct FakeRunner {
+        plan: ArtifactPlan,
+        calls: Vec<String>,
+        documents_exit_non_zero: bool,
+    }
+
+    impl AgentRunner for FakeRunner {
+        fn run(
+            &mut self,
+            _agent: &str,
+            workspace: &Path,
+            prompt: &str,
+            heartbeat: &mut dyn FnMut(),
+        ) -> Result<AgentRunOutcome, String> {
+            heartbeat();
+            let stage = ["plan", "documents", "rules", "skills"]
+                .into_iter()
+                .find(|stage| prompt.contains(&format!("阶段 `{stage}`")))
+                .expect("known stage");
+            self.calls.push(stage.to_string());
+            if stage == "plan" {
+                let path = workspace.join(".vibe-coding-platform/artifact-plan.json");
+                fs::create_dir_all(path.parent().expect("plan parent")).expect("plan parent");
+                fs::write(
+                    path,
+                    serde_json::to_vec_pretty(&self.plan).expect("plan json"),
+                )
+                .expect("write plan");
+            } else {
+                let kind = match stage {
+                    "documents" => ArtifactKind::Document,
+                    "rules" => ArtifactKind::Rule,
+                    "skills" => ArtifactKind::Skill,
+                    _ => unreachable!(),
+                };
+                for item in self.plan.artifacts.iter().filter(|item| item.kind == kind) {
+                    let path = workspace.join(&item.target_path);
+                    fs::create_dir_all(path.parent().expect("artifact parent"))
+                        .expect("artifact parent");
+                    fs::write(path, artifact_content(item)).expect("write artifact");
+                }
+            }
+            if stage == "documents" && self.documents_exit_non_zero {
+                Ok(AgentRunOutcome::non_zero(9, "simulated nonzero"))
+            } else {
+                Ok(AgentRunOutcome::success())
+            }
+        }
+    }
+
+    fn seed_skills_ready_state(
+        root: &Path,
+        inventory: &ProjectInventory,
+        plan: &ArtifactPlan,
+        run_id: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let state_dir = crate::project_factory::initialization_state::state_directory(root)
+            .expect("state directory");
+        let workspace = state_dir.join(format!("workspace-{run_id}"));
+        fs::create_dir_all(&state_dir).expect("state root");
+        crate::project_factory::inventory::create_filtered_workspace(root, &workspace, inventory)
+            .expect("workspace");
+        let plan_path = workspace.join(".vibe-coding-platform/artifact-plan.json");
+        fs::create_dir_all(plan_path.parent().expect("plan parent")).expect("plan parent");
+        fs::write(
+            plan_path,
+            serde_json::to_vec_pretty(plan).expect("plan json"),
+        )
+        .expect("plan file");
+        for item in &plan.artifacts {
+            let path = workspace.join(&item.target_path);
+            fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact parent");
+            fs::write(path, artifact_content(item)).expect("artifact");
+        }
+        super::save_inventory_snapshot(root, inventory).expect("inventory snapshot");
+        let now = super::unix_time_ms();
+        let state = InitializationState {
+            schema_version:
+                crate::project_factory::initialization_state::INITIALIZATION_STATE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            state: InitializationRunState::SkillsReady,
+            workspace_path: workspace.to_string_lossy().to_string(),
+            inventory_sha256: Some(super::inventory_hash(inventory).expect("inventory hash")),
+            plan_sha256: Some(super::plan_hash(plan).expect("plan hash")),
+            artifact_totals: crate::project_factory::artifact_plan::artifact_totals(plan),
+            checkpoints: vec![crate::project_factory::types::InitializationCheckpoint {
+                state: InitializationRunState::SkillsReady,
+                artifact_totals: crate::project_factory::artifact_plan::artifact_totals(plan),
+                completed_at_unix_ms: now,
+            }],
+            started_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            ..InitializationState::default()
+        };
+        crate::project_factory::initialization_state::save_initialization_state(root, &state)
+            .expect("save skills-ready state");
+        (state_dir, workspace)
+    }
+
     #[test]
-    fn stage_is_reported_when_work_starts_instead_of_after_agent_finishes() {
+    fn v4_plan_prompt_is_schema_driven_and_project_specific() {
+        let prompt = build_v4_stage_prompt(InitializationStage::Plan, &inventory(), None, &[]);
+
+        assert!(prompt.contains("artifact-plan.json"));
+        assert!(prompt.contains("schemaVersion"));
+        assert!(prompt.contains("targetPath"));
+        assert!(prompt.contains("requiredSections"));
+        assert!(prompt.contains("English ASCII kebab-case"));
+        assert!(prompt.contains("中文实填"));
+        assert!(prompt.contains("path + symbol"));
+        assert!(prompt.contains("复用优先"));
+        assert!(prompt.contains("前端证据"));
+        assert!(prompt.contains("后端证据"));
+        assert!(prompt.contains("数据库证据"));
+        assert!(prompt.contains("第三方集成证据"));
+        assert!(!prompt.contains("docs/backend/latest/接口文档/API接口总览.md"));
+        assert!(!prompt.contains("业务功能总览.md"));
+        assert!(!prompt.contains("规范约束"));
+    }
+
+    #[test]
+    fn generation_prompt_contains_only_the_matching_planned_kind() {
+        let mut plan = plan();
+        plan.artifacts.push(ArtifactPlanItem {
+            id: "project-map".to_string(),
+            kind: ArtifactKind::Document,
+            layer: "common".to_string(),
+            topic: "project-map".to_string(),
+            target_path: "docs/ai/project-map.md".to_string(),
+            rationale: "项目结构证据".to_string(),
+            evidence: vec![],
+            covers: vec!["project-map".to_string()],
+            required_sections: vec!["项目边界".to_string()],
+        });
+
+        let prompt = build_v4_stage_prompt(
+            InitializationStage::Documents,
+            &inventory(),
+            Some(&plan),
+            &[],
+        );
+
+        assert!(prompt.contains("docs/ai/project-map.md"));
+        assert!(!prompt.contains(".claude/rules/project/auth-boundary.md"));
+        assert!(prompt.contains("只允许编辑本阶段 JSON 中的 targetPath"));
+    }
+
+    #[test]
+    fn user_intent_never_leaks_the_original_project_path_into_agent_prompts() {
+        let root = "/Users/example/private/sample-service";
+        let intent = format!("请初始化 {root}，项目路径还是 {root}/src");
+        let sanitized = sanitize_user_intent(&intent, root);
+
+        assert!(!sanitized.contains(root));
+        assert!(sanitized.contains("<project-root>"));
+    }
+
+    #[test]
+    fn staged_validation_takes_precedence_over_agent_exit_code() {
+        let success = AgentRunOutcome::success();
+        let non_zero = AgentRunOutcome::non_zero(7, "agent stopped");
+        let missing = ValidationIssue {
+            code: "artifact.missing".to_string(),
+            detail: "missing planned artifact".to_string(),
+            path: Some("docs/ai/project-map.md".to_string()),
+            stage: Some("documents".to_string()),
+        };
+
+        assert_eq!(evaluate_agent_stage(&success, &[]), StageDecision::Advance);
         assert_eq!(
-            stage_start_progress(InitializationStage::Documents),
-            ("documents", 18, "正在生成并填充项目文档")
+            evaluate_agent_stage(&non_zero, &[]),
+            StageDecision::AdvanceWithWarning
         );
         assert_eq!(
-            stage_start_progress(InitializationStage::RulesAndSkills),
-            ("rules", 62, "正在生成项目规则与 skills")
+            evaluate_agent_stage(&success, std::slice::from_ref(&missing)),
+            StageDecision::Repair
+        );
+        assert_eq!(
+            evaluate_agent_stage(&non_zero, &[missing]),
+            StageDecision::Repair
         );
     }
 
     #[test]
-    fn real_artifact_changes_advance_progress_without_crossing_stage_boundary() {
+    fn repair_is_bounded_and_stops_unchanged_issue_fingerprints_early() {
+        let issues = vec![ValidationIssue {
+            code: "artifact.section.missing".to_string(),
+            detail: "missing verification section".to_string(),
+            path: Some("docs/ai/project-map.md".to_string()),
+            stage: Some("documents".to_string()),
+        }];
+        let mut tracker = RepairTracker::new(2);
+
+        assert_eq!(tracker.observe(&issues, "digest-a"), RepairDecision::Retry);
         assert_eq!(
-            progress_for_artifact_changes(InitializationStage::Documents, 0),
-            18
-        );
-        assert!(progress_for_artifact_changes(InitializationStage::Documents, 4) > 18);
-        assert_eq!(
-            progress_for_artifact_changes(InitializationStage::Documents, 100),
-            56
+            tracker.observe(&issues, "digest-a"),
+            RepairDecision::NoProgress
         );
 
+        let mut tracker = RepairTracker::new(2);
+        assert_eq!(tracker.observe(&issues, "digest-a"), RepairDecision::Retry);
+        assert_eq!(tracker.observe(&issues, "digest-b"), RepairDecision::Retry);
         assert_eq!(
-            progress_for_artifact_changes(InitializationStage::RulesAndSkills, 0),
-            62
-        );
-        assert!(progress_for_artifact_changes(InitializationStage::RulesAndSkills, 4) > 62);
-        assert_eq!(
-            progress_for_artifact_changes(InitializationStage::RulesAndSkills, 100),
-            84
+            tracker.observe(&issues, "digest-c"),
+            RepairDecision::Exhausted
         );
     }
 
     #[test]
-    fn long_running_agent_advances_visible_progress_without_finishing_the_stage() {
+    fn resume_uses_last_valid_checkpoint_and_stale_process_becomes_interrupted() {
         assert_eq!(
-            progress_for_stage_activity(InitializationStage::Documents, 0, 0),
-            18
-        );
-        assert!(progress_for_stage_activity(InitializationStage::Documents, 0, 30) > 18);
-        assert_eq!(
-            progress_for_stage_activity(InitializationStage::Documents, 0, 10_000),
-            56
+            resume_stage(InitializationRunState::PlanReady),
+            InitializationStage::Documents
         );
         assert_eq!(
-            progress_for_stage_activity(InitializationStage::RulesAndSkills, 0, 10_000),
-            84
+            resume_stage(InitializationRunState::DocumentsReady),
+            InitializationStage::Rules
         );
         assert_eq!(
-            progress_for_stage_activity(InitializationStage::Repair, 0, 10_000),
-            98
+            resume_stage(InitializationRunState::RulesReady),
+            InitializationStage::Skills
         );
+
+        let mut state = InitializationState {
+            schema_version: 4,
+            run_id: "run-1".to_string(),
+            state: InitializationRunState::PlanReady,
+            process_id: Some(123),
+            ..InitializationState::default()
+        };
+        assert!(interrupt_stale_state(&mut state, 456));
+        assert_eq!(state.state, InitializationRunState::Interrupted);
+        assert!(state.process_id.is_none());
+        assert!(state
+            .issues
+            .iter()
+            .any(|issue| issue.code == "run.interrupted"));
     }
 
     #[test]
-    fn artifact_and_activity_progress_are_monotonic() {
-        let early = progress_for_stage_activity(InitializationStage::Documents, 1, 5);
-        let later = progress_for_stage_activity(InitializationStage::Documents, 1, 25);
-        let with_more_files = progress_for_stage_activity(InitializationStage::Documents, 5, 25);
-        assert!(later >= early);
-        assert!(with_more_files >= later);
+    fn stage_errors_are_aggregated_without_losing_actionable_codes() {
+        let outcome = AgentRunOutcome::non_zero(9, "last diagnostic line");
+        let issues = vec![
+            ValidationIssue {
+                code: "artifact.missing".to_string(),
+                detail: "project map missing".to_string(),
+                path: Some("docs/ai/project-map.md".to_string()),
+                stage: Some("documents".to_string()),
+            },
+            ValidationIssue {
+                code: "artifact.command.unknown".to_string(),
+                detail: "invented command".to_string(),
+                path: None,
+                stage: Some("documents".to_string()),
+            },
+        ];
+
+        let rendered = aggregate_stage_failure(InitializationStage::Documents, &issues, &outcome);
+        assert!(rendered.contains("artifact.missing"));
+        assert!(rendered.contains("project map missing"));
+        assert!(rendered.contains("artifact.command.unknown"));
+        assert!(rendered.contains("exit code 9"));
+        assert!(rendered.contains("last diagnostic line"));
+    }
+
+    #[test]
+    fn stage_scope_rejects_changes_outside_the_matching_plan_kind() {
+        let plan = plan();
+        let mut before = StageSurface::new();
+        before.insert(
+            "docs/ai/project-map.md".to_string(),
+            "document-before".to_string(),
+        );
+        let mut after = before.clone();
+        after.insert(
+            "docs/ai/project-map.md".to_string(),
+            "document-after".to_string(),
+        );
+
+        let issues = stage_scope_issues(&before, &after, InitializationStage::Rules, Some(&plan));
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "stage.scope.violation");
+        assert_eq!(issues[0].path.as_deref(), Some("docs/ai/project-map.md"));
+    }
+
+    #[test]
+    fn fake_runner_executes_all_v4_stages_and_accepts_valid_nonzero_exit() {
+        let root = fixture("full-pipeline");
+        let inventory =
+            crate::project_factory::inventory::inspect_project(&root).expect("fixture inventory");
+        let mut runner = FakeRunner {
+            plan: complete_plan(&inventory),
+            calls: Vec::new(),
+            documents_exit_non_zero: true,
+        };
+        let state_dir = crate::project_factory::initialization_state::state_directory(&root)
+            .expect("state directory");
+        let mut progress = Vec::new();
+
+        let result = initialize_with_runner(
+            &root.to_string_lossy(),
+            "codex",
+            "根据项目真实证据初始化",
+            &mut runner,
+            |event| progress.push(event),
+        )
+        .expect("v4 initialization");
+
+        assert_eq!(runner.calls, ["plan", "documents", "rules", "skills"]);
+        assert_eq!(result.status, "current-v4");
+        assert_eq!(result.phase, "complete");
+        assert_eq!(result.artifact_totals.total, 8);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("非零") || warning.contains("退出")));
+        assert_eq!(
+            fs::read_to_string(root.join("src/lib.rs")).expect("source remains"),
+            "pub fn auth_service() -> bool { true }\n"
+        );
+        assert!(root.join("docs/ai/project-map.md").is_file());
+        assert!(root.join("docs/ai/.initialization-manifest.json").is_file());
+        assert!(progress.iter().any(|event| event.phase == "complete"));
+        let state = crate::project_factory::initialization_state::load_initialization_state(&root)
+            .expect("load state")
+            .expect("state exists");
+        assert_eq!(state.state, InitializationRunState::Completed);
+        assert!(state.workspace_path.is_empty());
+
+        runner.calls.clear();
+        let repeated = initialize_with_runner(
+            &root.to_string_lossy(),
+            "codex",
+            "不应重新初始化",
+            &mut runner,
+            |_| {},
+        )
+        .expect("current v4 returns existing result");
+        assert_eq!(repeated.run_id, result.run_id);
+        assert!(runner.calls.is_empty(), "current-v4 must not run an agent");
+
+        fs::remove_dir_all(&root).expect("cleanup fixture");
+        let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn fake_runner_resumes_after_plan_checkpoint_without_replanning() {
+        let root = fixture("resume");
+        let inventory =
+            crate::project_factory::inventory::inspect_project(&root).expect("fixture inventory");
+        let plan = complete_plan(&inventory);
+        let state_dir = crate::project_factory::initialization_state::state_directory(&root)
+            .expect("state directory");
+        let workspace = state_dir.join("workspace-resume-run");
+        fs::create_dir_all(&state_dir).expect("state root");
+        crate::project_factory::inventory::create_filtered_workspace(&root, &workspace, &inventory)
+            .expect("workspace");
+        let plan_path = workspace.join(".vibe-coding-platform/artifact-plan.json");
+        fs::create_dir_all(plan_path.parent().expect("plan parent")).expect("plan parent");
+        fs::write(
+            plan_path,
+            serde_json::to_vec_pretty(&plan).expect("plan json"),
+        )
+        .expect("plan file");
+        let now = super::unix_time_ms();
+        super::save_inventory_snapshot(&root, &inventory).expect("inventory snapshot");
+        let mut state = InitializationState {
+            schema_version:
+                crate::project_factory::initialization_state::INITIALIZATION_STATE_SCHEMA_VERSION,
+            run_id: "resume-run".to_string(),
+            state: InitializationRunState::PlanReady,
+            workspace_path: workspace.to_string_lossy().to_string(),
+            process_id: Some(std::process::id().saturating_add(10_000)),
+            inventory_sha256: Some(super::inventory_hash(&inventory).expect("inventory hash")),
+            plan_sha256: Some(super::plan_hash(&plan).expect("plan hash")),
+            artifact_totals: crate::project_factory::artifact_plan::artifact_totals(&plan),
+            checkpoints: vec![crate::project_factory::types::InitializationCheckpoint {
+                state: InitializationRunState::PlanReady,
+                artifact_totals: crate::project_factory::artifact_plan::artifact_totals(&plan),
+                completed_at_unix_ms: now,
+            }],
+            started_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            ..InitializationState::default()
+        };
+        crate::project_factory::initialization_state::save_initialization_state(&root, &state)
+            .expect("save interrupted state");
+        let mut runner = FakeRunner {
+            plan,
+            calls: Vec::new(),
+            documents_exit_non_zero: false,
+        };
+
+        let result = initialize_with_runner(
+            &root.to_string_lossy(),
+            "claude",
+            "恢复初始化",
+            &mut runner,
+            |_| {},
+        )
+        .expect("resume initialization");
+
+        assert_eq!(runner.calls, ["documents", "rules", "skills"]);
+        assert_eq!(result.status, "current-v4");
+        state = crate::project_factory::initialization_state::load_initialization_state(&root)
+            .expect("load completed state")
+            .expect("completed state");
+        assert_eq!(state.state, InitializationRunState::Completed);
+        assert!(state
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.state == InitializationRunState::PlanReady));
+
+        fs::remove_dir_all(&root).expect("cleanup fixture");
+        let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn installing_resume_accepts_only_journal_managed_live_changes() {
+        let root = fixture("install-resume");
+        let inventory =
+            crate::project_factory::inventory::inspect_project(&root).expect("fixture inventory");
+        let plan = complete_plan(&inventory);
+        let (state_dir, workspace) =
+            seed_skills_ready_state(&root, &inventory, &plan, "install-resume-run");
+        let mut state =
+            crate::project_factory::initialization_state::load_initialization_state(&root)
+                .expect("state")
+                .expect("state exists");
+        state.state = InitializationRunState::Installing;
+        crate::project_factory::initialization_state::save_initialization_state(&root, &state)
+            .expect("installing state");
+        let mut manifest = crate::project_factory::initialization_state::install_planned_artifacts(
+            &root, &workspace, &plan, None,
+        )
+        .expect("partial artifact install");
+        crate::project_factory::initialization_state::install_managed_entries(&root, &mut manifest)
+            .expect("partial entry install");
+        assert!(root.join("docs/ai/project-map.md").is_file());
+        assert!(root.join("CLAUDE.md").is_file());
+        let mut runner = FakeRunner {
+            plan,
+            calls: Vec::new(),
+            documents_exit_non_zero: false,
+        };
+
+        let result = initialize_with_runner(
+            &root.to_string_lossy(),
+            "codex",
+            "恢复安装",
+            &mut runner,
+            |_| {},
+        )
+        .expect("journal-managed changes are recoverable");
+
+        assert_eq!(result.status, "current-v4");
+        assert!(runner.calls.is_empty());
+        assert_eq!(
+            fs::read_to_string(root.join("src/lib.rs")).expect("source"),
+            "pub fn auth_service() -> bool { true }\n"
+        );
+        fs::remove_dir_all(&root).expect("cleanup fixture");
+        let _ = fs::remove_dir_all(state_dir);
+    }
+
+    #[test]
+    fn installing_resume_rejects_unmanaged_source_changes() {
+        let root = fixture("install-source-conflict");
+        let inventory =
+            crate::project_factory::inventory::inspect_project(&root).expect("fixture inventory");
+        let plan = complete_plan(&inventory);
+        let (state_dir, _) =
+            seed_skills_ready_state(&root, &inventory, &plan, "source-conflict-run");
+        fs::write(
+            root.join("src/lib.rs"),
+            "pub fn auth_service() -> bool { false }\n",
+        )
+        .expect("external source edit");
+        let mut runner = FakeRunner {
+            plan,
+            calls: Vec::new(),
+            documents_exit_non_zero: false,
+        };
+
+        let error = initialize_with_runner(
+            &root.to_string_lossy(),
+            "claude",
+            "恢复安装",
+            &mut runner,
+            |_| {},
+        )
+        .expect_err("unmanaged source changes must conflict");
+
+        assert!(error.contains("发生变化"));
+        assert!(runner.calls.is_empty());
+        let state = crate::project_factory::initialization_state::load_initialization_state(&root)
+            .expect("state")
+            .expect("state exists");
+        assert_eq!(state.state, InitializationRunState::Conflict);
+        fs::remove_dir_all(&root).expect("cleanup fixture");
+        let _ = fs::remove_dir_all(state_dir);
     }
 }
