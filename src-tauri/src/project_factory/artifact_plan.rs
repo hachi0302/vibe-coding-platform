@@ -304,14 +304,95 @@ fn content_has_symbol(content: &str, symbol: &str) -> bool {
     })
 }
 
-fn declaration_keyword_before(prefix: &str) -> bool {
-    let immediate = prefix
-        .trim_end()
-        .rsplit(|character: char| !character.is_alphanumeric() && character != '_')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    [
+#[derive(Debug, PartialEq, Eq)]
+enum DeclarationToken {
+    Identifier(String),
+    Punctuation(char),
+}
+
+fn declaration_code(line: &str) -> String {
+    let mut visible = String::with_capacity(line.len());
+    let mut characters = line.chars().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    while let Some(character) = characters.next() {
+        if let Some(marker) = quote {
+            visible.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == marker {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '"' | '\'' | '`') {
+            quote = Some(character);
+            visible.push(character);
+        } else if character == '/' && characters.peek() == Some(&'/') {
+            break;
+        } else if character == '/' && characters.peek() == Some(&'*') {
+            characters.next();
+            let mut previous = '\0';
+            for comment_character in characters.by_ref() {
+                if previous == '*' && comment_character == '/' {
+                    break;
+                }
+                previous = comment_character;
+            }
+            visible.push(' ');
+        } else {
+            visible.push(character);
+        }
+    }
+    visible
+}
+
+fn declaration_tokens(line: &str) -> Vec<DeclarationToken> {
+    let mut tokens = Vec::new();
+    let mut identifier = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in line.chars() {
+        if let Some(marker) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == marker {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '"' | '\'' | '`') {
+            if !identifier.is_empty() {
+                tokens.push(DeclarationToken::Identifier(std::mem::take(
+                    &mut identifier,
+                )));
+            }
+            quote = Some(character);
+        } else if identifier_character(character) {
+            identifier.push(character);
+        } else {
+            if !identifier.is_empty() {
+                tokens.push(DeclarationToken::Identifier(std::mem::take(
+                    &mut identifier,
+                )));
+            }
+            if !character.is_whitespace() {
+                tokens.push(DeclarationToken::Punctuation(character));
+            }
+        }
+    }
+    if !identifier.is_empty() {
+        tokens.push(DeclarationToken::Identifier(identifier));
+    }
+    tokens
+}
+
+fn tokens_declare_symbol(tokens: &[DeclarationToken], symbol: &str) -> bool {
+    const DECLARATION_KEYWORDS: &[&str] = &[
         "class",
         "interface",
         "enum",
@@ -330,12 +411,83 @@ fn declaration_keyword_before(prefix: &str) -> bool {
         "table",
         "view",
         "procedure",
-    ]
-    .contains(&immediate.as_str())
-        || (prefix.contains("func (") && !prefix.trim_end().ends_with('.'))
+    ];
+    const NON_DECLARATION_PREFIXES: &[&str] = &[
+        "return", "new", "throw", "await", "yield", "if", "while", "for", "switch",
+    ];
+    tokens.iter().enumerate().any(|(index, token)| {
+        let DeclarationToken::Identifier(identifier) = token else {
+            return false;
+        };
+        if identifier != symbol {
+            return false;
+        }
+        if index > 0
+            && matches!(
+                &tokens[index - 1],
+                DeclarationToken::Identifier(previous)
+                    if DECLARATION_KEYWORDS.contains(&previous.to_ascii_lowercase().as_str())
+            )
+        {
+            return true;
+        }
+        if !matches!(
+            tokens.get(index + 1),
+            Some(DeclarationToken::Punctuation('('))
+        ) || matches!(
+            tokens.get(index.wrapping_sub(1)),
+            Some(DeclarationToken::Punctuation('.'))
+        ) {
+            return false;
+        }
+        let prefix = &tokens[..index];
+        if prefix.iter().any(|token| {
+            matches!(token, DeclarationToken::Punctuation('='))
+                || matches!(
+                    token,
+                    DeclarationToken::Identifier(identifier)
+                        if NON_DECLARATION_PREFIXES
+                            .contains(&identifier.to_ascii_lowercase().as_str())
+                )
+        }) {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut closing = None;
+        for (offset, token) in tokens[index + 1..].iter().enumerate() {
+            match token {
+                DeclarationToken::Punctuation('(') => depth += 1,
+                DeclarationToken::Punctuation(')') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        closing = Some(index + 1 + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(closing) = closing else {
+            return false;
+        };
+        let declaration_tail = tokens[closing + 1..].iter().find_map(|token| match token {
+            DeclarationToken::Punctuation(character @ ('{' | ';')) => Some(*character),
+            _ => None,
+        });
+        let typed_prefix = prefix
+            .iter()
+            .any(|token| matches!(token, DeclarationToken::Identifier(_)));
+        match declaration_tail {
+            Some('{') => typed_prefix || index == 0,
+            Some(';') => typed_prefix,
+            _ => false,
+        }
+    })
 }
 
 fn line_declares_symbol(line: &str, symbol: &str) -> bool {
+    let line = declaration_code(line);
+    let line = line.as_str();
     let mut search_from = 0;
     while let Some(relative) = line[search_from..].find(symbol) {
         let start = search_from + relative;
@@ -354,53 +506,126 @@ fn line_declares_symbol(line: &str, symbol: &str) -> bool {
                     || prefix_trimmed.ends_with(['"', '\'', '`'])
                     || prefix_trimmed == "-");
             let xml_key = prefix_trimmed.ends_with('<') && suffix_after_quote.starts_with('>');
-            let method_declaration = suffix.trim_start().starts_with('(')
-                && !prefix_trimmed.ends_with(['.', ':'])
-                && prefix_trimmed
-                    .split_whitespace()
-                    .any(|part| part.chars().any(char::is_alphabetic));
-            if configuration_key
-                || xml_key
-                || declaration_keyword_before(prefix)
-                || method_declaration
-            {
+            if configuration_key || xml_key {
                 return true;
             }
         }
         search_from = end;
     }
-    false
+    tokens_declare_symbol(&declaration_tokens(line), symbol)
+}
+
+#[derive(Clone, Copy)]
+enum DeclarationMultilineLiteral {
+    Template,
+    TripleSingle,
+    TripleDouble,
+}
+
+fn unescaped_delimiter_end(value: &str, delimiter: &str) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(relative) = value[search_from..].find(delimiter) {
+        let start = search_from + relative;
+        let backslashes = value[..start]
+            .bytes()
+            .rev()
+            .take_while(|byte| *byte == b'\\')
+            .count();
+        if backslashes % 2 == 0 {
+            return Some(start + delimiter.len());
+        }
+        search_from = start + delimiter.len();
+    }
+    None
+}
+
+fn declaration_visible_line(
+    line: &str,
+    in_block_comment: &mut bool,
+    multiline_literal: &mut Option<DeclarationMultilineLiteral>,
+) -> String {
+    let mut visible = String::with_capacity(line.len());
+    let mut index = 0;
+    while index < line.len() {
+        let remaining = &line[index..];
+        if *in_block_comment {
+            let Some(end) = remaining.find("*/") else {
+                break;
+            };
+            index += end + 2;
+            *in_block_comment = false;
+            visible.push(' ');
+            continue;
+        }
+        if let Some(literal) = *multiline_literal {
+            let delimiter = match literal {
+                DeclarationMultilineLiteral::Template => "`",
+                DeclarationMultilineLiteral::TripleSingle => "'''",
+                DeclarationMultilineLiteral::TripleDouble => "\"\"\"",
+            };
+            let Some(end) = unescaped_delimiter_end(remaining, delimiter) else {
+                break;
+            };
+            index += end;
+            *multiline_literal = None;
+            visible.push(' ');
+            continue;
+        }
+        if remaining.starts_with("//") {
+            break;
+        }
+        if remaining.starts_with("/*") {
+            index += 2;
+            *in_block_comment = true;
+            continue;
+        }
+        if remaining.starts_with("'''") {
+            index += 3;
+            *multiline_literal = Some(DeclarationMultilineLiteral::TripleSingle);
+            visible.push(' ');
+            continue;
+        }
+        if remaining.starts_with("\"\"\"") {
+            index += 3;
+            *multiline_literal = Some(DeclarationMultilineLiteral::TripleDouble);
+            visible.push(' ');
+            continue;
+        }
+        let character = remaining
+            .chars()
+            .next()
+            .expect("index remains on a character boundary");
+        let character_len = character.len_utf8();
+        if character == '`' {
+            index += character_len;
+            *multiline_literal = Some(DeclarationMultilineLiteral::Template);
+            visible.push(' ');
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            visible.push(character);
+            index += character_len;
+            let remaining = &line[index..];
+            let delimiter = if character == '\'' { "'" } else { "\"" };
+            let Some(end) = unescaped_delimiter_end(remaining, delimiter) else {
+                visible.push_str(remaining);
+                break;
+            };
+            visible.push_str(&remaining[..end]);
+            index += end;
+            continue;
+        }
+        visible.push(character);
+        index += character_len;
+    }
+    visible
 }
 
 fn content_declares_symbol(content: &str, symbol: &str) -> bool {
     let mut in_block_comment = false;
+    let mut multiline_literal = None;
     content.lines().any(|line| {
-        let mut visible = String::new();
-        let mut remaining = line;
-        loop {
-            if in_block_comment {
-                let Some(end) = remaining.find("*/") else {
-                    return false;
-                };
-                remaining = &remaining[end + 2..];
-                in_block_comment = false;
-                continue;
-            }
-            let block = remaining.find("/*");
-            let comment = remaining.find("//");
-            let end = match (block, comment) {
-                (Some(block), Some(comment)) => block.min(comment),
-                (Some(block), None) => block,
-                (None, Some(comment)) => comment,
-                (None, None) => remaining.len(),
-            };
-            visible.push_str(&remaining[..end]);
-            if end == remaining.len() || comment.is_some_and(|comment| comment == end) {
-                break;
-            }
-            remaining = &remaining[end + 2..];
-            in_block_comment = true;
-        }
+        let visible = declaration_visible_line(line, &mut in_block_comment, &mut multiline_literal);
         let visible = visible.trim();
         !visible.starts_with('#')
             && !visible.starts_with('*')
@@ -688,6 +913,34 @@ fn evidence_signals(
                 && matches!(file.kind.as_str(), "source" | "test"))
             || (inventory.layers.frontend
                 && matches!(extension.as_str(), "vue" | "svelte" | "tsx" | "jsx"));
+        let path_components = file
+            .path
+            .split('/')
+            .map(|component| component.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let node_api_boundary = path_components.windows(2).any(|components| {
+            matches!(
+                (components[0].as_str(), components[1].as_str()),
+                ("pages", "api") | ("src", "api") | ("app", "api")
+            )
+        });
+        let frontend_router = path_components
+            .iter()
+            .any(|component| matches!(component.as_str(), "router" | "routers"));
+        let node_server_path = path_components
+            .iter()
+            .any(|component| matches!(component.as_str(), "server" | "backend"));
+        let node_server_symbol = has_any_word(
+            evidence.symbol.as_deref().unwrap_or_default(),
+            &[
+                "controller",
+                "gateway",
+                "filter",
+                "middleware",
+                "resolver",
+                "handler",
+            ],
+        );
         let node_fullstack_backend = inventory.layers.frontend
             && inventory.layers.backend
             && module.is_some_and(|module| {
@@ -700,23 +953,8 @@ fn evidence_signals(
                 extension.as_str(),
                 "ts" | "js" | "mts" | "cts" | "mjs" | "cjs"
             )
-            && has_any_word(
-                &format!(
-                    "{} {}",
-                    file.path,
-                    evidence.symbol.as_deref().unwrap_or_default()
-                ),
-                &[
-                    "server",
-                    "backend",
-                    "controller",
-                    "gateway",
-                    "filter",
-                    "middleware",
-                    "route",
-                    "resolver",
-                ],
-            );
+            && !frontend_router
+            && (node_api_boundary || node_server_path || node_server_symbol);
         let backend_file = module_kind == "backend"
             || (inventory.layers.backend
                 && !inventory.layers.frontend
@@ -897,22 +1135,52 @@ fn artifact_topic_supported(
     rationale_names_a_concept && rationale_names_verified_evidence
 }
 
+fn generic_engineering_capability<'a>(values: impl IntoIterator<Item = &'a str>) -> bool {
+    let words = values
+        .into_iter()
+        .flat_map(identifier_words)
+        .collect::<BTreeSet<_>>();
+    let broad_engineering_work = [
+        "programming",
+        "programmer",
+        "development",
+        "developer",
+        "engineering",
+        "engineer",
+    ]
+    .iter()
+    .any(|category| words.contains(*category));
+    let generic_packaging = [
+        "helper",
+        "guide",
+        "assistant",
+        "workflow",
+        "playbook",
+        "handbook",
+    ]
+    .iter()
+    .any(|category| words.contains(*category));
+    broad_engineering_work || (generic_packaging && words.len() <= 2)
+}
+
 fn generic_rule(item: &ArtifactPlanItem) -> bool {
     let values = [item.id.as_str(), item.topic.as_str()];
-    values.iter().any(|value| {
-        GENERIC_RULE_PHRASES
-            .iter()
-            .any(|phrase| contains_identifier_phrase(value, phrase))
-    }) || {
-        let words = values
-            .into_iter()
-            .flat_map(identifier_words)
-            .collect::<Vec<_>>();
-        !words.is_empty()
-            && words
+    generic_engineering_capability(values)
+        || values.iter().any(|value| {
+            GENERIC_RULE_PHRASES
                 .iter()
-                .all(|word| GENERIC_RULE_WORDS.contains(&word.as_str()))
-    }
+                .any(|phrase| contains_identifier_phrase(value, phrase))
+        })
+        || {
+            let words = values
+                .into_iter()
+                .flat_map(identifier_words)
+                .collect::<Vec<_>>();
+            !words.is_empty()
+                && words
+                    .iter()
+                    .all(|word| GENERIC_RULE_WORDS.contains(&word.as_str()))
+        }
 }
 
 fn generic_skill(item: &ArtifactPlanItem) -> bool {
@@ -922,20 +1190,22 @@ fn generic_skill(item: &ArtifactPlanItem) -> bool {
         .and_then(|rest| rest.split('/').next())
         .unwrap_or_default();
     let values = [item.id.as_str(), item.topic.as_str(), skill_name];
-    values.into_iter().any(|value| {
-        GENERIC_SKILL_PHRASES
-            .iter()
-            .any(|phrase| contains_identifier_phrase(value, phrase))
-    }) || {
-        let words = values
-            .into_iter()
-            .flat_map(identifier_words)
-            .collect::<Vec<_>>();
-        !words.is_empty()
-            && words
+    generic_engineering_capability(values)
+        || values.into_iter().any(|value| {
+            GENERIC_SKILL_PHRASES
                 .iter()
-                .all(|word| GENERIC_SKILL_WORDS.contains(&word.as_str()))
-    }
+                .any(|phrase| contains_identifier_phrase(value, phrase))
+        })
+        || {
+            let words = values
+                .into_iter()
+                .flat_map(identifier_words)
+                .collect::<Vec<_>>();
+            !words.is_empty()
+                && words
+                    .iter()
+                    .all(|word| GENERIC_SKILL_WORDS.contains(&word.as_str()))
+        }
 }
 
 fn skill_declares_inline_resources(item: &ArtifactPlanItem) -> bool {
@@ -1827,27 +2097,45 @@ fn safe_secret_placeholder(value: &str) -> bool {
 }
 
 fn explanatory_secret_value(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
+    let lower = value
+        .trim()
+        .trim_matches(['"', '\'', '`', ',', ';', '.'])
+        .to_ascii_lowercase();
     [
         "environment variable",
         "from environment",
         "from the environment",
+        "from an environment",
+        "read from environment",
+        "read from the environment",
+        "read from an environment",
         "from env",
+        "managed by a secret manager",
+        "managed by the secret manager",
+        "stored in a secret manager",
+        "stored in the secret manager",
         "secret manager",
         "secrets manager",
         "credential manager",
         "key vault",
         "runtime injection",
         "环境变量",
+        "从环境变量",
+        "由环境变量",
+        "通过环境变量",
         "密钥管理",
+        "从密钥管理",
+        "由密钥管理",
         "凭据管理",
+        "从凭据管理",
+        "由凭据管理",
         "运行时注入",
         "不得写入",
         "不要写入",
         "禁止写入",
     ]
     .iter()
-    .any(|marker| lower.contains(marker))
+    .any(|marker| lower.starts_with(marker))
 }
 
 fn json_value_contains_secret(value: &serde_json::Value) -> bool {
@@ -1874,13 +2162,53 @@ fn json_value_contains_secret(value: &serde_json::Value) -> bool {
     }
 }
 
+fn json_candidate_end(content: &str, start: usize) -> Option<usize> {
+    let mut expected = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for (relative, character) in content[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => in_string = true,
+            '{' => expected.push('}'),
+            '[' => expected.push(']'),
+            '}' | ']' => {
+                if expected.pop() != Some(character) {
+                    return None;
+                }
+                if expected.is_empty() {
+                    return Some(start + relative + character.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn compact_json_contains_secret(content: &str) -> bool {
-    content.lines().any(|line| {
-        let line = line.trim();
-        (line.starts_with('{') || line.starts_with('['))
-            && serde_json::from_str::<serde_json::Value>(line)
+    let mut cursor = 0usize;
+    while let Some(relative) = content[cursor..].find(['{', '[']) {
+        let start = cursor + relative;
+        if let Some(end) = json_candidate_end(content, start) {
+            if serde_json::from_str::<serde_json::Value>(&content[start..end])
                 .is_ok_and(|value| json_value_contains_secret(&value))
-    })
+            {
+                return true;
+            }
+        }
+        cursor = start + 1;
+    }
+    false
 }
 
 fn xml_contains_secret(line: &str) -> bool {
@@ -1953,11 +2281,21 @@ fn assignment_contains_secret(line: &str) -> bool {
         if !has_assignment {
             continue;
         }
-        let mut value = inline_value.filter(|value| !value.is_empty()).or_else(|| {
+        let joined_tail;
+        let mut value = if let Some(value) = inline_value.filter(|value| !value.is_empty()) {
+            Some(value)
+        } else if separator.is_some() {
+            joined_tail = tokens[index + 1..].join(" ");
+            let comment = joined_tail
+                .find(" #")
+                .or_else(|| joined_tail.find(" //"))
+                .unwrap_or(joined_tail.len());
+            Some(joined_tail[..comment].trim())
+        } else {
             tokens
                 .get(index + 1)
                 .map(|value| value.trim_matches(['"', '\'', ',']))
-        });
+        };
         if normalized_secret_key(cli_key) == "authorization"
             && value.is_some_and(|value| {
                 matches!(value.to_ascii_lowercase().as_str(), "bearer" | "basic")
@@ -1965,9 +2303,9 @@ fn assignment_contains_secret(line: &str) -> bool {
         {
             value = tokens.get(index + 2).copied();
         }
-        if value
-            .is_some_and(|value| !safe_secret_placeholder(value) && !explanatory_secret_value(line))
-        {
+        if value.is_some_and(|value| {
+            !safe_secret_placeholder(value) && !explanatory_secret_value(value)
+        }) {
             return true;
         }
     }
@@ -2229,6 +2567,13 @@ fn change_directory(line: &str, cwd: &mut String) -> bool {
 }
 
 fn collect_command_line(line: &str, cwd: &mut String, commands: &mut Vec<CommandReference>) {
+    if contains_shell_composition(line) {
+        commands.push(CommandReference {
+            cwd: cwd.clone(),
+            command: line.trim().to_string(),
+        });
+        return;
+    }
     for part in line.split("&&").flat_map(|part| part.split(';')) {
         let part = part.trim();
         if part.is_empty() || part.starts_with('#') || part.starts_with("REM ") {
@@ -2323,6 +2668,41 @@ fn command_candidates(content: &str) -> Vec<CommandReference> {
         inline_command_candidates(line, &mut commands);
     }
     commands
+}
+
+fn local_script_executable(command: &str) -> Option<&str> {
+    let executable = command.split_whitespace().next()?;
+    let extension = Path::new(executable)
+        .extension()
+        .and_then(|extension| extension.to_str())?;
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "sh" | "bash" | "zsh" | "ps1" | "cmd" | "bat" | "py" | "rb"
+    )
+    .then_some(executable)
+}
+
+fn contains_shell_composition(command: &str) -> bool {
+    command.contains("$(")
+        || command
+            .chars()
+            .any(|character| matches!(character, ';' | '&' | '|' | '<' | '>' | '`' | '\n' | '\r'))
+}
+
+fn repository_local_script_allowed(workspace: &Path, command: &CommandReference) -> bool {
+    if contains_shell_composition(&command.command) {
+        return false;
+    }
+    let Some(executable) = local_script_executable(&command.command) else {
+        return false;
+    };
+    let Some(relative) = normalize_command_cwd(&command.cwd, executable) else {
+        return false;
+    };
+    let Ok(relative) = normalized_relative_path(&relative) else {
+        return false;
+    };
+    read_project_bytes_handle_safe(workspace, relative).is_ok_and(|bytes| bytes.is_some())
 }
 
 fn evidence_is_cited_together(content: &str, path: &str, symbol: &str) -> bool {
@@ -2550,7 +2930,9 @@ pub fn validate_staged_artifacts(
             ));
         }
         for command in command_candidates(&content) {
-            if !known_commands.contains(&command) {
+            if !known_commands.contains(&command)
+                && !repository_local_script_allowed(workspace, &command)
+            {
                 issues.push(issue(
                     "artifact.command.unknown",
                     "文档包含无法从项目清单确认的命令",
@@ -4305,6 +4687,12 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
         let explanation = "password: 从环境变量读取，不得写入文档。\nsecret: managed by a secret manager.\ntoken: read from an environment variable.";
+        for line in explanation.lines() {
+            assert!(
+                !contains_secret_material(line),
+                "explanatory line was treated as a literal secret: {line}"
+            );
+        }
         let mut plan = valid_plan();
         plan.artifacts[0].rationale = format!("项目配置说明：{explanation}");
         plan.artifacts.truncate(1);
@@ -4568,6 +4956,498 @@ mod tests {
                 .filter(|issue| issue.code == "artifact.section.empty")
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn evidence_symbols_reject_calls_inside_strings_and_comments() {
+        const STRING_AND_COMMENT: &str = r#"class Holder {
+    String example = "DangerousFeature(";
+    // DangerousFeature(input) is documentation, not a declaration.
+}"#;
+        let fixture = Fixture::new();
+        fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
+        fixture.write("iam-service/src/main/java/Holder.java", STRING_AND_COMMENT);
+        let mut inventory = inventory(false, true);
+        inventory.files.push(InventoryFile {
+            path: "iam-service/src/main/java/Holder.java".into(),
+            kind: "source".into(),
+            size: STRING_AND_COMMENT.len() as u64,
+            sha256: content_sha256(STRING_AND_COMMENT.as_bytes()),
+            module: Some("iam-service".into()),
+        });
+        let mut plan = valid_plan();
+        plan.artifacts[0].evidence = vec![EvidenceReference {
+            path: "iam-service/src/main/java/Holder.java".into(),
+            symbol: Some("DangerousFeature".into()),
+        }];
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory, &plan);
+
+        assert!(codes(&issues).contains(&"plan.evidence.symbol-missing"));
+    }
+
+    #[test]
+    fn declaration_lines_ignore_comment_bodies_with_declaration_shapes() {
+        assert!(!line_declares_symbol(
+            "// public void DangerousFeature() {}",
+            "DangerousFeature"
+        ));
+        assert!(!line_declares_symbol(
+            "/* public void DangerousFeature() {} */",
+            "DangerousFeature"
+        ));
+        assert!(line_declares_symbol(
+            "public void DangerousFeature() {}",
+            "DangerousFeature"
+        ));
+        assert!(!content_declares_symbol(
+            "/*\npublic void DangerousFeature() {}\n*/",
+            "DangerousFeature"
+        ));
+        assert!(content_declares_symbol(
+            "/* public void OtherFeature() {} */\npublic void DangerousFeature() {}",
+            "DangerousFeature"
+        ));
+    }
+
+    #[test]
+    fn evidence_symbols_reject_bare_calls_and_multiline_string_declarations() {
+        fn symbol_is_missing(source: &str, symbol: &str) -> bool {
+            let fixture = Fixture::new();
+            fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
+            fixture.write("iam-service/src/main/java/Holder.java", source);
+            let mut inventory = inventory(false, true);
+            inventory.files.push(InventoryFile {
+                path: "iam-service/src/main/java/Holder.java".into(),
+                kind: "source".into(),
+                size: source.len() as u64,
+                sha256: content_sha256(source.as_bytes()),
+                module: Some("iam-service".into()),
+            });
+            let mut plan = valid_plan();
+            plan.artifacts[0].evidence = vec![EvidenceReference {
+                path: "iam-service/src/main/java/Holder.java".into(),
+                symbol: Some(symbol.into()),
+            }];
+
+            codes(&validate_artifact_plan(fixture.path(), &inventory, &plan))
+                .contains(&"plan.evidence.symbol-missing")
+        }
+
+        assert_eq!(
+            [
+                symbol_is_missing("DangerousFeature();", "DangerousFeature"),
+                symbol_is_missing(
+                    "const docs = `\nfunction DangerousFeature() {}\n`;\nfunction RealFeature() {}",
+                    "DangerousFeature"
+                ),
+                symbol_is_missing(
+                    "DOC = \"\"\"\ndef DangerousFeature():\n    pass\n\"\"\"\ndef RealFeature():\n    pass",
+                    "DangerousFeature"
+                ),
+                symbol_is_missing(
+                    "const docs = `\nfunction DangerousFeature() {}\n`;\nfunction RealFeature() {}",
+                    "RealFeature"
+                ),
+                symbol_is_missing(
+                    "DOC = '''\ndef DangerousFeature():\n    pass\n'''\ndef RealFeature():\n    pass",
+                    "RealFeature"
+                ),
+            ],
+            [true, true, true, false, false]
+        );
+    }
+
+    #[test]
+    fn fullstack_pages_api_and_src_api_handlers_prove_backend_layers() {
+        const PAGES_HANDLER: &str = "export function getUsers() { return []; }";
+        const SRC_HANDLER: &str = "export const sessionHandler = () => ({ ok: true });";
+        let fixture = Fixture::new();
+        fixture.write("pages/api/users.ts", PAGES_HANDLER);
+        fixture.write("src/api/session.ts", SRC_HANDLER);
+        let inventory = ProjectInventory {
+            schema_version: 1,
+            project_name: "iam".into(),
+            layers: ProjectLayers {
+                frontend: true,
+                backend: true,
+            },
+            modules: vec![ProjectModule {
+                name: "root".into(),
+                path: ".".into(),
+                kind: "frontend".into(),
+                manifests: vec!["package.json".into()],
+                source_roots: vec!["pages".into(), "src".into()],
+            }],
+            source_roots: vec!["pages".into(), "src".into()],
+            files: vec![
+                InventoryFile {
+                    path: "pages/api/users.ts".into(),
+                    kind: "source".into(),
+                    size: PAGES_HANDLER.len() as u64,
+                    sha256: content_sha256(PAGES_HANDLER.as_bytes()),
+                    module: Some("root".into()),
+                },
+                InventoryFile {
+                    path: "src/api/session.ts".into(),
+                    kind: "source".into(),
+                    size: SRC_HANDLER.len() as u64,
+                    sha256: content_sha256(SRC_HANDLER.as_bytes()),
+                    module: Some("root".into()),
+                },
+            ],
+            commands: vec![],
+            risk_keys: vec![],
+        };
+        let artifacts = [
+            ("users-api", "pages/api/users.ts", "getUsers", "pages"),
+            ("session-api", "src/api/session.ts", "sessionHandler", "src"),
+        ]
+        .into_iter()
+        .map(|(id, path, symbol, root)| {
+            let mut artifact = item(
+                id,
+                ArtifactKind::Rule,
+                &format!(".claude/rules/project/backend/{id}.md"),
+                id,
+            );
+            artifact.evidence = vec![EvidenceReference {
+                path: path.into(),
+                symbol: Some(symbol.into()),
+            }];
+            artifact.covers = vec!["root".into(), root.into()];
+            artifact
+        })
+        .collect();
+        let plan = ArtifactPlan {
+            schema_version: 1,
+            project_name: "iam".into(),
+            artifacts,
+            exclusions: vec![],
+        };
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory, &plan);
+
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "plan.layer.mismatch")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn frontend_router_routes_do_not_prove_a_backend_layer() {
+        const ROUTES: &str = "export const accountRoute = { path: '/account' };";
+        let fixture = Fixture::new();
+        fixture.write("src/router/route.ts", ROUTES);
+        let inventory = ProjectInventory {
+            schema_version: 1,
+            project_name: "iam".into(),
+            layers: ProjectLayers {
+                frontend: true,
+                backend: true,
+            },
+            modules: vec![ProjectModule {
+                name: "root".into(),
+                path: ".".into(),
+                kind: "frontend".into(),
+                manifests: vec!["package.json".into()],
+                source_roots: vec!["src".into()],
+            }],
+            source_roots: vec!["src".into()],
+            files: vec![InventoryFile {
+                path: "src/router/route.ts".into(),
+                kind: "source".into(),
+                size: ROUTES.len() as u64,
+                sha256: content_sha256(ROUTES.as_bytes()),
+                module: Some("root".into()),
+            }],
+            commands: vec![],
+            risk_keys: vec![],
+        };
+        let mut artifact = item(
+            "account-route",
+            ArtifactKind::Rule,
+            ".claude/rules/project/backend/account-route.md",
+            "account-route",
+        );
+        artifact.evidence = vec![EvidenceReference {
+            path: "src/router/route.ts".into(),
+            symbol: Some("accountRoute".into()),
+        }];
+        artifact.covers = vec!["root".into(), "src".into()];
+        let plan = ArtifactPlan {
+            schema_version: 1,
+            project_name: "iam".into(),
+            artifacts: vec![artifact],
+            exclusions: vec![],
+        };
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory, &plan);
+
+        assert!(codes(&issues).contains(&"plan.layer.mismatch"));
+    }
+
+    #[test]
+    fn generic_engineering_capability_categories_are_rejected_with_project_prefixes() {
+        let fixture = Fixture::new();
+        fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
+        let mut plan = valid_plan();
+        for id in [
+            "auth-programming-helper",
+            "iam-development-guide",
+            "billing-engineering-assistant",
+        ] {
+            plan.artifacts.push(item(
+                id,
+                ArtifactKind::Skill,
+                &format!(".claude/skills/{id}/SKILL.md"),
+                id,
+            ));
+        }
+        plan.artifacts.push(item(
+            "auth-programming-guide",
+            ArtifactKind::Rule,
+            ".claude/rules/project/auth-programming-guide.md",
+            "auth-programming-guide",
+        ));
+        plan.artifacts.push(item(
+            "tenant-import-guide",
+            ArtifactKind::Skill,
+            ".claude/skills/tenant-import-guide/SKILL.md",
+            "tenant-import-guide",
+        ));
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory(false, true), &plan);
+
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "plan.skill.generic")
+                .count(),
+            3
+        );
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "plan.rule.generic")
+                .count(),
+            1
+        );
+        assert!(!issues.iter().any(|issue| {
+            issue.code == "plan.skill.generic"
+                && issue.path.as_deref() == Some(".claude/skills/tenant-import-guide/SKILL.md")
+        }));
+    }
+
+    #[test]
+    fn embedded_json_secrets_are_found_inside_curl_and_arbitrary_text() {
+        let cases = [
+            "curl -d '{\"user\":\"iam\",\"password\":\"curl-secret-value\"}' https://example.test",
+            "request payload={\"safe\":\"value\",\"nested\":{\"apiKey\":\"embedded-secret-value\"}} follows",
+        ];
+        for declaration in cases {
+            let fixture = Fixture::new();
+            fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
+            let mut plan = valid_plan();
+            plan.artifacts.truncate(1);
+            let artifact = &plan.artifacts[0];
+            fixture.write(
+                &artifact.target_path,
+                &valid_document_content(artifact, declaration),
+            );
+
+            let issues = validate_staged_artifacts(
+                fixture.path(),
+                &inventory(false, true),
+                &plan,
+                Some(ArtifactKind::Document),
+            );
+
+            assert!(
+                codes(&issues).contains(&"artifact.secret.detected"),
+                "embedded JSON was accepted: {declaration}"
+            );
+        }
+    }
+
+    #[test]
+    fn explanatory_tail_does_not_hide_a_real_assignment_value() {
+        let fixture = Fixture::new();
+        fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        fixture.write(
+            &artifact.target_path,
+            &valid_document_content(
+                artifact,
+                "password: real-secret-value # 后续改为环境变量注入",
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert!(codes(&issues).contains(&"artifact.secret.detected"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_local_scripts_are_resolved_handle_safely_from_command_cwd() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
+        fixture.write("scripts/verify.sh", "#!/bin/sh\nexit 0\n");
+        symlink("verify.sh", fixture.path().join("scripts/linked-verify.sh"))
+            .expect("script symlink");
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        fixture.write(
+            &artifact.target_path,
+            &valid_document_content(
+                artifact,
+                "```bash\n./scripts/verify.sh --root\ncd iam-service\n../scripts/verify.sh --module\n./scripts/verify.sh --wrong-cwd\ncd ..\n./scripts/linked-verify.sh\n```",
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "artifact.command.unknown")
+                .count(),
+            2,
+            "only the wrong-cwd and symlink scripts should be rejected: {issues:#?}"
+        );
+    }
+
+    #[test]
+    fn repository_local_script_fallback_rejects_shell_composition() {
+        let fixture = Fixture::new();
+        fixture.write("scripts/verify.sh", "#!/bin/sh\nexit 0\n");
+        let unsafe_commands = [
+            "./scripts/verify.sh ; echo injected",
+            "./scripts/verify.sh && echo injected",
+            "./scripts/verify.sh || echo injected",
+            "./scripts/verify.sh | sh",
+            "./scripts/verify.sh > result.txt",
+            "./scripts/verify.sh < input.txt",
+            "./scripts/verify.sh `echo injected`",
+            "./scripts/verify.sh $(echo injected)",
+        ];
+
+        for command in unsafe_commands {
+            assert!(
+                !repository_local_script_allowed(
+                    fixture.path(),
+                    &CommandReference {
+                        cwd: ".".into(),
+                        command: command.into(),
+                    }
+                ),
+                "shell composition was accepted: {command}"
+            );
+        }
+        assert!(repository_local_script_allowed(
+            fixture.path(),
+            &CommandReference {
+                cwd: ".".into(),
+                command: "./scripts/verify.sh --root".into(),
+            }
+        ));
+    }
+
+    #[test]
+    fn staged_local_script_commands_reject_shell_composition() {
+        let fixture = Fixture::new();
+        fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
+        fixture.write("scripts/verify.sh", "#!/bin/sh\nexit 0\n");
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        fixture.write(
+            &artifact.target_path,
+            &valid_document_content(
+                artifact,
+                "```bash
+./scripts/verify.sh ; echo injected
+./scripts/verify.sh && echo injected
+./scripts/verify.sh || echo injected
+./scripts/verify.sh | sh
+./scripts/verify.sh > result.txt
+./scripts/verify.sh < input.txt
+./scripts/verify.sh `echo injected`
+./scripts/verify.sh $(echo injected)
+```",
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "artifact.command.unknown")
+                .count(),
+            8,
+            "every composed local-script command should be rejected: {issues:#?}"
+        );
+    }
+
+    #[test]
+    fn staged_local_scripts_reject_composition_before_the_script() {
+        let fixture = Fixture::new();
+        fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
+        fixture.write("scripts/verify.sh", "#!/bin/sh\nexit 0\n");
+        let mut plan = valid_plan();
+        plan.artifacts.truncate(1);
+        let artifact = &plan.artifacts[0];
+        fixture.write(
+            &artifact.target_path,
+            &valid_document_content(
+                artifact,
+                "```bash
+echo injected && ./scripts/verify.sh
+TOKEN=$(whoami) ./scripts/verify.sh
+```",
+            ),
+        );
+
+        let issues = validate_staged_artifacts(
+            fixture.path(),
+            &inventory(false, true),
+            &plan,
+            Some(ArtifactKind::Document),
+        );
+
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "artifact.command.unknown")
+                .count(),
+            2,
+            "composition before a local script must stay visible: {issues:#?}"
         );
     }
 }
