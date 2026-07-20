@@ -289,12 +289,12 @@ const ARTIFACT_PLAN_SCHEMA: &str = r#"{
   "artifacts": [{
     "id": "english-kebab-case-logical-id",
     "kind": "document | rule | skill",
-    "layer": "common | frontend | backend | database | integration",
-    "topic": "project-specific-topic",
-    "targetPath": "allowed English ASCII kebab-case path",
+    "layer": "common | contract | frontend | backend | database | integration",
+    "topic": "evidence-derived-project-specific-topic",
+    "targetPath": "exact allowed path for kind",
     "rationale": "Chinese project-specific reason",
-    "evidence": [{"path": "real/relative/path", "symbol": "realSymbol"}],
-    "covers": ["project-specific-capability"],
+    "evidence": [{"path": "exact inventory.files[].path", "symbol": "realDeclaredSymbolOrConfigurationKey"}],
+    "covers": ["exact module.name, module.path, or sourceRoot value listed below"],
     "requiredSections": ["Chinese required section"]
   }],
   "exclusions": [{
@@ -303,6 +303,68 @@ const ARTIFACT_PLAN_SCHEMA: &str = r#"{
     "evidence": [{"path": "real/relative/path", "symbol": "realSymbol"}]
   }]
 }"#;
+
+const PLAN_COMMON_DOCUMENT_IDS: &[&str] = &[
+    "project-map",
+    "architecture-boundaries",
+    "reusable-assets",
+    "verification-playbook",
+    "known-risks",
+];
+
+fn exact_json_values<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    let values = values
+        .into_iter()
+        .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{values}]")
+}
+
+fn build_plan_stage_contract(inventory: &ProjectInventory) -> String {
+    let module_names =
+        exact_json_values(inventory.modules.iter().map(|module| module.name.as_str()));
+    let module_paths =
+        exact_json_values(inventory.modules.iter().map(|module| module.path.as_str()));
+    let source_roots = exact_json_values(inventory.source_roots.iter().map(String::as_str));
+    let common_document_ids = exact_json_values(PLAN_COMMON_DOCUMENT_IDS.iter().copied());
+    format!(
+        r#"请只创建 `.vibe-coding-platform/artifact-plan.json`，输出必须是 JSON，严格匹配以下 exact JSON schema：
+{ARTIFACT_PLAN_SCHEMA}
+
+计划校验器的精确契约（优先级高于任何推测）：
+- `schemaVersion` 必须为 1；`projectName` 必须逐字复制 inventory.projectName。
+- 每个 `id` 和 `targetPath` 必须唯一；新增路径的每个组件均使用 English ASCII kebab-case，固定文件名 README.md 与 SKILL.md 除外。
+- document 只允许 `docs/ai/<english-kebab-case>.md`。
+- rule 只允许 `.claude/rules/project/<english-kebab-case>.md`（可按英文 kebab-case 子目录组织），并且必须包含精确路由项 `id: rule-router`、`kind: rule`、`targetPath: .claude/rules/project/README.md`。
+- skill 只允许 `.claude/skills/<project-specific-kebab-case>/SKILL.md`，每个 skill 必须绑定本项目复杂或高风险流程，禁止通用开发/调试/评审/重构 skill。
+- 必须创建以下 5 个 common document id，逐字使用且 `kind: document`、`layer: common`、路径位于 docs/ai：{common_document_ids}。
+
+覆盖契约：
+- module.name exact values: {module_names}
+- module.path exact values: {module_paths}
+- sourceRoot exact values: {source_roots}
+- covers 只能逐字复制上述 exact values，不能填写能力名、主题名、中文翻译或自行改写。每个 module 和每个 sourceRoot 都必须由至少一个 artifact 覆盖；同一模块可用其 module.name 或 module.path 覆盖，但每个 sourceRoot 必须单独覆盖。
+- 每个 covers 值必须至少有一条同一 module/sourceRoot 内的 evidence path；不能用其他模块证据代替。不能真实覆盖时才写 exclusion。
+- exclusions.target 也只能逐字复制上述 exact values；必须提供不少于 8 个中文字的项目化原因，以及属于该 module/sourceRoot 的真实 evidence path + symbol。不要排除仅仅因为尚未阅读。
+
+证据契约：
+- `evidence.path` 必须逐字复制 inventory.files[].path，且文件必须属于对应 covers/exclusion；不得引用未进入清单的文件或生成中的产物。
+- `evidence.symbol` 必须是该证据文件正文中真实 declaration 或 configuration key：例如真实 class/function/type/const/table/view 名或 YAML/JSON/properties 配置键。
+- symbol 必须是单个标识符、限定名或配置键；调用表达式、注释、字符串或推测的名称都不是声明。不要填写 `ClassName.method()`、代码片段、自然语言或只有 `service`/`api`/`config` 等泛词。
+- 先打开证据文件核对 symbol 的真实声明，再写入计划；路径存在但 symbol 只被调用、注释或字符串提及仍会失败。
+
+层级与主题契约：
+- `layer` 只能是 `common | contract | frontend | backend | database | integration`。
+- `common` 仅用于上述 5 个基础文档，或同时具有真实前端与后端证据的跨层文档；`contract` 必须有 API/client/SDK/DTO/OpenAPI/proto 边界证据或同时具有前后端证据。
+- `frontend`、`backend`、`database`、`integration` 必须分别由 inventory 中匹配的前端、后端、数据库迁移/模型、第三方/API 边界路径与声明证据支持；没有对应证据就不要规划该层产物。
+- 除 5 个基础文档和 rule-router 外，`id`/`topic`/`targetPath` 的主题词必须能在 evidence path 或 symbol 中找到；否则 rationale 必须明确写出该项目概念，并逐字引用支持它的 evidence path 或 symbol。不要使用泛化的 backend-engineering、frontend-development、coding-guidelines 等主题。
+
+项目 skill 契约：
+- skill 的 rationale 必须明确写出“项目资源全部内嵌在 SKILL.md 中”，`requiredSections` 必须包含精确章节名 `项目资源`。
+- skill 还必须规划触发条件、真实前置证据、项目专属步骤、完成 Gate、失败处理与可执行验证；不得规划 sidecar resource、模板目录或外部资源文件。"#
+    )
+}
 
 pub fn build_v4_stage_prompt(
     stage: InitializationStage,
@@ -314,9 +376,7 @@ pub fn build_v4_stage_prompt(
         .unwrap_or_else(|_| "{\"error\":\"inventory serialization failed\"}".to_string());
     let issue_json = serde_json::to_string_pretty(issues).unwrap_or_else(|_| "[]".to_string());
     let stage_contract = match stage {
-        InitializationStage::Plan => format!(
-            "请只创建 `.vibe-coding-platform/artifact-plan.json`，严格匹配以下 exact JSON schema：\n{ARTIFACT_PLAN_SCHEMA}"
-        ),
+        InitializationStage::Plan => build_plan_stage_contract(inventory),
         InitializationStage::Documents
         | InitializationStage::Rules
         | InitializationStage::Skills => {
@@ -329,11 +389,12 @@ pub fn build_v4_stage_prompt(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let scoped_json = serde_json::to_string_pretty(&scoped)
-                .unwrap_or_else(|_| "[]".to_string());
+            let scoped_json =
+                serde_json::to_string_pretty(&scoped).unwrap_or_else(|_| "[]".to_string());
             format!(
                 "本阶段类型：{}。只允许编辑本阶段 JSON 中的 targetPath，禁止编辑其他计划产物：\n{}",
-                artifact_kind_name(kind), scoped_json
+                artifact_kind_name(kind),
+                scoped_json
             )
         }
         _ => "该阶段不调用智能体。".to_string(),
@@ -1848,6 +1909,56 @@ mod tests {
         assert!(!prompt.contains("docs/backend/latest/接口文档/API接口总览.md"));
         assert!(!prompt.contains("业务功能总览.md"));
         assert!(!prompt.contains("规范约束"));
+    }
+
+    #[test]
+    fn v4_plan_prompt_declares_the_exact_validator_contract() {
+        let prompt = build_v4_stage_prompt(InitializationStage::Plan, &inventory(), None, &[]);
+
+        assert!(prompt.contains("docs/ai/<english-kebab-case>.md"));
+        assert!(prompt.contains(".claude/rules/project/<english-kebab-case>.md"));
+        assert!(prompt.contains(".claude/rules/project/README.md"));
+        assert!(prompt.contains(".claude/skills/<project-specific-kebab-case>/SKILL.md"));
+        for id in [
+            "project-map",
+            "architecture-boundaries",
+            "reusable-assets",
+            "verification-playbook",
+            "known-risks",
+        ] {
+            assert!(prompt.contains(id), "missing common document id {id}");
+        }
+        assert!(prompt.contains("common | contract | frontend | backend | database | integration"));
+        assert!(prompt.contains("真实 declaration 或 configuration key"));
+        assert!(prompt.contains("调用表达式、注释、字符串或推测的名称"));
+        assert!(prompt.contains("项目资源"));
+        assert!(prompt.contains("全部内嵌在 SKILL.md"));
+    }
+
+    #[test]
+    fn v4_plan_prompt_enumerates_exact_inventory_coverage_values() {
+        let mut inventory = inventory();
+        inventory.modules.push(ProjectModule {
+            name: "billing-service".to_string(),
+            path: "services/billing".to_string(),
+            kind: "backend".to_string(),
+            manifests: vec!["services/billing/Cargo.toml".to_string()],
+            source_roots: vec!["services/billing/src".to_string()],
+        });
+        inventory
+            .source_roots
+            .push("services/billing/src".to_string());
+
+        let prompt = build_v4_stage_prompt(InitializationStage::Plan, &inventory, None, &[]);
+
+        assert!(prompt.contains("module.name exact values: [\"service\", \"billing-service\"]"));
+        assert!(prompt.contains("module.path exact values: [\".\", \"services/billing\"]"));
+        assert!(prompt.contains("sourceRoot exact values: [\"src\", \"services/billing/src\"]"));
+        assert!(prompt.contains("covers 只能逐字复制上述 exact values"));
+        assert!(prompt.contains("每个 module 和每个 sourceRoot"));
+        assert!(prompt.contains("同一 module/sourceRoot 内的 evidence path"));
+        assert!(prompt.contains("exclusions.target 也只能逐字复制上述 exact values"));
+        assert!(!prompt.contains("project-specific-capability"));
     }
 
     #[test]
