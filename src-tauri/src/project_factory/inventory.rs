@@ -1,7 +1,15 @@
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
@@ -34,7 +42,15 @@ pub fn inspect_project(root: &Path) -> Result<ProjectInventory, String> {
     inspect_project_platform(root)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)))]
 fn inspect_project_platform(_root: &Path) -> Result<ProjectInventory, String> {
     Err(
         "Project inventory is unsupported on this platform until handle-safe traversal is available"
@@ -42,7 +58,15 @@ fn inspect_project_platform(_root: &Path) -> Result<ProjectInventory, String> {
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn inspect_project_platform(root: &Path) -> Result<ProjectInventory, String> {
     validate_root(root)?;
     let mut paths = collect_files(root)?;
@@ -68,7 +92,7 @@ fn inspect_project_platform(root: &Path) -> Result<ProjectInventory, String> {
                 continue;
             };
             redacted
-        } else if suspected_credentials(&bytes) {
+        } else if suspected_credentials(&bytes) || credential_like_unstructured_file(&path) {
             continue;
         } else {
             (bytes, Vec::new())
@@ -125,7 +149,15 @@ pub fn create_filtered_workspace(
     create_filtered_workspace_platform(root, workspace, inventory)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)))]
 fn create_filtered_workspace_platform(
     _root: &Path,
     _workspace: &Path,
@@ -137,7 +169,15 @@ fn create_filtered_workspace_platform(
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn create_filtered_workspace_platform(
     root: &Path,
     workspace: &Path,
@@ -149,7 +189,15 @@ fn create_filtered_workspace_platform(
     writer.verify_path()
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn copy_inventory(
     root: &Path,
     inventory: &ProjectInventory,
@@ -171,7 +219,8 @@ fn copy_inventory(
         let bytes = safe_read.bytes;
         if binary(&bytes)
             || private_key_content(&bytes)
-            || (!configuration_file(&source) && suspected_credentials(&bytes))
+            || (!configuration_file(&source)
+                && (suspected_credentials(&bytes) || credential_like_unstructured_file(&source)))
         {
             return Err(format!("Inventory source became excluded: {}", file.path));
         }
@@ -193,7 +242,15 @@ fn copy_inventory(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn read_bounded(file: &mut fs::File) -> Result<Option<Vec<u8>>, String> {
     let mut bytes = Vec::new();
     file.take(MAX_FILE_SIZE_BYTES + 1)
@@ -206,7 +263,15 @@ fn read_bounded(file: &mut fs::File) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn read_project_file(root: &Path, relative: &Path) -> Result<Option<SafeRead>, String> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -272,13 +337,29 @@ fn read_project_file(root: &Path, relative: &Path) -> Result<Option<SafeRead>, S
     Err(format!("Cannot open project file: {}", relative.display()))
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 struct WorkspaceWriter {
     path: PathBuf,
     directory: fs::File,
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 impl WorkspaceWriter {
     fn create(workspace: &Path) -> Result<Self, String> {
         use std::ffi::CString;
@@ -461,7 +542,7 @@ impl WorkspaceWriter {
     }
 }
 
-#[cfg(all(unix, target_os = "macos"))]
+#[cfg(target_vendor = "apple")]
 fn platform_workspace_path(path: PathBuf) -> PathBuf {
     for (alias, physical) in [
         (Path::new("/var"), Path::new("/private/var")),
@@ -475,12 +556,27 @@ fn platform_workspace_path(path: PathBuf) -> PathBuf {
     path
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn platform_workspace_path(path: PathBuf) -> PathBuf {
     path
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn open_or_create_directory_chain(path: &Path) -> Result<std::os::fd::OwnedFd, String> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -552,7 +648,15 @@ fn open_or_create_directory_chain(path: &Path) -> Result<std::os::fd::OwnedFd, S
     Ok(directory)
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn absolute_path(path: &Path) -> Result<PathBuf, String> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -575,7 +679,15 @@ fn validate_root(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -660,15 +772,26 @@ fn collect_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(result)
 }
 
-#[cfg(not(unix))]
-fn collect_files(_root: &Path) -> Result<Vec<PathBuf>, String> {
-    Err("Project inventory is unsupported without handle-safe directory traversal".to_string())
-}
-
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 struct DirectoryStream(*mut libc::DIR);
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 impl Drop for DirectoryStream {
     fn drop(&mut self) {
         unsafe {
@@ -677,7 +800,15 @@ impl Drop for DirectoryStream {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn directory_entry_names(
     directory_fd: std::os::fd::RawFd,
     relative: &Path,
@@ -730,34 +861,46 @@ fn directory_entry_names(
     Ok(names)
 }
 
-#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn errno_pointer() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }
 
-#[cfg(all(
-    unix,
-    any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    )
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
 ))]
 fn errno_pointer() -> *mut libc::c_int {
     unsafe { libc::__error() }
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn set_errno(value: libc::c_int) {
     unsafe {
         *errno_pointer() = value;
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn current_errno() -> libc::c_int {
     unsafe { *errno_pointer() }
 }
@@ -936,7 +1079,7 @@ fn redact_configuration(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, Vec<Strin
         ConfigurationFormat::Json => {
             let mut value: serde_json::Value = serde_json::from_slice(bytes)
                 .map_err(|_| format!("Invalid JSON configuration: {}", path.display()))?;
-            redact_json_value(&mut value, None, &mut keys);
+            redact_json_value(&mut value, None, false, &mut keys);
             serde_json::to_vec_pretty(&value)
                 .map_err(|_| format!("Cannot serialize JSON configuration: {}", path.display()))?
         }
@@ -945,7 +1088,7 @@ fn redact_configuration(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, Vec<Strin
                 .map_err(|_| format!("Invalid UTF-8 TOML configuration: {}", path.display()))?;
             let mut value: toml::Value = toml::from_str(text)
                 .map_err(|_| format!("Invalid TOML configuration: {}", path.display()))?;
-            redact_toml_value(&mut value, None, &mut keys);
+            redact_toml_value(&mut value, None, false, &mut keys);
             toml::to_string_pretty(&value)
                 .map(String::into_bytes)
                 .map_err(|_| format!("Cannot serialize TOML configuration: {}", path.display()))?
@@ -953,7 +1096,7 @@ fn redact_configuration(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, Vec<Strin
         ConfigurationFormat::Yaml => {
             let mut value: serde_yaml::Value = serde_yaml::from_slice(bytes)
                 .map_err(|_| format!("Invalid YAML configuration: {}", path.display()))?;
-            redact_yaml_value(&mut value, None, &mut keys);
+            redact_yaml_value(&mut value, None, false, &mut keys);
             serde_yaml::to_string(&value)
                 .map(String::into_bytes)
                 .map_err(|_| format!("Cannot serialize YAML configuration: {}", path.display()))?
@@ -1027,21 +1170,27 @@ fn redact_xml(bytes: &[u8], keys: &mut Vec<String>) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-fn redact_json_value(value: &mut serde_json::Value, context: Option<&str>, keys: &mut Vec<String>) {
+fn redact_json_value(
+    value: &mut serde_json::Value,
+    context: Option<&str>,
+    protected: bool,
+    keys: &mut Vec<String>,
+) {
+    if protected && !value.is_object() && !value.is_array() {
+        *value = serde_json::Value::String(REDACTED.to_string());
+        keys.push(context.unwrap_or("credential-container").to_string());
+        return;
+    }
     match value {
         serde_json::Value::Object(object) => {
             for (key, value) in object {
-                if sensitive_key(key) {
-                    *value = serde_json::Value::String(REDACTED.to_string());
-                    keys.push(key.clone());
-                } else {
-                    redact_json_value(value, Some(key), keys);
-                }
+                let protected = protected || credential_container(key) || sensitive_key(key);
+                redact_json_value(value, Some(key), protected, keys);
             }
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                redact_json_value(value, context, keys);
+                redact_json_value(value, context, protected, keys);
             }
         }
         serde_json::Value::String(text) if connection_string(text) => {
@@ -1052,21 +1201,27 @@ fn redact_json_value(value: &mut serde_json::Value, context: Option<&str>, keys:
     }
 }
 
-fn redact_toml_value(value: &mut toml::Value, context: Option<&str>, keys: &mut Vec<String>) {
+fn redact_toml_value(
+    value: &mut toml::Value,
+    context: Option<&str>,
+    protected: bool,
+    keys: &mut Vec<String>,
+) {
+    if protected && !value.is_table() && !value.is_array() {
+        *value = toml::Value::String(REDACTED.to_string());
+        keys.push(context.unwrap_or("credential-container").to_string());
+        return;
+    }
     match value {
         toml::Value::Table(table) => {
             for (key, value) in table {
-                if sensitive_key(key) {
-                    *value = toml::Value::String(REDACTED.to_string());
-                    keys.push(key.clone());
-                } else {
-                    redact_toml_value(value, Some(key), keys);
-                }
+                let protected = protected || credential_container(key) || sensitive_key(key);
+                redact_toml_value(value, Some(key), protected, keys);
             }
         }
         toml::Value::Array(values) => {
             for value in values {
-                redact_toml_value(value, context, keys);
+                redact_toml_value(value, context, protected, keys);
             }
         }
         toml::Value::String(text) if connection_string(text) => {
@@ -1077,22 +1232,37 @@ fn redact_toml_value(value: &mut toml::Value, context: Option<&str>, keys: &mut 
     }
 }
 
-fn redact_yaml_value(value: &mut serde_yaml::Value, context: Option<&str>, keys: &mut Vec<String>) {
+fn redact_yaml_value(
+    value: &mut serde_yaml::Value,
+    context: Option<&str>,
+    protected: bool,
+    keys: &mut Vec<String>,
+) {
+    if protected
+        && !matches!(
+            value,
+            serde_yaml::Value::Mapping(_)
+                | serde_yaml::Value::Sequence(_)
+                | serde_yaml::Value::Tagged(_)
+        )
+    {
+        *value = serde_yaml::Value::String(REDACTED.to_string());
+        keys.push(context.unwrap_or("credential-container").to_string());
+        return;
+    }
     match value {
         serde_yaml::Value::Mapping(mapping) => {
             for (key, value) in mapping {
                 let key_text = key.as_str();
-                if key_text.is_some_and(sensitive_key) {
-                    *value = serde_yaml::Value::String(REDACTED.to_string());
-                    keys.push(key_text.unwrap_or("sensitive-key").to_string());
-                } else {
-                    redact_yaml_value(value, key_text.or(context), keys);
-                }
+                let protected = protected
+                    || key_text.is_some_and(credential_container)
+                    || key_text.is_some_and(sensitive_key);
+                redact_yaml_value(value, key_text.or(context), protected, keys);
             }
         }
         serde_yaml::Value::Sequence(values) => {
             for value in values {
-                redact_yaml_value(value, context, keys);
+                redact_yaml_value(value, context, protected, keys);
             }
         }
         serde_yaml::Value::String(text) if connection_string(text) => {
@@ -1100,7 +1270,7 @@ fn redact_yaml_value(value: &mut serde_yaml::Value, context: Option<&str>, keys:
             keys.push(context.unwrap_or("connection-string").to_string());
         }
         serde_yaml::Value::Tagged(tagged) => {
-            redact_yaml_value(&mut tagged.value, context, keys);
+            redact_yaml_value(&mut tagged.value, context, protected, keys);
         }
         _ => {}
     }
@@ -1180,11 +1350,7 @@ fn redact_line(line: &str) -> Option<(String, String)> {
 }
 
 fn sensitive_key(key: &str) -> bool {
-    let key = key
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
+    let key = normalized_key(key);
     matches!(key.as_str(), "auth" | "authorization" | "pwd")
         || [
             "password",
@@ -1203,11 +1369,42 @@ fn sensitive_key(key: &str) -> bool {
             "accountkey",
             "masterkey",
             "sessionkey",
+            "clientkey",
+            "clientkeydata",
+            "tokenfile",
             "connectionstring",
             "databaseurl",
         ]
         .iter()
         .any(|candidate| key.ends_with(candidate))
+}
+
+fn credential_container(key: &str) -> bool {
+    let key = normalized_key(key);
+    matches!(
+        key.as_str(),
+        "auth"
+            | "auths"
+            | "authentication"
+            | "credential"
+            | "credentials"
+            | "githuboauth"
+            | "gitlaboauth"
+            | "bitbucketoauth"
+            | "httpbasic"
+            | "httpbearer"
+            | "oauth"
+            | "oauth2"
+            | "secrets"
+    ) || key.ends_with("oauth")
+        || key.ends_with("credentials")
+}
+
+fn normalized_key(key: &str) -> String {
+    key.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn connection_string(value: &str) -> bool {
@@ -1239,6 +1436,9 @@ fn suspected_credentials(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return true;
     };
+    if bearer_credential(text) || xml_like_credentials(text) {
+        return true;
+    }
     text.lines().any(|line| {
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
@@ -1247,22 +1447,117 @@ fn suspected_credentials(bytes: &[u8]) -> bool {
         if connection_string(trimmed) {
             return true;
         }
-        let Some(delimiter) = line.find('=').or_else(|| line.find(':')) else {
-            return false;
-        };
-        let raw_key = line[..delimiter].trim();
-        let key = raw_key
-            .trim_matches(['"', '\''])
-            .rsplit(':')
-            .next()
-            .unwrap_or(raw_key)
-            .rsplit('.')
-            .next()
-            .unwrap_or(raw_key)
-            .trim();
-        let value = line[delimiter + 1..].trim();
-        !value.is_empty() && (sensitive_key(key) || connection_string(value))
+        line.char_indices()
+            .filter(|(_, character)| matches!(character, '=' | ':'))
+            .any(|(delimiter, _)| {
+                let before = line[..delimiter].trim_end();
+                let key_start = before
+                    .char_indices()
+                    .rev()
+                    .find(|(_, character)| {
+                        !character.is_ascii_alphanumeric()
+                            && !matches!(character, '_' | '-' | '.' | '"' | '\'')
+                    })
+                    .map_or(0, |(index, character)| index + character.len_utf8());
+                let key = before[key_start..]
+                    .trim_matches(['"', '\''])
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("");
+                let value = line[delimiter + 1..].trim_start();
+                !value.is_empty() && (sensitive_key(key) || connection_string(value))
+            })
     })
+}
+
+fn bearer_credential(text: &str) -> bool {
+    let words = text
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+        })
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    words.windows(2).any(|pair| {
+        pair[0].eq_ignore_ascii_case("bearer")
+            && !matches!(pair[1].to_ascii_lowercase().as_str(), "token" | "redacted")
+    })
+}
+
+fn xml_like_credentials(text: &str) -> bool {
+    let mut remainder = text;
+    while let Some(start) = remainder.find('<') {
+        remainder = &remainder[start + 1..];
+        let opening = remainder.trim_start();
+        if opening.starts_with('/') || opening.starts_with('!') || opening.starts_with('?') {
+            continue;
+        }
+        let name = opening
+            .split(|character: char| {
+                character.is_ascii_whitespace() || matches!(character, '>' | '/')
+            })
+            .next()
+            .unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        if (sensitive_key(name) || credential_container(name))
+            && opening.split_once('>').is_some_and(|(_, content)| {
+                !content.trim_start().starts_with('<') || content.contains("</")
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn credential_like_unstructured_file(path: &Path) -> bool {
+    let extension = extension(path);
+    if matches!(
+        extension.as_str(),
+        "rs" | "java"
+            | "kt"
+            | "kts"
+            | "scala"
+            | "go"
+            | "py"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "vue"
+            | "svelte"
+            | "c"
+            | "cc"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "cs"
+            | "rb"
+            | "php"
+            | "swift"
+    ) {
+        return false;
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(normalized_key)
+        .unwrap_or_default();
+    matches!(
+        stem.as_str(),
+        "auth"
+            | "authentication"
+            | "credential"
+            | "credentials"
+            | "oauth"
+            | "password"
+            | "passwords"
+            | "secret"
+            | "secrets"
+            | "token"
+            | "tokens"
+    )
 }
 
 fn file_kind(path: &Path) -> String {
@@ -1709,281 +2004,361 @@ mod tests {
         }
     }
 
-    #[test]
-    fn inspects_nested_maven_and_vue_projects_without_dependency_caches() {
-        let fixture = Fixture::new("maven-vue");
-        fixture.write(
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    mod handle_safe_target {
+        use super::*;
+
+        #[test]
+        fn inspects_nested_maven_and_vue_projects_without_dependency_caches() {
+            let fixture = Fixture::new("maven-vue");
+            fixture.write(
             "pom.xml",
             r#"<project><packaging>pom</packaging><modules><module>services/iam</module></modules></project>"#,
         );
-        fixture.write(
-            "services/iam/pom.xml",
-            r#"<project><artifactId>iam</artifactId></project>"#,
-        );
-        fixture.write(
-            "services/iam/src/main/java/example/IamApplication.java",
-            "final class IamApplication {}",
-        );
-        fixture.write(
+            fixture.write(
+                "services/iam/pom.xml",
+                r#"<project><artifactId>iam</artifactId></project>"#,
+            );
+            fixture.write(
+                "services/iam/src/main/java/example/IamApplication.java",
+                "final class IamApplication {}",
+            );
+            fixture.write(
             "apps/web/package.json",
             r#"{"scripts":{"build":"vite build","test":"vitest"},"dependencies":{"vue":"3.5.0"}}"#,
         );
-        fixture.write("apps/web/src/router/index.ts", "export const routes = [];");
-        fixture.write(
-            "apps/web/node_modules/vue/package.json",
-            r#"{"name":"vue"}"#,
-        );
+            fixture.write("apps/web/src/router/index.ts", "export const routes = [];");
+            fixture.write(
+                "apps/web/node_modules/vue/package.json",
+                r#"{"name":"vue"}"#,
+            );
 
-        let inventory = inspect_project(fixture.path()).expect("inventory");
+            let inventory = inspect_project(fixture.path()).expect("inventory");
 
-        assert!(inventory.layers.backend);
-        assert!(inventory.layers.frontend);
-        assert!(inventory
-            .modules
-            .iter()
-            .any(|module| module.path == "services/iam"));
-        assert!(inventory
-            .files
-            .iter()
-            .any(|file| file.path == "apps/web/src/router/index.ts"));
-        assert!(!inventory
-            .files
-            .iter()
-            .any(|file| file.path.contains("node_modules")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn skips_symlink_escapes_and_cycles_in_inventory_and_workspace() {
-        use std::os::unix::fs::symlink;
-
-        let fixture = Fixture::new("links");
-        let outside = Fixture::new("outside");
-        fixture.write("src/main.rs", "fn main() {}\n");
-        outside.write("outside-secret.txt", "must never be copied");
-        symlink(outside.path(), fixture.path().join("outside-link")).expect("outside symlink");
-        symlink(fixture.path(), fixture.path().join("loop")).expect("loop symlink");
-
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        assert_eq!(
-            inventory
+            assert!(inventory.layers.backend);
+            assert!(inventory.layers.frontend);
+            assert!(inventory
+                .modules
+                .iter()
+                .any(|module| module.path == "services/iam"));
+            assert!(inventory
                 .files
                 .iter()
-                .map(|file| file.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["src/main.rs"]
-        );
+                .any(|file| file.path == "apps/web/src/router/index.ts"));
+            assert!(!inventory
+                .files
+                .iter()
+                .any(|file| file.path.contains("node_modules")));
+        }
 
-        let workspace_parent = Fixture::new("link-workspace");
-        let workspace = workspace_parent.path().join("workspace");
-        create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
-        assert!(workspace.join("src/main.rs").is_file());
-        assert!(!workspace.join("outside-link").exists());
-        assert!(!workspace.join("loop").exists());
+        #[test]
+        fn skips_symlink_escapes_and_cycles_in_inventory_and_workspace() {
+            use std::os::unix::fs::symlink;
 
-        symlink(outside.path(), fixture.path().join(".vibe-coding-platform"))
-            .expect("workspace parent escape symlink");
-        let escaped_workspace = fixture
-            .path()
-            .join(".vibe-coding-platform/runs/run/workspace");
-        assert!(create_filtered_workspace(fixture.path(), &escaped_workspace, &inventory).is_err());
-        assert!(!outside.path().join("runs").exists());
-    }
+            let fixture = Fixture::new("links");
+            let outside = Fixture::new("outside");
+            fixture.write("src/main.rs", "fn main() {}\n");
+            outside.write("outside-secret.txt", "must never be copied");
+            symlink(outside.path(), fixture.path().join("outside-link")).expect("outside symlink");
+            symlink(fixture.path(), fixture.path().join("loop")).expect("loop symlink");
 
-    #[test]
-    fn excludes_private_key_files_from_inventory_and_workspace() {
-        let fixture = Fixture::new("private-key");
-        fixture.write("src/lib.rs", "pub fn ready() -> bool { true }\n");
-        fixture.write(
-            "secrets/server.pem",
-            "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
-        );
-        fixture.write("secrets/id_ed25519", "not-a-real-key\n");
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            assert_eq!(
+                inventory
+                    .files
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["src/main.rs"]
+            );
 
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        assert!(!inventory
-            .files
-            .iter()
-            .any(|file| file.path.starts_with("secrets/")));
+            let workspace_parent = Fixture::new("link-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+            assert!(workspace.join("src/main.rs").is_file());
+            assert!(!workspace.join("outside-link").exists());
+            assert!(!workspace.join("loop").exists());
 
-        let workspace_parent = Fixture::new("private-key-workspace");
-        let workspace = workspace_parent.path().join("workspace");
-        create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
-        assert!(!workspace.join("secrets/server.pem").exists());
-        assert!(!workspace.join("secrets/id_ed25519").exists());
-    }
+            symlink(outside.path(), fixture.path().join(".vibe-coding-platform"))
+                .expect("workspace parent escape symlink");
+            let escaped_workspace = fixture
+                .path()
+                .join(".vibe-coding-platform/runs/run/workspace");
+            assert!(
+                create_filtered_workspace(fixture.path(), &escaped_workspace, &inventory).is_err()
+            );
+            assert!(!outside.path().join("runs").exists());
+        }
 
-    #[test]
-    fn redacts_only_sensitive_configuration_values_in_the_workspace() {
-        let fixture = Fixture::new("redaction");
-        fixture.write(
-            "config/application.yml",
-            concat!(
-                "spring:\n",
-                "  datasource:\n",
-                "    username: iam-app\n",
-                "    password: do-not-copy\n",
-                "feature-enabled: true\n",
-                "api-token: abc-123\n",
-            ),
-        );
+        #[test]
+        fn excludes_private_key_files_from_inventory_and_workspace() {
+            let fixture = Fixture::new("private-key");
+            fixture.write("src/lib.rs", "pub fn ready() -> bool { true }\n");
+            fixture.write(
+                "secrets/server.pem",
+                "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----\n",
+            );
+            fixture.write("secrets/id_ed25519", "not-a-real-key\n");
 
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        let workspace_parent = Fixture::new("redaction-workspace");
-        let workspace = workspace_parent.path().join("workspace");
-        create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            assert!(!inventory
+                .files
+                .iter()
+                .any(|file| file.path.starts_with("secrets/")));
 
-        let copied = fs::read_to_string(workspace.join("config/application.yml"))
-            .expect("copied configuration");
-        assert!(copied.contains("spring:\n  datasource:"));
-        assert!(copied.contains("username: iam-app"));
-        assert!(copied.contains("feature-enabled: true"));
-        assert!(copied.contains("password:"), "{copied}");
-        assert!(copied.contains("api-token:"), "{copied}");
-        assert!(copied.matches(REDACTED).count() >= 2, "{copied}");
-        assert!(!copied.contains("do-not-copy"));
-        assert!(!copied.contains("abc-123"));
-        assert!(inventory.risk_keys.iter().any(|finding| {
-            finding.path == "config/application.yml" && finding.key == "password"
-        }));
-        assert!(inventory.risk_keys.iter().any(|finding| {
-            finding.path == "config/application.yml" && finding.key == "api-token"
-        }));
-    }
+            let workspace_parent = Fixture::new("private-key-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+            assert!(!workspace.join("secrets/server.pem").exists());
+            assert!(!workspace.join("secrets/id_ed25519").exists());
+        }
 
-    #[test]
-    fn redacts_structured_compact_and_block_configuration_without_breaking_json() {
-        let fixture = Fixture::new("structured-redaction");
-        fixture.write(
+        #[test]
+        fn redacts_only_sensitive_configuration_values_in_the_workspace() {
+            let fixture = Fixture::new("redaction");
+            fixture.write(
+                "config/application.yml",
+                concat!(
+                    "spring:\n",
+                    "  datasource:\n",
+                    "    username: iam-app\n",
+                    "    password: do-not-copy\n",
+                    "feature-enabled: true\n",
+                    "api-token: abc-123\n",
+                ),
+            );
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let workspace_parent = Fixture::new("redaction-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+
+            let copied = fs::read_to_string(workspace.join("config/application.yml"))
+                .expect("copied configuration");
+            assert!(copied.contains("spring:\n  datasource:"));
+            assert!(copied.contains("username: iam-app"));
+            assert!(copied.contains("feature-enabled: true"));
+            assert!(copied.contains("password:"), "{copied}");
+            assert!(copied.contains("api-token:"), "{copied}");
+            assert!(copied.matches(REDACTED).count() >= 2, "{copied}");
+            assert!(!copied.contains("do-not-copy"));
+            assert!(!copied.contains("abc-123"));
+            assert!(inventory.risk_keys.iter().any(|finding| {
+                finding.path == "config/application.yml" && finding.key == "password"
+            }));
+            assert!(inventory.risk_keys.iter().any(|finding| {
+                finding.path == "config/application.yml" && finding.key == "api-token"
+            }));
+        }
+
+        #[test]
+        fn redacts_structured_compact_and_block_configuration_without_breaking_json() {
+            let fixture = Fixture::new("structured-redaction");
+            fixture.write(
             "docker/config.json",
             r#"{"auths":{"registry.example.com":{"auth":"docker-secret","identitytoken":"identity-secret"}},"debug":true}"#,
         );
-        fixture.write(
-            "config/secrets.toml",
-            concat!(
-                "[database]\n",
-                "connection = { username = \"iam-app\", password = \"toml-secret\" }\n",
-            ),
-        );
-        fixture.write(
-            "config/secrets.yml",
-            concat!(
-                "service:\n",
-                "  username: iam-app\n",
-                "  password: |\n",
-                "    yaml-secret-line-one\n",
-                "    yaml-secret-line-two\n",
-            ),
-        );
-        fixture.write(
-            "package.json",
-            r#"{"dependencies":{"tokenizers":"1.2.3"},"scripts":{"test":"vitest"}}"#,
-        );
+            fixture.write(
+                "config/secrets.toml",
+                concat!(
+                    "[database]\n",
+                    "connection = { username = \"iam-app\", password = \"toml-secret\" }\n",
+                ),
+            );
+            fixture.write(
+                "config/secrets.yml",
+                concat!(
+                    "service:\n",
+                    "  username: iam-app\n",
+                    "  password: |\n",
+                    "    yaml-secret-line-one\n",
+                    "    yaml-secret-line-two\n",
+                ),
+            );
+            fixture.write(
+                "package.json",
+                r#"{"dependencies":{"tokenizers":"1.2.3"},"scripts":{"test":"vitest"}}"#,
+            );
 
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        let workspace_parent = Fixture::new("structured-redaction-workspace");
-        let workspace = workspace_parent.path().join("workspace");
-        create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let workspace_parent = Fixture::new("structured-redaction-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
 
-        let docker =
-            fs::read_to_string(workspace.join("docker/config.json")).expect("docker config");
-        let docker_json: serde_json::Value =
-            serde_json::from_str(&docker).expect("redacted Docker config remains valid JSON");
-        assert_eq!(
-            docker_json["auths"]["registry.example.com"]["auth"],
-            REDACTED
-        );
-        assert_eq!(
-            docker_json["auths"]["registry.example.com"]["identitytoken"],
-            REDACTED
-        );
-        assert_eq!(docker_json["debug"], true);
-        assert!(!docker.contains("docker-secret"));
-        assert!(!docker.contains("identity-secret"));
+            let docker =
+                fs::read_to_string(workspace.join("docker/config.json")).expect("docker config");
+            let docker_json: serde_json::Value =
+                serde_json::from_str(&docker).expect("redacted Docker config remains valid JSON");
+            assert_eq!(
+                docker_json["auths"]["registry.example.com"]["auth"],
+                REDACTED
+            );
+            assert_eq!(
+                docker_json["auths"]["registry.example.com"]["identitytoken"],
+                REDACTED
+            );
+            assert_eq!(docker_json["debug"], true);
+            assert!(!docker.contains("docker-secret"));
+            assert!(!docker.contains("identity-secret"));
 
-        let toml =
-            fs::read_to_string(workspace.join("config/secrets.toml")).expect("redacted TOML");
-        assert!(toml.contains("username = \"iam-app\""));
-        assert!(toml.contains("password = \"[REDACTED]\""));
-        assert!(!toml.contains("toml-secret"));
+            let toml =
+                fs::read_to_string(workspace.join("config/secrets.toml")).expect("redacted TOML");
+            assert!(toml.contains("username = \"iam-app\""));
+            assert!(toml.contains("password = \"[REDACTED]\""));
+            assert!(!toml.contains("toml-secret"));
 
-        let yaml = fs::read_to_string(workspace.join("config/secrets.yml")).expect("redacted YAML");
-        assert!(yaml.contains("username: iam-app"));
-        assert!(yaml.contains(REDACTED));
-        assert!(!yaml.contains("yaml-secret-line-one"));
-        assert!(!yaml.contains("yaml-secret-line-two"));
+            let yaml =
+                fs::read_to_string(workspace.join("config/secrets.yml")).expect("redacted YAML");
+            assert!(yaml.contains("username: iam-app"));
+            assert!(yaml.contains(REDACTED));
+            assert!(!yaml.contains("yaml-secret-line-one"));
+            assert!(!yaml.contains("yaml-secret-line-two"));
 
-        let package: serde_json::Value = serde_json::from_slice(
-            &fs::read(workspace.join("package.json")).expect("redacted package manifest"),
-        )
-        .expect("package manifest remains valid JSON");
-        assert_eq!(package["dependencies"]["tokenizers"], "1.2.3");
-    }
-
-    #[test]
-    fn redacts_framework_operational_and_kubernetes_secret_keys() {
-        let fixture = Fixture::new("framework-secrets");
-        fixture.write(
-            "config/secrets.yml",
-            concat!(
-                "SECRET_KEY: django-secret\n",
-                "secretKeyBase: rails-secret\n",
-                "signingKey: signing-secret\n",
-                "encryption_key: encryption-secret\n",
-                "accountKey: account-secret\n",
-                "master-key: master-secret\n",
-                "sessionKey: session-secret\n",
-                "publicName: safe-name\n",
-            ),
-        );
-        fixture.write(
-            ".kube/config",
-            concat!(
-                "apiVersion: v1\n",
-                "users:\n",
-                "  - name: developer\n",
-                "    user:\n",
-                "      token: kube-secret\n",
-            ),
-        );
-        fixture.write(
-            "app/settings.py",
-            "SECRET_KEY = 'django-settings-secret'\nDEBUG = True\n",
-        );
-
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        let workspace_parent = Fixture::new("framework-secrets-workspace");
-        let workspace = workspace_parent.path().join("workspace");
-        create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
-
-        let yaml =
-            fs::read_to_string(workspace.join("config/secrets.yml")).expect("framework YAML");
-        let kube = fs::read_to_string(workspace.join(".kube/config")).expect("Kubernetes config");
-        let settings =
-            fs::read_to_string(workspace.join("app/settings.py")).expect("Django settings");
-        for secret in [
-            "django-secret",
-            "rails-secret",
-            "signing-secret",
-            "encryption-secret",
-            "account-secret",
-            "master-secret",
-            "session-secret",
-            "kube-secret",
-            "django-settings-secret",
-        ] {
-            assert!(!yaml.contains(secret));
-            assert!(!kube.contains(secret));
-            assert!(!settings.contains(secret));
+            let package: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace.join("package.json")).expect("redacted package manifest"),
+            )
+            .expect("package manifest remains valid JSON");
+            assert_eq!(package["dependencies"]["tokenizers"], "1.2.3");
         }
-        assert!(yaml.contains("publicName: safe-name"));
-        assert!(settings.contains("DEBUG = True"));
-    }
 
-    #[test]
-    fn redacts_nuget_xml_and_excludes_suspicious_unstructured_credentials() {
-        let fixture = Fixture::new("xml-secrets");
-        fixture.write(
+        #[test]
+        fn redacts_framework_operational_and_kubernetes_secret_keys() {
+            let fixture = Fixture::new("framework-secrets");
+            fixture.write(
+                "config/secrets.yml",
+                concat!(
+                    "SECRET_KEY: django-secret\n",
+                    "secretKeyBase: rails-secret\n",
+                    "signingKey: signing-secret\n",
+                    "encryption_key: encryption-secret\n",
+                    "accountKey: account-secret\n",
+                    "master-key: master-secret\n",
+                    "sessionKey: session-secret\n",
+                    "publicName: safe-name\n",
+                ),
+            );
+            fixture.write(
+                ".kube/config",
+                concat!(
+                    "apiVersion: v1\n",
+                    "users:\n",
+                    "  - name: developer\n",
+                    "    user:\n",
+                    "      token: kube-secret\n",
+                    "      client-key-data: kube-client-key-secret\n",
+                    "      clientKeyData: kube-camel-client-key-secret\n",
+                ),
+            );
+            fixture.write(
+                "app/settings.py",
+                "SECRET_KEY = 'django-settings-secret'\nDEBUG = True\n",
+            );
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let workspace_parent = Fixture::new("framework-secrets-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+
+            let yaml =
+                fs::read_to_string(workspace.join("config/secrets.yml")).expect("framework YAML");
+            let kube =
+                fs::read_to_string(workspace.join(".kube/config")).expect("Kubernetes config");
+            let settings =
+                fs::read_to_string(workspace.join("app/settings.py")).expect("Django settings");
+            for secret in [
+                "django-secret",
+                "rails-secret",
+                "signing-secret",
+                "encryption-secret",
+                "account-secret",
+                "master-secret",
+                "session-secret",
+                "kube-secret",
+                "kube-client-key-secret",
+                "kube-camel-client-key-secret",
+                "django-settings-secret",
+            ] {
+                assert!(!yaml.contains(secret));
+                assert!(!kube.contains(secret));
+                assert!(!settings.contains(secret));
+            }
+            assert!(yaml.contains("publicName: safe-name"));
+            assert!(settings.contains("DEBUG = True"));
+        }
+
+        #[test]
+        fn redacts_every_scalar_below_credential_containers_in_composer_auth() {
+            let fixture = Fixture::new("composer-auth");
+            fixture.write(
+                ".composer/auth.json",
+                r#"{
+  "github-oauth": {"github.com": "github-secret"},
+  "http-basic": {
+    "repo.example.com": {
+      "username": "composer-user",
+      "password": "composer-password",
+      "port": 443,
+      "enabled": true
+    }
+  },
+  "credentials": {"nested": ["first-secret", "second-secret"]},
+  "repositories": {"main": "https://repo.example.com/public-index"}
+}"#,
+            );
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let workspace_parent = Fixture::new("composer-auth-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+
+            let copied: serde_json::Value = serde_json::from_slice(
+                &fs::read(workspace.join(".composer/auth.json")).expect("Composer auth"),
+            )
+            .expect("redacted Composer auth remains JSON");
+            assert_eq!(copied["github-oauth"]["github.com"], REDACTED);
+            assert_eq!(
+                copied["http-basic"]["repo.example.com"]["username"],
+                REDACTED
+            );
+            assert_eq!(
+                copied["http-basic"]["repo.example.com"]["password"],
+                REDACTED
+            );
+            assert_eq!(copied["http-basic"]["repo.example.com"]["port"], REDACTED);
+            assert_eq!(
+                copied["http-basic"]["repo.example.com"]["enabled"],
+                REDACTED
+            );
+            assert_eq!(copied["credentials"]["nested"][0], REDACTED);
+            assert_eq!(copied["credentials"]["nested"][1], REDACTED);
+            assert_eq!(
+                copied["repositories"]["main"],
+                "https://repo.example.com/public-index"
+            );
+            let serialized = serde_json::to_string(&copied).expect("serialize copied auth");
+            for secret in [
+                "github-secret",
+                "composer-user",
+                "composer-password",
+                "first-secret",
+                "second-secret",
+            ] {
+                assert!(!serialized.contains(secret));
+            }
+        }
+
+        #[test]
+        fn redacts_nuget_xml_and_excludes_suspicious_unstructured_credentials() {
+            let fixture = Fixture::new("xml-secrets");
+            fixture.write(
             "NuGet.Config",
             concat!(
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
@@ -1995,241 +2370,323 @@ mod tests {
                 "</packageSources></configuration>\n",
             ),
         );
-        fixture.write(
-            "notes/credentials.txt",
-            "master_key = cannot-safely-keep-this\n",
-        );
+            fixture.write(
+                "notes/credentials.txt",
+                "master_key = cannot-safely-keep-this\n",
+            );
 
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        assert!(!inventory
-            .files
-            .iter()
-            .any(|file| file.path == "notes/credentials.txt"));
-        let workspace_parent = Fixture::new("xml-secrets-workspace");
-        let workspace = workspace_parent.path().join("workspace");
-        create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            assert!(!inventory
+                .files
+                .iter()
+                .any(|file| file.path == "notes/credentials.txt"));
+            let workspace_parent = Fixture::new("xml-secrets-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
 
-        let xml = fs::read_to_string(workspace.join("NuGet.Config")).expect("NuGet config");
-        assert!(!xml.contains("nuget-secret"));
-        assert!(xml.contains("nuget-user"));
-        assert!(xml.contains("https://nuget.example.com/v3/index.json"));
-        let mut reader = quick_xml::Reader::from_str(&xml);
-        loop {
-            if matches!(
-                reader
-                    .read_event()
-                    .expect("redacted NuGet XML remains parseable"),
-                quick_xml::events::Event::Eof
-            ) {
-                break;
+            let xml = fs::read_to_string(workspace.join("NuGet.Config")).expect("NuGet config");
+            assert!(!xml.contains("nuget-secret"));
+            assert!(xml.contains("nuget-user"));
+            assert!(xml.contains("https://nuget.example.com/v3/index.json"));
+            let mut reader = quick_xml::Reader::from_str(&xml);
+            loop {
+                if matches!(
+                    reader
+                        .read_event()
+                        .expect("redacted NuGet XML remains parseable"),
+                    quick_xml::events::Event::Eof
+                ) {
+                    break;
+                }
             }
         }
-    }
 
-    #[test]
-    fn redacts_package_credentials_and_excludes_unparseable_or_raw_credentials() {
-        let fixture = Fixture::new("package-credentials");
-        fixture.write(
-            ".npmrc",
-            concat!(
-                "registry=https://registry.npmjs.org/\n",
-                "//registry.npmjs.org/:_authToken=npm-secret\n",
-            ),
-        );
-        fixture.write(
-            ".pypirc",
-            concat!(
-                "[distutils]\n",
-                "index-servers = private\n",
-                "[private]\n",
-                "repository = https://pypi.example.com/\n",
-                "password = pypi-secret\n",
-            ),
-        );
-        fixture.write(
-            ".git-credentials",
-            "https://git-user:git-secret@git.example.com\n",
-        );
-        fixture.write("config/broken.json", r#"{"token":"broken-secret""#);
+        #[test]
+        fn excludes_unknown_multi_assignment_xml_bearer_and_opaque_credential_text() {
+            let fixture = Fixture::new("unknown-credentials");
+            fixture.write(
+                "notes/multiple.txt",
+                "mode=debug password=multi-assignment-secret region=local\n",
+            );
+            fixture.write(
+                "notes/xmlish.txt",
+                "<settings><password>xml-element-secret</password></settings>\n",
+            );
+            fixture.write(
+                "notes/request.txt",
+                "send the Authorization Bearer bearer-header-secret header\n",
+            );
+            fixture.write(
+                "notes/oauth.txt",
+                "opaque credential payload that cannot be classified reliably\n",
+            );
+            fixture.write("notes/readme.txt", "public architecture notes\n");
 
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        assert!(!inventory
-            .files
-            .iter()
-            .any(|file| file.path == ".git-credentials"));
-        assert!(!inventory
-            .files
-            .iter()
-            .any(|file| file.path == "config/broken.json"));
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            for excluded in [
+                "notes/multiple.txt",
+                "notes/xmlish.txt",
+                "notes/request.txt",
+                "notes/oauth.txt",
+            ] {
+                assert!(
+                    !inventory.files.iter().any(|file| file.path == excluded),
+                    "credential-bearing text was inventoried: {excluded}"
+                );
+            }
+            assert!(inventory
+                .files
+                .iter()
+                .any(|file| file.path == "notes/readme.txt"));
+        }
 
-        let workspace_parent = Fixture::new("package-credentials-workspace");
-        let workspace = workspace_parent.path().join("workspace");
-        create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
-        let npm = fs::read_to_string(workspace.join(".npmrc")).expect("npm config");
-        let pypi = fs::read_to_string(workspace.join(".pypirc")).expect("PyPI config");
-        assert!(npm.contains("registry=https://registry.npmjs.org/"));
-        assert!(npm.contains("_authToken=[REDACTED]"), "{npm}");
-        assert!(!npm.contains("npm-secret"));
-        assert!(pypi.contains("repository = https://pypi.example.com/"));
-        assert!(pypi.contains("password = [REDACTED]"));
-        assert!(!pypi.contains("pypi-secret"));
-    }
+        #[test]
+        fn redacts_package_credentials_and_excludes_unparseable_or_raw_credentials() {
+            let fixture = Fixture::new("package-credentials");
+            fixture.write(
+                ".npmrc",
+                concat!(
+                    "registry=https://registry.npmjs.org/\n",
+                    "//registry.npmjs.org/:_authToken=npm-secret\n",
+                ),
+            );
+            fixture.write(
+                ".pypirc",
+                concat!(
+                    "[distutils]\n",
+                    "index-servers = private\n",
+                    "[private]\n",
+                    "repository = https://pypi.example.com/\n",
+                    "password = pypi-secret\n",
+                ),
+            );
+            fixture.write(
+                ".git-credentials",
+                "https://git-user:git-secret@git.example.com\n",
+            );
+            fixture.write("config/broken.json", r#"{"token":"broken-secret""#);
 
-    #[test]
-    fn excludes_all_private_key_encodings_and_putty_keys() {
-        let fixture = Fixture::new("private-key-variants");
-        fixture.write(
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            assert!(!inventory
+                .files
+                .iter()
+                .any(|file| file.path == ".git-credentials"));
+            assert!(!inventory
+                .files
+                .iter()
+                .any(|file| file.path == "config/broken.json"));
+
+            let workspace_parent = Fixture::new("package-credentials-workspace");
+            let workspace = workspace_parent.path().join("workspace");
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+            let npm = fs::read_to_string(workspace.join(".npmrc")).expect("npm config");
+            let pypi = fs::read_to_string(workspace.join(".pypirc")).expect("PyPI config");
+            assert!(npm.contains("registry=https://registry.npmjs.org/"));
+            assert!(npm.contains("_authToken=[REDACTED]"), "{npm}");
+            assert!(!npm.contains("npm-secret"));
+            assert!(pypi.contains("repository = https://pypi.example.com/"));
+            assert!(pypi.contains("password = [REDACTED]"));
+            assert!(!pypi.contains("pypi-secret"));
+        }
+
+        #[test]
+        fn excludes_all_private_key_encodings_and_putty_keys() {
+            let fixture = Fixture::new("private-key-variants");
+            fixture.write(
             "secrets/encrypted.txt",
             "-----BEGIN ENCRYPTED PRIVATE KEY-----\nsecret\n-----END ENCRYPTED PRIVATE KEY-----\n",
         );
-        fixture.write(
-            "secrets/generic.txt",
-            "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n",
-        );
-        fixture.write(
-            "secrets/dsa.txt",
-            "-----BEGIN DSA PRIVATE KEY-----\nsecret\n-----END DSA PRIVATE KEY-----\n",
-        );
-        fixture.write(
+            fixture.write(
+                "secrets/generic.txt",
+                "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n",
+            );
+            fixture.write(
+                "secrets/dsa.txt",
+                "-----BEGIN DSA PRIVATE KEY-----\nsecret\n-----END DSA PRIVATE KEY-----\n",
+            );
+            fixture.write(
             "secrets/vendor.txt",
             "-----BEGIN VENDOR HARDWARE PRIVATE KEY-----\nsecret\n-----END VENDOR HARDWARE PRIVATE KEY-----\n",
         );
-        fixture.write(
-            "secrets/client.ppk",
-            "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\nsecret\n",
-        );
+            fixture.write(
+                "secrets/client.ppk",
+                "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nPrivate-Lines: 1\nsecret\n",
+            );
 
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        assert!(!inventory
-            .files
-            .iter()
-            .any(|file| file.path.starts_with("secrets/")));
-    }
-
-    #[test]
-    fn detects_modules_and_source_roots_beyond_five_levels() {
-        let fixture = Fixture::new("deep-module");
-        let module = "products/platform/services/security/components/token";
-        fixture.write(
-            &format!("{module}/Cargo.toml"),
-            "[package]\nname = \"token-service\"\nversion = \"0.1.0\"\n",
-        );
-        fixture.write(&format!("{module}/src/lib.rs"), "pub fn issue_token() {}\n");
-
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-
-        assert!(inventory
-            .modules
-            .iter()
-            .any(|candidate| candidate.path == module));
-        assert!(inventory
-            .source_roots
-            .iter()
-            .any(|candidate| candidate == &format!("{module}/src")));
-    }
-
-    #[test]
-    fn excludes_binary_media_and_files_above_the_size_cap() {
-        let fixture = Fixture::new("binary-large");
-        fixture.write("src/valid.rs", "pub const VALID: bool = true;\n");
-        fixture.write("assets/logo.png", [0x89, b'P', b'N', b'G', 0, 1, 2]);
-        fixture.write("data/binary.dat", [b'a', 0, b'b']);
-        fixture.write("generated/oversized.txt", vec![b'x'; 1_048_577]);
-
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-
-        assert!(inventory
-            .files
-            .iter()
-            .any(|file| file.path == "src/valid.rs"));
-        for excluded in [
-            "assets/logo.png",
-            "data/binary.dat",
-            "generated/oversized.txt",
-        ] {
-            assert!(!inventory.files.iter().any(|file| file.path == excluded));
-        }
-    }
-
-    #[test]
-    fn excludes_additional_dependency_and_build_cache_directories() {
-        let fixture = Fixture::new("additional-caches");
-        fixture.write("src/valid.rs", "pub const VALID: bool = true;\n");
-        for directory in [
-            ".pytest_cache",
-            ".mypy_cache",
-            ".tox",
-            ".turbo",
-            ".parcel-cache",
-            ".pnpm-store",
-            ".output",
-            ".ruff_cache",
-            ".nox",
-            ".hypothesis",
-            ".vite",
-            ".yarn/unplugged",
-            ".angular/cache",
-        ] {
-            fixture.write(&format!("{directory}/escaped.txt"), "must be excluded\n");
-        }
-
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        assert_eq!(
-            inventory
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            assert!(!inventory
                 .files
                 .iter()
-                .map(|file| file.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["src/valid.rs"]
-        );
-    }
+                .any(|file| file.path.starts_with("secrets/")));
+        }
 
-    #[test]
-    fn nested_package_uses_the_nearest_ancestor_package_manager_lockfile() {
-        let fixture = Fixture::new("ancestor-lockfile");
-        fixture.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
-        fixture.write(
-            "packages/console/package.json",
-            r#"{"scripts":{"test":"vitest"},"dependencies":{"vue":"3.5.0"}}"#,
-        );
+        #[test]
+        fn detects_modules_and_source_roots_beyond_five_levels() {
+            let fixture = Fixture::new("deep-module");
+            let module = "products/platform/services/security/components/token";
+            fixture.write(
+                &format!("{module}/Cargo.toml"),
+                "[package]\nname = \"token-service\"\nversion = \"0.1.0\"\n",
+            );
+            fixture.write(&format!("{module}/src/lib.rs"), "pub fn issue_token() {}\n");
 
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        assert!(inventory.commands.iter().any(|command| {
-            command.cwd == "packages/console"
-                && command.name == "test"
-                && command.command == "pnpm run test"
-        }));
-    }
+            let inventory = inspect_project(fixture.path()).expect("inventory");
 
-    #[cfg(unix)]
-    #[test]
-    fn rejects_an_external_workspace_parent_symlink_without_writing_outside() {
-        use std::os::unix::fs::symlink;
+            assert!(inventory
+                .modules
+                .iter()
+                .any(|candidate| candidate.path == module));
+            assert!(inventory
+                .source_roots
+                .iter()
+                .any(|candidate| candidate == &format!("{module}/src")));
+        }
 
-        let fixture = Fixture::new("external-workspace-source");
-        fixture.write("src/main.rs", "fn main() {}\n");
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        let workspace_base = Fixture::new("external-workspace-base");
-        let outside = Fixture::new("external-workspace-outside");
-        symlink(outside.path(), workspace_base.path().join("linked-parent"))
-            .expect("external workspace parent symlink");
-        let workspace = workspace_base.path().join("linked-parent/workspace");
+        #[test]
+        fn excludes_binary_media_and_files_above_the_size_cap() {
+            let fixture = Fixture::new("binary-large");
+            fixture.write("src/valid.rs", "pub const VALID: bool = true;\n");
+            fixture.write("assets/logo.png", [0x89, b'P', b'N', b'G', 0, 1, 2]);
+            fixture.write("data/binary.dat", [b'a', 0, b'b']);
+            fixture.write("generated/oversized.txt", vec![b'x'; 1_048_577]);
 
-        assert!(create_filtered_workspace(fixture.path(), &workspace, &inventory).is_err());
-        assert!(!outside.path().join("workspace").exists());
-    }
+            let inventory = inspect_project(fixture.path()).expect("inventory");
 
-    #[cfg(unix)]
-    #[test]
-    fn securely_creates_multiple_missing_workspace_parent_directories() {
-        let fixture = Fixture::new("missing-workspace-source");
-        fixture.write("src/main.rs", "fn main() {}\n");
-        let inventory = inspect_project(fixture.path()).expect("inventory");
-        let workspace_base = Fixture::new("missing-workspace-base");
-        let workspace = workspace_base.path().join("runs/missing/nested/workspace");
+            assert!(inventory
+                .files
+                .iter()
+                .any(|file| file.path == "src/valid.rs"));
+            for excluded in [
+                "assets/logo.png",
+                "data/binary.dat",
+                "generated/oversized.txt",
+            ] {
+                assert!(!inventory.files.iter().any(|file| file.path == excluded));
+            }
+        }
 
-        create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
-        assert!(workspace.join("src/main.rs").is_file());
+        #[test]
+        fn excludes_additional_dependency_and_build_cache_directories() {
+            let fixture = Fixture::new("additional-caches");
+            fixture.write("src/valid.rs", "pub const VALID: bool = true;\n");
+            for directory in [
+                ".pytest_cache",
+                ".mypy_cache",
+                ".tox",
+                ".turbo",
+                ".parcel-cache",
+                ".pnpm-store",
+                ".output",
+                ".ruff_cache",
+                ".nox",
+                ".hypothesis",
+                ".vite",
+                ".yarn/unplugged",
+                ".angular/cache",
+            ] {
+                fixture.write(&format!("{directory}/escaped.txt"), "must be excluded\n");
+            }
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            assert_eq!(
+                inventory
+                    .files
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["src/valid.rs"]
+            );
+        }
+
+        #[test]
+        fn nested_package_uses_the_nearest_ancestor_package_manager_lockfile() {
+            let fixture = Fixture::new("ancestor-lockfile");
+            fixture.write("pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            fixture.write(
+                "packages/console/package.json",
+                r#"{"scripts":{"test":"vitest"},"dependencies":{"vue":"3.5.0"}}"#,
+            );
+
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            assert!(inventory.commands.iter().any(|command| {
+                command.cwd == "packages/console"
+                    && command.name == "test"
+                    && command.command == "pnpm run test"
+            }));
+        }
+
+        #[test]
+        fn rejects_an_external_workspace_parent_symlink_without_writing_outside() {
+            use std::os::unix::fs::symlink;
+
+            let fixture = Fixture::new("external-workspace-source");
+            fixture.write("src/main.rs", "fn main() {}\n");
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let workspace_base = Fixture::new("external-workspace-base");
+            let outside = Fixture::new("external-workspace-outside");
+            symlink(outside.path(), workspace_base.path().join("linked-parent"))
+                .expect("external workspace parent symlink");
+            let workspace = workspace_base.path().join("linked-parent/workspace");
+
+            assert!(create_filtered_workspace(fixture.path(), &workspace, &inventory).is_err());
+            assert!(!outside.path().join("workspace").exists());
+        }
+
+        #[test]
+        fn securely_creates_multiple_missing_workspace_parent_directories() {
+            let fixture = Fixture::new("missing-workspace-source");
+            fixture.write("src/main.rs", "fn main() {}\n");
+            let inventory = inspect_project(fixture.path()).expect("inventory");
+            let workspace_base = Fixture::new("missing-workspace-base");
+            let workspace = workspace_base.path().join("runs/missing/nested/workspace");
+
+            create_filtered_workspace(fixture.path(), &workspace, &inventory).expect("workspace");
+            assert!(workspace.join("src/main.rs").is_file());
+        }
+
+        #[test]
+        fn produces_deterministic_sha256_hashes_and_sorted_inventory() {
+            let fixture = Fixture::new("hashes");
+            fixture.write("z-last.txt", "last\n");
+            fixture.write("a-first.txt", "abc");
+
+            let first = inspect_project(fixture.path()).expect("first inventory");
+            let second = inspect_project(fixture.path()).expect("second inventory");
+
+            assert_eq!(
+                content_sha256(b"abc"),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+            assert_eq!(
+                first
+                    .files
+                    .iter()
+                    .map(|file| (&file.path, &file.sha256))
+                    .collect::<Vec<_>>(),
+                second
+                    .files
+                    .iter()
+                    .map(|file| (&file.path, &file.sha256))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                first
+                    .files
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["a-first.txt", "z-last.txt"]
+            );
+            assert_eq!(
+                first
+                    .files
+                    .iter()
+                    .find(|file| file.path == "a-first.txt")
+                    .expect("hashed file")
+                    .sha256,
+                content_sha256(b"abc")
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -2260,49 +2717,5 @@ mod tests {
         )
         .expect_err("unsupported workspace");
         assert!(error.contains("unsupported"));
-    }
-
-    #[test]
-    fn produces_deterministic_sha256_hashes_and_sorted_inventory() {
-        let fixture = Fixture::new("hashes");
-        fixture.write("z-last.txt", "last\n");
-        fixture.write("a-first.txt", "abc");
-
-        let first = inspect_project(fixture.path()).expect("first inventory");
-        let second = inspect_project(fixture.path()).expect("second inventory");
-
-        assert_eq!(
-            content_sha256(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(
-            first
-                .files
-                .iter()
-                .map(|file| (&file.path, &file.sha256))
-                .collect::<Vec<_>>(),
-            second
-                .files
-                .iter()
-                .map(|file| (&file.path, &file.sha256))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            first
-                .files
-                .iter()
-                .map(|file| file.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["a-first.txt", "z-last.txt"]
-        );
-        assert_eq!(
-            first
-                .files
-                .iter()
-                .find(|file| file.path == "a-first.txt")
-                .expect("hashed file")
-                .sha256,
-            content_sha256(b"abc")
-        );
     }
 }
