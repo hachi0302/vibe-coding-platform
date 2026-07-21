@@ -205,7 +205,6 @@ jobs:
         with:
           pattern: bundle-*
           path: dist
-          merge-multiple: true
 
       - name: Setup Node
         uses: actions/setup-node@v4
