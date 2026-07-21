@@ -1,18 +1,20 @@
 use vibe_coding_platform_lib::project_factory::{
     analyze_with_agent, build_analysis_prompt, build_headless_initialization_prompt,
-    check_environment, create_project, create_project_with_verification,
-    existing_project_init_status, finalize_existing_project_initialization, install_command_for,
-    prepare_existing_project_initialization, preview_target_path, read_requirement_materials,
-    spring_initializr_dependencies, validate_target_dir, AnalyzeProjectRequest,
-    CreateProjectRequest, ProjectProfilePayload, StackRecommendationPayload,
+    build_v4_stage_prompt, check_environment, create_filtered_workspace, create_project,
+    create_project_with_verification, existing_project_init_status,
+    finalize_existing_project_initialization, inspect_project, install_command_for,
+    prepare_existing_project_initialization, preview_target_path, read_artifact_plan,
+    read_requirement_materials, spring_initializr_dependencies, validate_artifact_plan,
+    validate_target_dir, AnalyzeProjectRequest, CreateProjectRequest, InitializationStage,
+    ProjectProfilePayload, StackRecommendationPayload,
 };
 
 #[test]
-fn headless_initialization_prompt_is_non_interactive_and_has_no_fixed_v3_outputs() {
+fn headless_initialization_prompt_is_non_interactive_and_uses_internal_review() {
     let prompt =
         build_headless_initialization_prompt("项目路径：/tmp/demo\n按项目真实代码初始化。", None);
 
-    for required in ["后台非会话任务", "不要询问用户", "文件校验"] {
+    for required in ["后台非会话任务", "不要询问用户", "完成前进行内部审核"] {
         assert!(
             prompt.contains(required),
             "missing prompt contract: {required}"
@@ -25,13 +27,13 @@ fn headless_initialization_prompt_is_non_interactive_and_has_no_fixed_v3_outputs
 }
 
 #[test]
-fn headless_initialization_repair_prompt_includes_the_real_validation_failure() {
+fn headless_initialization_review_prompt_includes_the_real_review_note() {
     let prompt = build_headless_initialization_prompt(
         "项目路径：/tmp/demo",
         Some("缺少初始化后的真实文档：docs/backend/latest/接口文档/API接口总览.md"),
     );
 
-    assert!(prompt.contains("校验问题"));
+    assert!(prompt.contains("审核关注项"));
     assert!(prompt.contains("API接口总览.md"));
 }
 
@@ -302,8 +304,10 @@ fn every_project_skill_template_contains_the_runtime_skill_contract() {
         "公共/code-review/SKILL.md",
         "公共/detail-design-writer/SKILL.md",
         "公共/developer/SKILL.md",
+        "公共/doc-sync-review/SKILL.md",
         "公共/problem-diagnose/SKILL.md",
         "公共/review-feedback-handler/SKILL.md",
+        "公共/find-skills/SKILL.md",
         "前端/frontend-self-test/SKILL.md",
         "后端/backend-self-test/SKILL.md",
         "可选/backend-log-diagnose/SKILL.md",
@@ -317,7 +321,6 @@ fn every_project_skill_template_contains_the_runtime_skill_contract() {
             "metadata:",
             "pattern:",
             "## 项目资源",
-            "## 执行流程",
             "## 完成 Gate",
             "## 失败处理",
         ] {
@@ -326,6 +329,10 @@ fn every_project_skill_template_contains_the_runtime_skill_contract() {
                 "{relative} missing template contract: {required}"
             );
         }
+        assert!(
+            content.contains("## 执行流程") || content.contains("## 执行步骤"),
+            "{relative} missing execution contract"
+        );
     }
 }
 
@@ -375,6 +382,60 @@ fn existing_v3_marker_is_classified_without_mutation() {
     );
     assert!(!root.join("docs").exists());
     std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+#[ignore = "manual read-only diagnostic: prepares an isolated IAM workspace and validates its agent plan"]
+fn iam_plan_only_diagnostic_uses_an_isolated_workspace() {
+    let project = std::path::PathBuf::from(
+        std::env::var("VCP_IAM_DRY_RUN_ROOT").expect("VCP_IAM_DRY_RUN_ROOT"),
+    );
+    let workspace = std::path::PathBuf::from(
+        std::env::var("VCP_IAM_DRY_RUN_WORKSPACE").expect("VCP_IAM_DRY_RUN_WORKSPACE"),
+    );
+    let inventory = inspect_project(&project).expect("inspect IAM project");
+    if !workspace.exists() {
+        create_filtered_workspace(&project, &workspace, &inventory)
+            .expect("create isolated IAM workspace");
+    }
+    let prompt = build_v4_stage_prompt(InitializationStage::Plan, &inventory, None, &[]);
+    let control = workspace.join(".vibe-coding-platform");
+    std::fs::create_dir_all(&control).expect("create diagnostic control directory");
+    std::fs::write(control.join("plan-prompt.md"), prompt).expect("write diagnostic prompt");
+    std::fs::write(
+        control.join("inventory.json"),
+        serde_json::to_vec_pretty(&inventory).expect("serialize inventory"),
+    )
+    .expect("write diagnostic inventory");
+
+    let plan_path = control.join("artifact-plan.json");
+    if plan_path.is_file() {
+        let plan = read_artifact_plan(&workspace).expect("parse IAM artifact plan");
+        let issues = validate_artifact_plan(&workspace, &inventory, &plan);
+        if !issues.is_empty() {
+            let repair_prompt =
+                build_v4_stage_prompt(InitializationStage::Plan, &inventory, None, &issues);
+            std::fs::write(control.join("repair-prompt.md"), repair_prompt)
+                .expect("write diagnostic repair prompt");
+        }
+        assert!(issues.is_empty(), "IAM artifact plan issues: {issues:#?}");
+        println!(
+            "IAM_PLAN_OK modules={} source_roots={} files={} artifacts={}",
+            inventory.modules.len(),
+            inventory.source_roots.len(),
+            inventory.files.len(),
+            plan.artifacts.len()
+        );
+        for artifact in plan.artifacts {
+            println!("IAM_ARTIFACT {}", artifact.target_path);
+        }
+    } else {
+        println!(
+            "IAM_PLAN_READY workspace={} prompt={}",
+            workspace.display(),
+            control.join("plan-prompt.md").display()
+        );
+    }
 }
 
 #[test]
@@ -613,9 +674,11 @@ fn creates_a_runnable_web_skeleton_with_shared_agent_rules() {
     assert!(project.join("CLAUDE.md").is_file());
     assert!(project.join("AGENTS.md").is_file());
     assert!(project.join(".agents/rules").exists());
-    assert!(project.join(".claude/rules/公共/开发基线.md").is_file());
     assert!(project
-        .join(".claude/rules/公共/Git协作与历史保护.md")
+        .join(".claude/rules/common/development-baseline.md")
+        .is_file());
+    assert!(project
+        .join(".claude/rules/common/git-collaboration-and-history.md")
         .is_file());
     assert!(project.join(".claude/skills/developer/SKILL.md").is_file());
     assert!(project
@@ -641,10 +704,21 @@ fn creates_a_runnable_web_skeleton_with_shared_agent_rules() {
         std::fs::read_link(project.join("AGENTS.md")).expect("AGENTS must be a symlink"),
         std::path::PathBuf::from("CLAUDE.md")
     );
+    for (path, target) in [
+        (".agents/rules", "../.claude/rules"),
+        (".agents/skills", "../.claude/skills"),
+        (".agents/scripts", "../.claude/scripts"),
+    ] {
+        assert_eq!(
+            std::fs::read_link(project.join(path))
+                .unwrap_or_else(|_| panic!("{path} must be a symlink")),
+            std::path::PathBuf::from(target)
+        );
+    }
     for path in [
         "README.md",
         "CLAUDE.md",
-        ".claude/rules/公共/开发基线.md",
+        ".claude/rules/common/development-baseline.md",
         ".claude/skills/developer/SKILL.md",
         "docs/项目需求与技术选型.md",
         "docs/frontend/latest/index.md",
@@ -768,7 +842,7 @@ fn backend_external_integration_gets_matching_skill_and_rule_without_messaging()
         .join(".claude/skills/external-integration/SKILL.md")
         .is_file());
     assert!(project
-        .join(".claude/rules/后端/异步与第三方规则.md")
+        .join(".claude/rules/backend/async-and-third-party.md")
         .is_file());
 
     std::fs::remove_dir_all(root).expect("cleanup project");

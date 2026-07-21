@@ -715,13 +715,7 @@ mod codex_side_tests {
 
     #[test]
     fn fresh_side_thread_can_be_ephemeral_without_a_fork_source() {
-        let params = codex_thread_params(
-            "/workspace/app",
-            "fullAccess",
-            None,
-            Some("high"),
-            true,
-        );
+        let params = codex_thread_params("/workspace/app", "fullAccess", None, Some("high"), true);
 
         assert_eq!(params["cwd"], "/workspace/app");
         assert_eq!(params["ephemeral"], true);
@@ -840,13 +834,7 @@ fn start_codex_app_server(
             .ok_or_else(|| "Codex side conversation requires a source thread".to_string())?;
         (
             "thread/fork",
-            codex_thread_fork_params(
-                source_id,
-                &cwd,
-                permission_mode,
-                model,
-                ephemeral,
-            ),
+            codex_thread_fork_params(source_id, &cwd, permission_mode, model, ephemeral),
         )
     } else if let Some(session_id) = session_id.as_ref() {
         let mut params = codex_thread_permission_overrides(permission_mode);

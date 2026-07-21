@@ -291,7 +291,7 @@ describe('App existing-project initialization progress', () => {
     await nextTick()
     expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
       phase: 'complete',
-      detail: '初始化完成：3 份文档、2 条规则、1 个 skill 已通过校验。',
+      detail: '初始化完成：已安装 3 份文档、2 条规则、1 个 skill。',
     })
 
     await vi.advanceTimersByTimeAsync(2_200)
@@ -326,7 +326,7 @@ describe('App existing-project initialization progress', () => {
     wrapper.unmount()
   })
 
-  it('keeps the exact failed initialization detail visible until explicit dismissal', async () => {
+  it('hides raw failed initialization diagnostics until explicit dismissal', async () => {
     const initialization = deferred<ExistingProjectInitResult>()
     initializeExistingProjectMock.mockReturnValue(initialization.promise)
     const wrapper = await mountAndStartInitialization()
@@ -339,7 +339,7 @@ describe('App existing-project initialization progress', () => {
     expect(wrapper.find('.initialization-progress-overlay').exists()).toBe(true)
     expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
       phase: 'failed',
-      detail: 'artifact rules/backend.md 缺少验证命令',
+      detail: '项目初始化未能安全完成。平台已保留恢复诊断，请处理安全问题后重试。',
     })
 
     await vi.advanceTimersByTimeAsync(2_200)
@@ -375,7 +375,7 @@ describe('App existing-project initialization progress', () => {
     expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
       phase: 'conflict',
       percent: 82,
-      detail: 'CLAUDE.md 已由用户修改，未安装任何产物',
+      detail: '检测到 1 处用户文件冲突，请处理后重试。',
       runId: 'run-attention',
       sequence: 14,
       issues: [{ code: 'install.conflict', detail: '安装前冲突检查失败' }],
@@ -715,7 +715,7 @@ describe('App existing-project initialization progress', () => {
     await settle()
     expect(wrapper.getComponent({ name: 'AgentAnalysisProgressPanel' }).props('progress')).toMatchObject({
       phase: 'complete',
-      detail: '初始化完成：1 份文档、4 条规则、2 个 skills 已通过校验。',
+      detail: '初始化完成：已安装 1 份文档、4 条规则、2 个 skills。',
     })
     wrapper.unmount()
   })

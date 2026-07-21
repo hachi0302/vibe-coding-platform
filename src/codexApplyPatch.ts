@@ -4,6 +4,8 @@ type PatchLineKind = 'ctx' | 'add' | 'del' | 'hunk'
 export interface CodexPatchLine {
   kind: PatchLineKind
   text: string
+  oldNo?: number
+  newNo?: number
 }
 
 export interface CodexPatchSection {
@@ -17,6 +19,7 @@ export interface CodexPatchSection {
 
 const FILE_HEADER_RE = /^\*\*\* (Update|Add|Delete) File: (.+)$/
 const MOVE_TO_RE = /^\*\*\* Move to: (.+)$/
+const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/
 
 function escapeHtml(s: string): string {
   return s
@@ -53,14 +56,17 @@ function renderPatchLine(line: CodexPatchLine): string {
     return `<div class="codex-patch-line hunk"><span class="codex-patch-text">${escapeHtml(line.text)}</span></div>`
   }
   const sign = line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ''
+  const lineNo = line.kind === 'add' ? line.newNo : line.oldNo
   const text = line.text.length ? escapeHtml(line.text) : '&nbsp;'
-  return `<div class="codex-patch-line ${line.kind}"><span class="codex-patch-sign">${sign}</span><span class="codex-patch-text">${text}</span></div>`
+  return `<div class="codex-patch-line ${line.kind}"><span class="codex-patch-no">${lineNo ?? ''}</span><span class="codex-patch-sign">${sign}</span><span class="codex-patch-text">${text}</span></div>`
 }
 
 export function parseCodexApplyPatch(input: string): CodexPatchSection[] {
   const lines = (input ?? '').split('\n')
   const sections: CodexPatchSection[] = []
   let current: CodexPatchSection | null = null
+  let oldNo: number | undefined
+  let newNo: number | undefined
 
   const flush = () => {
     if (!current) return
@@ -77,13 +83,16 @@ export function parseCodexApplyPatch(input: string): CodexPatchSection[] {
     const fileHeader = FILE_HEADER_RE.exec(line)
     if (fileHeader) {
       flush()
+      const op = opFromHeader(fileHeader[1])
       current = {
-        op: opFromHeader(fileHeader[1]),
+        op,
         path: fileHeader[2],
         lines: [],
         addCount: 0,
         delCount: 0,
       }
+      oldNo = op === 'delete' ? 1 : undefined
+      newNo = op === 'add' ? 1 : undefined
       continue
     }
 
@@ -97,26 +106,38 @@ export function parseCodexApplyPatch(input: string): CodexPatchSection[] {
 
     if (line.startsWith('@@')) {
       current.lines.push({ kind: 'hunk', text: line })
+      const hunk = HUNK_HEADER_RE.exec(line)
+      if (hunk) {
+        oldNo = Number(hunk[1])
+        newNo = Number(hunk[2])
+      }
       continue
     }
     if (line.startsWith('+')) {
-      current.lines.push({ kind: 'add', text: line.slice(1) })
+      current.lines.push({ kind: 'add', text: line.slice(1), newNo })
       current.addCount += 1
+      if (newNo !== undefined) newNo += 1
       continue
     }
     if (line.startsWith('-')) {
-      current.lines.push({ kind: 'del', text: line.slice(1) })
+      current.lines.push({ kind: 'del', text: line.slice(1), oldNo })
       current.delCount += 1
+      if (oldNo !== undefined) oldNo += 1
       continue
     }
     if (line.startsWith(' ')) {
-      current.lines.push({ kind: 'ctx', text: line.slice(1) })
+      current.lines.push({ kind: 'ctx', text: line.slice(1), oldNo, newNo })
+      if (oldNo !== undefined) oldNo += 1
+      if (newNo !== undefined) newNo += 1
       continue
     }
   }
 
   flush()
-  return sections
+  return sections.filter((section, index) => {
+    const next = sections[index + 1]
+    return !(section.op === 'delete' && section.lines.length === 0 && next?.op === 'add' && next.path === section.path)
+  })
 }
 
 export function renderCodexApplyPatchHtml(input: string, cwd?: string): string | null {

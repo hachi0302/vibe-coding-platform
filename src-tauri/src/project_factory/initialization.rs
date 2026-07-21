@@ -86,7 +86,7 @@ pub enum InitializationStage {
 }
 
 impl InitializationStage {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Scan => "scan",
             Self::Plan => "plan",
@@ -102,7 +102,7 @@ impl InitializationStage {
         }
     }
 
-    fn kind(self) -> Option<ArtifactKind> {
+    pub(super) fn kind(self) -> Option<ArtifactKind> {
         match self {
             Self::Documents => Some(ArtifactKind::Document),
             Self::Rules => Some(ArtifactKind::Rule),
@@ -157,6 +157,55 @@ pub fn evaluate_agent_stage(
     } else {
         StageDecision::AdvanceWithWarning
     }
+}
+
+/// Content review is intentionally non-blocking.  It gives the agent and the
+/// maintainer a record of omissions, but must never turn a usable project
+/// initialization into a retry loop.  Only conditions that could make the
+/// staged workspace or a later installation unsafe remain blocking.
+fn blocking_initialization_issues(issues: &[ValidationIssue]) -> Vec<ValidationIssue> {
+    issues
+        .iter()
+        .filter(|issue| {
+            let code = issue.code.as_str();
+            code == "workspace.source.modified"
+                || code == "plan.secret.detected"
+                || code == "plan.schema.unsupported"
+                || code == "plan.project-name.mismatch"
+                || code.starts_with("plan.path.")
+                || code.starts_with("artifact.path.")
+                || matches!(
+                    code,
+                    "artifact.file.missing"
+                        | "artifact.file.invalid-text"
+                        | "artifact.file.unsafe"
+                        | "artifact.secret.detected"
+                        | "stage.scope.violation"
+                        | "stage.output.unplanned"
+                )
+        })
+        .cloned()
+        .collect()
+}
+
+fn record_content_audit(
+    workspace: &Path,
+    stage: InitializationStage,
+    attempt: u32,
+    outcome: &AgentRunOutcome,
+    issues: &[ValidationIssue],
+) {
+    if issues.is_empty() {
+        return;
+    }
+    let _ = super::context_memory::save_stage_diagnostic(
+        workspace,
+        stage,
+        attempt,
+        outcome.exit_code,
+        &outcome.diagnostic_tail,
+        issues,
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +265,26 @@ fn issue_fingerprint(issues: &[ValidationIssue]) -> String {
         .collect::<Vec<_>>();
     keys.sort();
     super::inventory::content_sha256(keys.join("\n").as_bytes())
+}
+
+fn compact_issue_summary(issues: &[ValidationIssue]) -> Vec<serde_json::Value> {
+    let mut grouped = BTreeMap::<(String, Option<String>), usize>::new();
+    for issue in issues {
+        *grouped
+            .entry((issue.code.clone(), issue.path.clone()))
+            .or_default() += 1;
+    }
+    grouped
+        .into_iter()
+        .map(|((code, path), count)| {
+            serde_json::json!({
+                "code": code,
+                "path": path,
+                "count": count,
+                "details": format!("{}/validation-issues.json", super::context_memory::CONTEXT_MEMORY_DIR),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -304,14 +373,6 @@ const ARTIFACT_PLAN_SCHEMA: &str = r#"{
   }]
 }"#;
 
-const PLAN_COMMON_DOCUMENT_IDS: &[&str] = &[
-    "project-map",
-    "architecture-boundaries",
-    "reusable-assets",
-    "verification-playbook",
-    "known-risks",
-];
-
 fn exact_json_values<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
     let values = values
         .into_iter()
@@ -327,18 +388,21 @@ fn build_plan_stage_contract(inventory: &ProjectInventory) -> String {
     let module_paths =
         exact_json_values(inventory.modules.iter().map(|module| module.path.as_str()));
     let source_roots = exact_json_values(inventory.source_roots.iter().map(String::as_str));
-    let common_document_ids = exact_json_values(PLAN_COMMON_DOCUMENT_IDS.iter().copied());
+    let document_template_contract = super::document_templates::plan_contract();
     format!(
-        r#"请只创建 `.vibe-coding-platform/artifact-plan.json`，输出必须是 JSON，严格匹配以下 exact JSON schema：
+        r#"工程产物只创建 `.vibe-coding-platform/artifact-plan.json`；分析过程中可更新临时 `context-memory/notes/project-memory.md`。计划文件必须是 JSON，严格匹配以下 exact JSON schema：
 {ARTIFACT_PLAN_SCHEMA}
 
-计划校验器的精确契约（优先级高于任何推测）：
+计划审核的精确契约（优先级高于任何推测）：
 - `schemaVersion` 必须为 1；`projectName` 必须逐字复制 inventory.projectName。
-- 每个 `id` 和 `targetPath` 必须唯一；新增路径的每个组件均使用 English ASCII kebab-case，固定文件名 README.md 与 SKILL.md 除外。
-- document 只允许 `docs/ai/<english-kebab-case>.md`。
+- 每个 `id` 和 `targetPath` 必须唯一。document 的目录、文件名、标题和正文必须使用 IPS 风格中文（固定 `index.md`、`MOC.md` 除外）；rule 与 skill 的目录、文件名使用 English ASCII kebab-case，固定文件名 README.md 与 SKILL.md 除外。
+- document 只允许 `docs/backend/latest/`、`docs/frontend/latest/`、`docs/product/latest/` 或 `docs/test/latest/` 下的 `.md` 文件。禁止创建 `docs/ai/`、项目地图、可复用资产总览、验证手册、文档漂移等 AI 审计文档；后端必须使用“系统架构/业务/接口文档/第三方集成/规范约束”中文分类，前端、产品、测试同样遵循 `document-template-library.md`。
 - rule 只允许 `.claude/rules/project/<english-kebab-case>.md`（可按英文 kebab-case 子目录组织），并且必须包含精确路由项 `id: rule-router`、`kind: rule`、`targetPath: .claude/rules/project/README.md`。
 - skill 只允许 `.claude/skills/<project-specific-kebab-case>/SKILL.md`，每个 skill 必须绑定本项目复杂或高风险流程，禁止通用开发/调试/评审/重构 skill。
-- 必须创建以下 5 个 common document id，逐字使用且 `kind: document`、`layer: common`、路径位于 docs/ai：{common_document_ids}。
+- 通用 IPS 模板由平台原样安装，不得将 `详设文档模板.md`、`开发进度文档模板.md`、`前端接入说明模板.md` 写入计划、修改或重建。
+- 文档内容采用 IPS 的资料展示结构；内部 `path + symbol` 只用于确保内容真实，不得在用户文档中创建“真实证据”“维护规则”章节。信息不足只在末尾“待补信息”说明缺什么。
+
+{document_template_contract}
 
 覆盖契约：
 - module.name exact values: {module_names}
@@ -356,13 +420,13 @@ fn build_plan_stage_contract(inventory: &ProjectInventory) -> String {
 
 层级与主题契约：
 - `layer` 只能是 `common | contract | frontend | backend | database | integration`。
-- `common` 仅用于上述 5 个基础文档，或同时具有真实前端与后端证据的跨层文档；`contract` 必须有 API/client/SDK/DTO/OpenAPI/proto 边界证据或同时具有前后端证据。
+- `common` 仅用于同时具有真实前端与后端证据的跨层资料；`contract` 必须有 API/client/SDK/DTO/OpenAPI/proto 边界证据或同时具有前后端证据。
 - `frontend`、`backend`、`database`、`integration` 必须分别由 inventory 中匹配的前端、后端、数据库迁移/模型、第三方/API 边界路径与声明证据支持；没有对应证据就不要规划该层产物。
-- 除 5 个基础文档和 rule-router 外，`id`/`topic`/`targetPath` 的主题词必须能在 evidence path 或 symbol 中找到；否则 rationale 必须明确写出该项目概念，并逐字引用支持它的 evidence path 或 symbol。不要使用泛化的 backend-engineering、frontend-development、coding-guidelines 等主题。
+- 除 rule-router 外，`id`/`topic`/`targetPath` 的主题词必须能在 evidence path 或 symbol 中找到；否则 rationale 必须明确写出该项目概念，并逐字引用支持它的 evidence path 或 symbol。不要使用泛化的 backend-engineering、frontend-development、coding-guidelines 等主题。
 
 项目 skill 契约：
-- skill 的 rationale 必须明确写出“项目资源全部内嵌在 SKILL.md 中”，`requiredSections` 必须包含精确章节名 `项目资源`。
-- skill 还必须规划触发条件、真实前置证据、项目专属步骤、完成 Gate、失败处理与可执行验证；不得规划 sidecar resource、模板目录或外部资源文件。"#
+- skill 的 rationale 必须明确写出“项目资源全部内嵌在 SKILL.md 中”，`requiredSections` 必须包含语义等价的项目资源章节（例如 `项目资源`、`项目上下文` 或 `Project Resources`）。
+- skill 还必须规划触发条件、项目资源、项目专属步骤、完成 Gate、失败处理与可执行验证；项目资源只列真实可读取的路径、命令和资料，不创建“真实证据”章节，不得规划 sidecar resource、模板目录或外部资源文件。"#
     )
 }
 
@@ -372,9 +436,18 @@ pub fn build_v4_stage_prompt(
     plan: Option<&ArtifactPlan>,
     issues: &[ValidationIssue],
 ) -> String {
-    let inventory_json = serde_json::to_string_pretty(inventory)
-        .unwrap_or_else(|_| "{\"error\":\"inventory serialization failed\"}".to_string());
-    let issue_json = serde_json::to_string_pretty(issues).unwrap_or_else(|_| "[]".to_string());
+    let inventory_json = serde_json::to_string_pretty(&serde_json::json!({
+        "projectName": inventory.project_name,
+        "layers": inventory.layers,
+        "moduleCount": inventory.modules.len(),
+        "sourceRootCount": inventory.source_roots.len(),
+        "fileCount": inventory.files.len(),
+        "allowedCommands": inventory.commands,
+        "contextIndex": format!("{}/index.json", super::context_memory::CONTEXT_MEMORY_DIR),
+    }))
+    .unwrap_or_else(|_| "{\"error\":\"inventory summary serialization failed\"}".to_string());
+    let issue_json = serde_json::to_string_pretty(&compact_issue_summary(issues))
+        .unwrap_or_else(|_| "[]".to_string());
     let stage_contract = match stage {
         InitializationStage::Plan => build_plan_stage_contract(inventory),
         InitializationStage::Documents
@@ -386,13 +459,20 @@ pub fn build_v4_stage_prompt(
                     plan.artifacts
                         .iter()
                         .filter(|item| item.kind == kind)
+                        .map(|item| {
+                            serde_json::json!({
+                                "id": item.id,
+                                "topic": item.topic,
+                                "targetPath": item.target_path,
+                            })
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
             let scoped_json =
                 serde_json::to_string_pretty(&scoped).unwrap_or_else(|_| "[]".to_string());
             format!(
-                "本阶段类型：{}。只允许编辑本阶段 JSON 中的 targetPath，禁止编辑其他计划产物：\n{}",
+                "本阶段类型：{}。工程产物只允许编辑本阶段 JSON 中的 targetPath；此外只可更新临时 `context-memory/notes/project-memory.md`，禁止编辑其他计划产物：\n{}",
                 artifact_kind_name(kind),
                 scoped_json
             )
@@ -405,23 +485,32 @@ pub fn build_v4_stage_prompt(
 {stage_contract}
 
 质量与安全契约：
-- 所有产物目录与文件名使用 English ASCII kebab-case；SKILL.md 为唯一允许的固定大写文件名，正文必须中文实填。
-- 每条关键结论必须给出真实 path + symbol 证据；先识别既有框架、入口和可复用资产，明确复用优先、禁止替代方案、影响面与真实验证命令。
+- 文档目录、文件名、标题和正文必须使用中文，固定 `index.md`、`MOC.md` 除外；规则和技能的目录/文件名必须使用 English ASCII kebab-case（README.md、SKILL.md 固定），但标题、正文和章节必须使用中文。路径、代码符号和命令保持原样。
+- 每条项目结论先用真实 `path + symbol` 在内部核对；最终用户文档只展示 IPS 风格的业务、接口、表字段、枚举、架构或前端资料，不展示取证过程。
+- 严禁臆想或按常见实践补全项目事实。框架、版本、代码风格、命名、目录、模块边界、接口、模型、枚举、配置键、业务流程、历史陷阱、验证方式、rules 和 skills 的每项项目化结论，都必须来自当前清单中的真实文件；证据不足就不写结论，并在文档或 skill 的“待补信息”写明缺什么。
+- 三个 IPS 通用模板已原样存在于工作区；不得改写、缩写或重新生成。其余资料必须按 IPS 结构结合项目真实内容生成。
+- 对某个 skill、文档或规则缺少的项目事实，不得因此放弃生成或报称完成：在对应工作流下新增“待补信息”，简短写明缺少什么信息；该能力标记为待完善，后续获得信息后补齐。
+- `allowedCommands` 是唯一允许写入产物的可执行命令集合。只能逐字使用其中同一条记录的 `cwd` + `command`，不得组合、补参数、改 cwd 或根据 Maven/NPM 等常识推导新命令；没有匹配项就只描述验证目标，不写命令。
 - 只有发现前端证据才规划前端路由、状态、API 客户端、类型、组件、布局、composable、directive、主题、测试等；只有发现后端证据才规划模块、API、回调、枚举、业务生命周期等。
 - 只有发现数据库证据才规划物理模型、约束与迁移；只有发现第三方集成证据才规划集成边界、失败处理与安全约束。条件不成立必须在 exclusions 中用证据说明，不得创建空壳。
+- database 层产物必须引用真实数据库证据；清单存在 SQL/Flyway/Liquibase 文件时，不能只用 Java entity/DO/Mapper 代替迁移或表声明证据。
+- 只有 package-info.java 的源码根应使用该文件中的精确 `package com.example...;` 声明作为排除证据，不得用源码根之外的父级 POM 代替。
 - rules 必须项目专属，包含触发路由、路径/符号证据、复用优先、禁止替代、影响面、历史陷阱和可执行验证。
-- skills 只用于本项目复杂或高风险工作流，包含明确触发条件、前置证据、步骤、失败处理和验证；禁止通用 developer/debug/review/worktree/skill-designer/bug-fix/refactor 套件。
-- 禁止敏感值、占位符、空表、杜撰命令、杜撰框架、业务代码修改、源码重写、Git hook/config 修改、固定 IPS 路径或复制 IPS 目录结构。IPS 仅是质量基准。
-- 只能读取工作区内文件并写入本阶段允许目标；不得访问或提及原始项目的绝对路径。
+- `.claude/skills/skill-designer` 是平台内置能力，已由平台原样安装；需要新增或修改其他 skill 时，先读取并遵守它。其余 skills 只用于本项目复杂或高风险工作流，包含明确触发条件、前置证据、步骤、失败处理和验证；禁止通用 developer/debug/review/worktree/bug-fix/refactor 套件。
+- 禁止敏感值、占位符、空表、杜撰命令、杜撰框架、业务代码修改、源码重写、Git hook/config 修改、固定 IPS 项目路径或复制 IPS 项目事实。IPS 的资料工程结构、中文模板与审查方式是本阶段强制基准，详见临时 `document-template-library.md`。
+- 只能读取工作区内文件并写入本阶段允许目标及临时 `context-memory/notes/project-memory.md`；不得访问或提及原始项目的绝对路径。
+
+{memory_contract}
 
 项目清单（已脱敏）：
 {inventory_json}
 
-上次校验问题（仅修复这些真实问题，不重写已合格产物）：
+上次安全问题（仅处理真实安全问题，不重写已生成产物）：
 {issue_json}
 
-完成后直接退出；平台将独立校验文件，退出码不代表完成。"#,
+完成前在本阶段内自行审核：逐项比对计划、IPS 模板和真实项目内容，直接修正可以确认的问题；平台只记录审核结果，不会把内容质量问题退回给你反复修复。退出码不代表完成。"#,
         stage = stage.name(),
+        memory_contract = super::context_memory::prompt_contract(),
     )
 }
 
@@ -451,12 +540,12 @@ pub fn aggregate_stage_failure(
 
 /// Compatibility wrapper retained for callers that still build a headless prompt directly.
 /// V4 orchestration uses `build_v4_stage_prompt`, whose schema is owned by the backend.
-pub fn build_headless_initialization_prompt(base: &str, validation_error: Option<&str>) -> String {
-    let repair = validation_error
-        .map(|error| format!("\n校验问题：{error}"))
+pub fn build_headless_initialization_prompt(base: &str, review_note: Option<&str>) -> String {
+    let repair = review_note
+        .map(|note| format!("\n审核关注项：{note}"))
         .unwrap_or_default();
     format!(
-        "后台非会话任务；不要询问用户或等待确认。\n{base}{repair}\n完成状态只由平台文件校验决定。"
+        "后台非会话任务；不要询问用户或等待确认。\n{base}{repair}\n完成前进行内部审核；完成状态只由安全安装与所有权确认决定。"
     )
 }
 
@@ -568,7 +657,7 @@ fn stage_progress(stage: InitializationStage) -> (u8, &'static str) {
         InitializationStage::Rules => (53, "正在生成项目专属规则"),
         InitializationStage::Skills => (68, "正在生成项目专属 skills"),
         InitializationStage::Install => (84, "正在进行冲突检查并安装产物"),
-        InitializationStage::Verify => (94, "正在校验已安装产物与所有权"),
+        InitializationStage::Verify => (94, "正在确认已安装产物与所有权"),
         InitializationStage::Complete => (100, "初始化完成"),
         InitializationStage::Failed => (0, "初始化失败"),
         InitializationStage::Interrupted => (0, "初始化已中断"),
@@ -696,7 +785,7 @@ fn load_inventory_snapshot(project: &Path) -> Result<ProjectInventory, String> {
 fn managed_recovery_path(path: &str, plan: &ArtifactPlan) -> bool {
     matches!(
         path,
-        "CLAUDE.md" | "AGENTS.md" | "docs/ai/.initialization-manifest.json"
+        "CLAUDE.md" | "AGENTS.md" | ".vibe-coding-platform/.initialization-manifest.json"
     ) || path.starts_with(".agents/rules/")
         || path.starts_with(".agents/skills/")
         || path.starts_with(".agents/scripts/")
@@ -873,8 +962,13 @@ fn stage_surface(workspace: &Path) -> StageSurface {
     for relative in [
         ".vibe-coding-platform/artifact-plan.json",
         "docs/ai",
-        ".claude/rules/project",
+        "docs/backend/latest",
+        "docs/frontend/latest",
+        "docs/product/latest",
+        "docs/test/latest",
+        ".claude/rules",
         ".claude/skills",
+        ".claude/scripts",
     ] {
         collect_stage_surface(workspace, Path::new(relative), &mut output);
     }
@@ -925,6 +1019,16 @@ fn unplanned_surface_issues(
         .map(|file| file.path.as_str())
         .collect::<BTreeSet<_>>();
     known.insert(".vibe-coding-platform/artifact-plan.json");
+    known.extend(
+        surface
+            .keys()
+            .filter(|path| {
+                super::initialization_state::is_builtin_skill_designer_path(path)
+                    || super::initialization_state::is_builtin_document_template_path(path)
+                    || super::initialization_state::is_builtin_foundation_path(path)
+            })
+            .map(String::as_str),
+    );
     if let Some(plan) = plan {
         known.extend(plan.artifacts.iter().map(|item| item.target_path.as_str()));
     }
@@ -953,7 +1057,7 @@ fn agent_warning(stage: InitializationStage, outcome: &AgentRunOutcome) -> Valid
     ValidationIssue {
         code: "agent.exit.non-zero-valid".to_string(),
         detail: format!(
-            "{} 阶段 Agent 以 {} 退出，但暂存产物独立校验通过",
+            "{} 阶段 Agent 以 {} 退出，平台已保留产物审核记录",
             stage.name(),
             outcome
                 .exit_code
@@ -972,12 +1076,32 @@ fn fail_stage(
     issues: Vec<ValidationIssue>,
     outcome: &AgentRunOutcome,
 ) -> Result<(), String> {
-    let error = aggregate_stage_failure(stage, &issues, outcome);
+    if !state.workspace_path.is_empty() {
+        let _ = super::context_memory::save_stage_diagnostic(
+            Path::new(&state.workspace_path),
+            stage,
+            state.attempt,
+            outcome.exit_code,
+            &outcome.diagnostic_tail,
+            &issues,
+        );
+    }
     state.state = InitializationRunState::Failed;
     state.process_id = None;
     state.issues = issues;
     persist_state(project, state)?;
-    Err(error)
+    let stage_name = match stage {
+        InitializationStage::Plan => "规划产物",
+        InitializationStage::Documents => "生成文档",
+        InitializationStage::Rules => "生成规则",
+        InitializationStage::Skills => "生成 skills",
+        InitializationStage::Install => "安全安装",
+        InitializationStage::Verify => "验证结果",
+        _ => "项目初始化",
+    };
+    Err(format!(
+        "{stage_name}无法安全完成。平台已保留恢复诊断，请处理安全问题后重试。"
+    ))
 }
 
 fn mark_install_conflict(
@@ -985,18 +1109,26 @@ fn mark_install_conflict(
     state: &mut InitializationState,
     issues: Vec<ValidationIssue>,
 ) -> String {
-    let error = aggregate_stage_failure(
-        InitializationStage::Install,
-        &issues,
-        &AgentRunOutcome::success(),
-    );
+    if !state.workspace_path.is_empty() {
+        let _ = super::context_memory::save_stage_diagnostic(
+            Path::new(&state.workspace_path),
+            InitializationStage::Install,
+            state.attempt,
+            Some(0),
+            "",
+            &issues,
+        );
+    }
     state.state = InitializationRunState::Conflict;
     state.conflicts = issues;
     state.process_id = None;
     if let Err(save_error) = persist_state(project, state) {
-        return format!("{error}；状态持久化失败：{save_error}");
+        return format!("安全安装检测到冲突，且状态持久化失败：{save_error}");
     }
-    error
+    format!(
+        "安全安装检测到 {} 处用户文件冲突，请处理后重试。",
+        state.conflicts.len()
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1030,6 +1162,12 @@ where
             detail,
             Some(state),
         );
+        super::context_memory::update_stage_context(
+            workspace,
+            InitializationStage::Plan,
+            &issues,
+            None,
+        )?;
         let prompt = format!(
             "{}\n\n用户目标（只提供语义，不得扩大写入范围）：\n{}",
             build_v4_stage_prompt(InitializationStage::Plan, inventory, None, &issues),
@@ -1067,22 +1205,34 @@ where
         state.process_id = None;
         let parsed = super::artifact_plan::read_artifact_plan(workspace);
         let plan = parsed.as_ref().ok().cloned();
-        issues = match &parsed {
+        let mut audit_issues = match &parsed {
             Ok(plan) => super::artifact_plan::validate_artifact_plan(workspace, inventory, plan),
             Err(issues) => issues.clone(),
         };
-        issues.extend(stage_scope_issues(
+        audit_issues.extend(stage_scope_issues(
             &before_surface,
             &stage_surface(workspace),
             InitializationStage::Plan,
             None,
         ));
-        issues.extend(unplanned_surface_issues(
+        audit_issues.extend(unplanned_surface_issues(
             &stage_surface(workspace),
             inventory,
             None,
             InitializationStage::Plan,
         ));
+        record_content_audit(
+            workspace,
+            InitializationStage::Plan,
+            state.attempt,
+            &outcome,
+            &audit_issues,
+        );
+        issues = if plan.is_some() {
+            blocking_initialization_issues(&audit_issues)
+        } else {
+            audit_issues
+        };
         match evaluate_agent_stage(&outcome, &issues) {
             StageDecision::Advance | StageDecision::AdvanceWithWarning => {
                 let plan = plan.expect("valid plan stage has a parsed plan");
@@ -1137,6 +1287,16 @@ where
     if !plan.artifacts.iter().any(|item| item.kind == kind) {
         return Ok(());
     }
+    let existing_targets = plan
+        .artifacts
+        .iter()
+        .filter(|item| item.kind == kind)
+        .all(|item| workspace.join(&item.target_path).is_file());
+    if existing_targets {
+        state.issues.clear();
+        persist_state(project, state)?;
+        return Ok(());
+    }
     let mut issues = Vec::new();
     let mut tracker = RepairTracker::new(MAX_REPAIR_ATTEMPTS);
     loop {
@@ -1153,6 +1313,7 @@ where
             detail,
             Some(state),
         );
+        super::context_memory::update_stage_context(workspace, stage, &issues, Some(plan))?;
         let prompt = format!(
             "{}\n\n用户目标（只提供语义，不得扩大写入范围）：\n{}",
             build_v4_stage_prompt(stage, inventory, Some(plan), &issues),
@@ -1166,7 +1327,7 @@ where
                 &project.to_string_lossy(),
                 stage,
                 percent,
-                "Agent 正在隔离工作区工作；等待真实产物变化与校验",
+                "Agent 正在隔离工作区工作；等待真实产物变化与审核",
                 Some(&progress_state),
             );
         };
@@ -1187,20 +1348,22 @@ where
             }
         };
         state.process_id = None;
-        issues =
+        let mut audit_issues =
             super::artifact_plan::validate_staged_artifacts(workspace, inventory, plan, Some(kind));
-        issues.extend(stage_scope_issues(
+        audit_issues.extend(stage_scope_issues(
             &before_surface,
             &stage_surface(workspace),
             stage,
             Some(plan),
         ));
-        issues.extend(unplanned_surface_issues(
+        audit_issues.extend(unplanned_surface_issues(
             &stage_surface(workspace),
             inventory,
             Some(plan),
             stage,
         ));
+        record_content_audit(workspace, stage, state.attempt, &outcome, &audit_issues);
+        issues = blocking_initialization_issues(&audit_issues);
         match evaluate_agent_stage(&outcome, &issues) {
             StageDecision::Advance | StageDecision::AdvanceWithWarning => {
                 if !outcome.succeeded() {
@@ -1249,6 +1412,7 @@ where
     if !matches!(agent, "codex" | "claude") {
         return Err("项目初始化只支持 Claude 或 Codex".to_string());
     }
+    super::initialization_state::discard_orphaned_completed_state(project)?;
     let current_status = super::existing::existing_project_init_status(project_path)?;
     if current_status.status == "current-v4" {
         return super::existing::finalize_existing_project_initialization(project_path);
@@ -1340,6 +1504,31 @@ where
         completed_checkpoint = InitializationRunState::SnapshotReady;
         workspace
     };
+    super::context_memory::prepare_context_memory(&workspace, &inventory)?;
+    super::initialization_state::install_builtin_skill_designer(&workspace).map_err(|issues| {
+        aggregate_stage_failure(
+            InitializationStage::Plan,
+            &issues,
+            &AgentRunOutcome::success(),
+        )
+    })?;
+    super::initialization_state::install_builtin_document_templates(&workspace).map_err(
+        |issues| {
+            aggregate_stage_failure(
+                InitializationStage::Plan,
+                &issues,
+                &AgentRunOutcome::success(),
+            )
+        },
+    )?;
+    super::initialization_state::install_builtin_foundation_assets(&workspace, &inventory)
+        .map_err(|issues| {
+            aggregate_stage_failure(
+                InitializationStage::Plan,
+                &issues,
+                &AgentRunOutcome::success(),
+            )
+        })?;
 
     let mut plan = if reached(completed_checkpoint, InitializationRunState::PlanReady) {
         super::artifact_plan::read_artifact_plan(&workspace).map_err(|issues| {
@@ -1362,7 +1551,14 @@ where
         )?
     };
     let plan_issues = super::artifact_plan::validate_artifact_plan(&workspace, &inventory, &plan);
-    if !plan_issues.is_empty() {
+    record_content_audit(
+        &workspace,
+        InitializationStage::Plan,
+        state.attempt,
+        &AgentRunOutcome::success(),
+        &plan_issues,
+    );
+    if !blocking_initialization_issues(&plan_issues).is_empty() {
         plan = run_plan_stage(
             runner,
             agent,
@@ -1410,12 +1606,20 @@ where
 
     let staged_issues =
         super::artifact_plan::validate_staged_artifacts(&workspace, &inventory, &plan, None);
-    if !staged_issues.is_empty() {
+    record_content_audit(
+        &workspace,
+        InitializationStage::Verify,
+        state.attempt,
+        &AgentRunOutcome::success(),
+        &staged_issues,
+    );
+    let blocking_staged_issues = blocking_initialization_issues(&staged_issues);
+    if !blocking_staged_issues.is_empty() {
         return fail_stage(
             project,
             &mut state,
             InitializationStage::Verify,
-            staged_issues,
+            blocking_staged_issues,
             &AgentRunOutcome::success(),
         )
         .map(|_| unreachable!());
@@ -1454,6 +1658,44 @@ where
         }
     };
     manifest.inventory_summary = Some(initialization_summary(&inventory));
+    if let Err(issues) = super::initialization_state::install_builtin_skill_designer(project) {
+        let error = mark_install_conflict(project, &mut state, issues);
+        report(
+            &mut reporter,
+            project_path,
+            InitializationStage::Conflict,
+            0,
+            &error,
+            Some(&state),
+        );
+        return Err(error);
+    }
+    if let Err(issues) = super::initialization_state::install_builtin_document_templates(project) {
+        let error = mark_install_conflict(project, &mut state, issues);
+        report(
+            &mut reporter,
+            project_path,
+            InitializationStage::Conflict,
+            0,
+            &error,
+            Some(&state),
+        );
+        return Err(error);
+    }
+    if let Err(issues) =
+        super::initialization_state::install_builtin_foundation_assets(project, &inventory)
+    {
+        let error = mark_install_conflict(project, &mut state, issues);
+        report(
+            &mut reporter,
+            project_path,
+            InitializationStage::Conflict,
+            0,
+            &error,
+            Some(&state),
+        );
+        return Err(error);
+    }
     if let Err(issues) =
         super::initialization_state::install_managed_entries(project, &mut manifest)
     {
@@ -1518,7 +1760,7 @@ where
     let state_root = super::initialization_state::state_directory(project)?;
     if workspace.starts_with(&state_root) && workspace.is_dir() {
         fs::remove_dir_all(&workspace)
-            .map_err(|error| format!("初始化已验证，但无法清理隔离工作区：{error}"))?;
+            .map_err(|error| format!("初始化已完成，但无法清理隔离工作区：{error}"))?;
     }
     state.workspace_path.clear();
     persist_state(project, &mut state)?;
@@ -1530,7 +1772,7 @@ where
         project_path,
         InitializationStage::Complete,
         100,
-        "初始化完成并通过所有权校验",
+        "初始化完成并确认所有权",
         Some(&state),
     );
     Ok(ExistingProjectInitResult {
@@ -1539,7 +1781,7 @@ where
         phase: "complete".to_string(),
         run_id: state.run_id.clone(),
         percent: 100,
-        detail: "初始化完成并通过所有权校验".to_string(),
+        detail: "初始化完成并确认所有权".to_string(),
         attempt: state.attempt,
         sequence: next_progress_sequence(),
         recoverable: false,
@@ -1581,10 +1823,11 @@ pub fn initialize_existing_project_with_agent_progress(
 #[cfg(test)]
 mod tests {
     use super::{
-        aggregate_stage_failure, build_claude_process, build_codex_process, build_v4_stage_prompt,
-        evaluate_agent_stage, initialize_with_runner, interrupt_stale_state, resume_stage,
-        sanitize_user_intent, stage_scope_issues, AgentRunOutcome, AgentRunner,
-        InitializationStage, RepairDecision, RepairTracker, StageDecision, StageSurface,
+        aggregate_stage_failure, blocking_initialization_issues, build_claude_process,
+        build_codex_process, build_v4_stage_prompt, evaluate_agent_stage, initialize_with_runner,
+        interrupt_stale_state, resume_stage, sanitize_user_intent, stage_scope_issues,
+        AgentRunOutcome, AgentRunner, InitializationStage, RepairDecision, RepairTracker,
+        StageDecision, StageSurface,
     };
     use crate::project_factory::types::{
         ArtifactKind, ArtifactPlan, ArtifactPlanItem, CoverageExclusion, EvidenceReference,
@@ -1711,7 +1954,7 @@ mod tests {
                 symbol: Some("auth_service".to_string()),
             }],
             covers: covers.clone(),
-            required_sections: vec!["真实证据".to_string(), "验证方式".to_string()],
+            required_sections: vec!["待补信息".to_string()],
         };
         let mut skill = item(
             "auth-change-review",
@@ -1721,39 +1964,39 @@ mod tests {
         );
         skill.rationale = "项目资源全部内嵌在 SKILL.md 中，避免未受计划约束的旁路文件".to_string();
         skill.required_sections.push("项目资源".to_string());
-        ArtifactPlan {
+        let mut plan = ArtifactPlan {
             schema_version: 1,
             project_name: inventory.project_name.clone(),
             artifacts: vec![
                 item(
-                    "project-map",
+                    "backend-system-architecture",
                     ArtifactKind::Document,
-                    "docs/ai/project-map.md",
-                    "project-map",
-                ),
-                item(
-                    "architecture-boundaries",
-                    ArtifactKind::Document,
-                    "docs/ai/architecture-boundaries.md",
+                    "docs/backend/latest/系统架构/系统架构详解.md",
                     "architecture",
                 ),
                 item(
-                    "reusable-assets",
+                    "backend-business-overview",
                     ArtifactKind::Document,
-                    "docs/ai/reusable-assets.md",
-                    "reuse",
+                    "docs/backend/latest/业务/业务功能总览.md",
+                    "business-overview",
                 ),
                 item(
-                    "verification-playbook",
+                    "backend-index",
                     ArtifactKind::Document,
-                    "docs/ai/verification-playbook.md",
-                    "verification",
+                    "docs/backend/latest/index.md",
+                    "backend-index",
                 ),
                 item(
-                    "known-risks",
+                    "product-index",
                     ArtifactKind::Document,
-                    "docs/ai/known-risks-and-document-drift.md",
-                    "known-risks",
+                    "docs/product/latest/index.md",
+                    "product-index",
+                ),
+                item(
+                    "test-index",
+                    ArtifactKind::Document,
+                    "docs/test/latest/index.md",
+                    "test-index",
                 ),
                 item(
                     "rule-router",
@@ -1770,23 +2013,96 @@ mod tests {
                 skill,
             ],
             exclusions: vec![],
+        };
+        for artifact in plan
+            .artifacts
+            .iter_mut()
+            .filter(|artifact| artifact.kind == ArtifactKind::Document)
+        {
+            artifact.required_sections.push("待补信息".to_string());
         }
+        for artifact in plan.artifacts.iter_mut().filter(|artifact| {
+            matches!(
+                artifact.id.as_str(),
+                "backend-system-architecture"
+                    | "backend-business-overview"
+                    | "backend-index"
+                    | "product-index"
+                    | "test-index"
+            )
+        }) {
+            if matches!(artifact.id.as_str(), "product-index" | "test-index") {
+                artifact.layer = "common".into();
+            }
+            artifact
+                .required_sections
+                .extend(match artifact.id.as_str() {
+                    "backend-system-architecture" => vec![
+                        "目录".into(),
+                        "架构总览".into(),
+                        "分层架构设计".into(),
+                        "模块架构详解".into(),
+                    ],
+                    "backend-business-overview" => vec![
+                        "系统架构与模块划分".into(),
+                        "业务能力总览".into(),
+                        "接口全景索引".into(),
+                    ],
+                    "backend-index" => vec!["文档索引".into()],
+                    "product-index" => vec!["产品资料索引".into()],
+                    "test-index" => vec!["测试资料索引".into()],
+                    _ => Vec::new(),
+                });
+        }
+        for artifact in plan
+            .artifacts
+            .iter_mut()
+            .filter(|artifact| artifact.kind == ArtifactKind::Rule)
+        {
+            artifact.required_sections =
+                vec!["触发条件".into(), "验证方式".into(), "待补信息".into()];
+        }
+        let skill = plan
+            .artifacts
+            .iter_mut()
+            .find(|artifact| artifact.kind == ArtifactKind::Skill)
+            .expect("skill remains present");
+        skill.required_sections = vec![
+            "触发条件".into(),
+            "项目资源".into(),
+            "执行步骤".into(),
+            "完成 Gate".into(),
+            "失败处理".into(),
+            "待补信息".into(),
+        ];
+        plan
     }
 
     fn artifact_content(item: &ArtifactPlanItem) -> String {
-        let evidence = "`src/lib.rs` 与 `auth_service` 共同证明当前认证服务的真实入口。";
+        let evidence = "`src/lib.rs` 中的 `auth_service` 是已确认的认证入口。";
         match item.kind {
-            ArtifactKind::Document => format!(
-                "# 项目工程事实\n\n## 真实证据\n\n{evidence}\n\n## 验证方式\n\n使用项目清单中的 `cargo test` 核验认证行为。\n\n{}",
-                "当前认证服务的模块边界、复用入口、风险与验证方式均以源码为准。".repeat(8)
-            ),
+            ArtifactKind::Document => {
+                let sections = item
+                    .required_sections
+                    .iter()
+                    .map(|section| {
+                        if section == "待补信息" {
+                            format!("## {section}\n\n已证实认证入口；未发现其他可验证事实时不补默认值，后续读取真实源码补齐。")
+                        } else {
+                            format!("## {section}\n\n当前认证服务的模块边界、复用入口、风险与验证方式均以源码为准。")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                format!("# 项目工程事实\n\n{sections}\n\n{}", "当前认证服务的模块边界、复用入口、风险与验证方式均以源码为准。".repeat(8))
+            }
             ArtifactKind::Rule => format!(
-                "# 认证生命周期规则\n\n## 真实证据\n\n{evidence}\n\n## 验证方式\n\npaths: src/**\n\n触发：认证入口变化时执行。复用：优先沿现有函数扩展。禁止：不得创建平行认证框架。影响：检查调用方与测试。验证：运行 `cargo test`。\n\n{}",
-                "本规则只约束当前认证服务的真实生命周期。".repeat(8)
+                "# 认证生命周期规则\n\n## 触发条件\n\n修改 `{evidence}` 对应入口或其调用方时执行。\n\n## 复用与禁止替代\n\n优先扩展现有 `auth_service`，禁止新建并行认证框架。\n\n## 验证方式\n\n运行 `cargo test`。\n\n## 待补信息\n\n尚未发现更多认证模块时，不补写推测性约束。\n\n{}",
+                "本规则仅约束当前项目已经确认的认证生命周期和影响面。".repeat(8)
             ),
             ArtifactKind::Skill => format!(
-                "---\nname: sample-auth-change-review\ndescription: Use when changing the sample authentication boundary.\n---\n\n# 认证变更审查\n\n## 真实证据\n\n{evidence}\n\n## 验证方式\n\n运行 `cargo test`。\n\n## 项目资源\n\n读取认证入口与现有测试。\n\n## 执行流程\n\n1. 沿真实入口检查调用链。\n2. 复用当前错误与测试结构。\n\n## 完成 Gate\n\n源码证据与测试结果一致。\n\n## 失败处理\n\n验证失败立即停止并保留真实错误。\n\n{}",
-                "该流程只处理当前认证服务的高风险认证边界变更。".repeat(8)
+                "---\nname: sample-auth-change-review\ndescription: 修改认证边界时使用。\n---\n\n# 认证变更审查\n\n## 触发条件\n\n修改 {evidence} 或其调用链时使用。\n\n## 项目资源\n\n先读取认证入口和现有测试。\n\n## 执行步骤\n\n1. 沿已确认入口检查调用链。\n2. 复用当前错误处理和测试结构。\n\n## 完成 Gate\n\n源码事实与测试结果一致。\n\n## 失败处理\n\n立即停止并保留真实失败信息。\n\n## 待补信息\n\n未发现的认证模块获得证据后再补充。\n\n{}",
+                "该流程只处理当前项目已确认认证边界的高风险修改。".repeat(8)
             ),
         }
     }
@@ -1899,35 +2215,32 @@ mod tests {
         assert!(prompt.contains("targetPath"));
         assert!(prompt.contains("requiredSections"));
         assert!(prompt.contains("English ASCII kebab-case"));
-        assert!(prompt.contains("中文实填"));
+        assert!(prompt.contains("`.claude/rules/project/"));
         assert!(prompt.contains("path + symbol"));
         assert!(prompt.contains("复用优先"));
         assert!(prompt.contains("前端证据"));
         assert!(prompt.contains("后端证据"));
         assert!(prompt.contains("数据库证据"));
         assert!(prompt.contains("第三方集成证据"));
-        assert!(!prompt.contains("docs/backend/latest/接口文档/API接口总览.md"));
-        assert!(!prompt.contains("业务功能总览.md"));
-        assert!(!prompt.contains("规范约束"));
+        assert!(prompt.contains("严禁臆想"));
+        assert!(prompt.contains("allowedCommands"));
+        assert!(prompt.contains("通用 IPS 模板由平台原样安装"));
+        assert!(prompt.contains("docs/backend/latest/接口文档/API接口总览.md"));
+        assert!(prompt.contains("业务功能总览.md"));
+        assert!(prompt.contains("规范约束"));
     }
 
     #[test]
     fn v4_plan_prompt_declares_the_exact_validator_contract() {
         let prompt = build_v4_stage_prompt(InitializationStage::Plan, &inventory(), None, &[]);
 
-        assert!(prompt.contains("docs/ai/<english-kebab-case>.md"));
+        assert!(prompt.contains("document-template-library.md"));
         assert!(prompt.contains(".claude/rules/project/<english-kebab-case>.md"));
         assert!(prompt.contains(".claude/rules/project/README.md"));
         assert!(prompt.contains(".claude/skills/<project-specific-kebab-case>/SKILL.md"));
-        for id in [
-            "project-map",
-            "architecture-boundaries",
-            "reusable-assets",
-            "verification-playbook",
-            "known-risks",
-        ] {
-            assert!(prompt.contains(id), "missing common document id {id}");
-        }
+        assert!(prompt.contains("禁止创建 `docs/ai/`"));
+        assert!(prompt.contains("物理模型总览.md"));
+        assert!(prompt.contains("枚举值总览.md"));
         assert!(prompt.contains("common | contract | frontend | backend | database | integration"));
         assert!(prompt.contains("真实 declaration 或 configuration key"));
         assert!(prompt.contains("调用表达式、注释、字符串或推测的名称"));
@@ -1958,6 +2271,9 @@ mod tests {
         assert!(prompt.contains("每个 module 和每个 sourceRoot"));
         assert!(prompt.contains("同一 module/sourceRoot 内的 evidence path"));
         assert!(prompt.contains("exclusions.target 也只能逐字复制上述 exact values"));
+        assert!(prompt.contains("document-templates.json"));
+        assert!(prompt.contains("api-contracts"));
+        assert!(prompt.contains("待补信息"));
         assert!(!prompt.contains("project-specific-capability"));
     }
 
@@ -2022,6 +2338,25 @@ mod tests {
             evaluate_agent_stage(&non_zero, &[missing]),
             StageDecision::Repair
         );
+    }
+
+    #[test]
+    fn content_audit_does_not_block_initialization_but_workspace_safety_does() {
+        let review_only = ValidationIssue {
+            code: "artifact.section.missing".to_string(),
+            detail: "missing a documentation section".to_string(),
+            path: Some("docs/ai/project-map.md".to_string()),
+            stage: Some("documents".to_string()),
+        };
+        let unsafe_workspace = ValidationIssue {
+            code: "workspace.source.modified".to_string(),
+            detail: "source snapshot changed".to_string(),
+            path: Some("src/lib.rs".to_string()),
+            stage: Some("documents".to_string()),
+        };
+
+        assert!(blocking_initialization_issues(&[review_only]).is_empty());
+        assert_eq!(blocking_initialization_issues(&[unsafe_workspace]).len(), 1);
     }
 
     #[test]
@@ -2162,8 +2497,15 @@ mod tests {
             fs::read_to_string(root.join("src/lib.rs")).expect("source remains"),
             "pub fn auth_service() -> bool { true }\n"
         );
-        assert!(root.join("docs/ai/project-map.md").is_file());
-        assert!(root.join("docs/ai/.initialization-manifest.json").is_file());
+        assert!(root
+            .join("docs/backend/latest/系统架构/系统架构详解.md")
+            .is_file());
+        assert!(root
+            .join("docs/backend/latest/规范约束/详设文档模板.md")
+            .is_file());
+        assert!(root
+            .join(".vibe-coding-platform/.initialization-manifest.json")
+            .is_file());
         assert!(progress.iter().any(|event| event.phase == "complete"));
         let state = crate::project_factory::initialization_state::load_initialization_state(&root)
             .expect("load state")
@@ -2280,7 +2622,9 @@ mod tests {
         .expect("partial artifact install");
         crate::project_factory::initialization_state::install_managed_entries(&root, &mut manifest)
             .expect("partial entry install");
-        assert!(root.join("docs/ai/project-map.md").is_file());
+        assert!(root
+            .join("docs/backend/latest/系统架构/系统架构详解.md")
+            .is_file());
         assert!(root.join("CLAUDE.md").is_file());
         let mut runner = FakeRunner {
             plan,

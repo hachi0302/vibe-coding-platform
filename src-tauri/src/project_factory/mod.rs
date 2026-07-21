@@ -1,7 +1,9 @@
 mod ai_rules;
 mod analysis;
 mod artifact_plan;
+mod context_memory;
 mod docs;
+mod document_templates;
 mod env;
 mod existing;
 mod initialization;
@@ -28,9 +30,9 @@ pub use initialization::{
     RepairDecision, RepairTracker, StageDecision,
 };
 pub use initialization_state::{
-    install_managed_entries, install_planned_artifacts, load_initialization_state,
-    load_ownership_manifest, save_initialization_state, save_ownership_manifest,
-    share_agent_assets, state_directory, verify_ownership_manifest,
+    install_builtin_skill_designer, install_managed_entries, install_planned_artifacts,
+    load_initialization_state, load_ownership_manifest, save_initialization_state,
+    save_ownership_manifest, share_agent_assets, state_directory, verify_ownership_manifest,
 };
 pub use install::{install_command_for, install_tool};
 pub use inventory::{content_sha256, create_filtered_workspace, inspect_project};

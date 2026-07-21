@@ -574,6 +574,91 @@ fn output_text(v: Option<&Value>) -> String {
     }
 }
 
+fn text_indicates_tool_error(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("script error")
+        || text.contains("verification failed")
+        || text.contains("patch failed")
+}
+
+fn output_indicates_tool_error(output: Option<&Value>) -> bool {
+    match output {
+        Some(Value::String(text)) => text_indicates_tool_error(text),
+        Some(Value::Array(items)) => items.iter().any(|item| match item {
+            Value::String(text) => text_indicates_tool_error(text),
+            Value::Object(_) => item
+                .get("text")
+                .and_then(Value::as_str)
+                .map(text_indicates_tool_error)
+                .unwrap_or(false),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Newer Codex CLI versions wrap `apply_patch` in the JavaScript `exec` tool.
+/// Restore the underlying patch only for that exact invocation; ordinary exec
+/// calls must remain ordinary tool calls.
+fn extract_exec_apply_patch(input: &str) -> Option<String> {
+    let call_pos = input.find("tools.apply_patch")?;
+    let mut rest = input[call_pos + "tools.apply_patch".len()..].trim_start();
+    rest = rest.strip_prefix('(')?.trim_start();
+    if rest.starts_with('"') {
+        return decode_js_double_quoted_string(rest);
+    }
+
+    let ident_len = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
+        .count();
+    if ident_len == 0 {
+        return None;
+    }
+    let variable = &rest[..ident_len];
+    if !rest[ident_len..].trim_start().starts_with(')') {
+        return None;
+    }
+
+    let input_bytes = input.as_bytes();
+    for declaration in ["const", "let", "var"] {
+        let marker = format!("{declaration} {variable}");
+        let mut offset = 0;
+        while let Some(found) = input[offset..].find(&marker) {
+            let start = offset + found;
+            let before = input_bytes[..start].last().copied();
+            let after = input_bytes[start + marker.len()..].first().copied();
+            offset = start + marker.len();
+            if before.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                || after.is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                continue;
+            }
+            let value = input[offset..].trim_start().strip_prefix('=')?.trim_start();
+            if let Some(patch) = decode_js_double_quoted_string(value) {
+                return Some(patch);
+            }
+        }
+    }
+    None
+}
+
+fn decode_js_double_quoted_string(source: &str) -> Option<String> {
+    if !source.starts_with('"') {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let mut index = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return serde_json::from_str(&source[..=index]).ok(),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
 fn apply_patch_section_order(input: &str) -> Vec<String> {
     let mut order = Vec::new();
     for line in input.lines() {
@@ -608,7 +693,7 @@ fn build_apply_patch_section(path: &str, change: &Value) -> Option<String> {
             lines.push(format!("*** Add File: {target}"));
             if let Some(content) = change.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
-                    lines.push("@@".to_string());
+                    lines.push(format!("@@ -0,0 +1,{} @@", content.lines().count()));
                     lines.extend(content.lines().map(|line| format!("+{line}")));
                 }
             }
@@ -617,7 +702,7 @@ fn build_apply_patch_section(path: &str, change: &Value) -> Option<String> {
             lines.push(format!("*** Delete File: {path}"));
             if let Some(content) = change.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
-                    lines.push("@@".to_string());
+                    lines.push(format!("@@ -1,{} +0,0 @@", content.lines().count()));
                     lines.extend(content.lines().map(|line| format!("-{line}")));
                 }
             }
@@ -636,6 +721,9 @@ fn augment_apply_patch_input(input: &str, changes: &Value) -> Option<String> {
     let mut sections = Vec::new();
     let mut used_paths: HashMap<String, bool> = HashMap::new();
     for path in apply_patch_section_order(input) {
+        if used_paths.contains_key(&path) {
+            continue;
+        }
         let Some(change) = changes.get(&path) else {
             continue;
         };
@@ -661,6 +749,18 @@ fn augment_apply_patch_input(input: &str, changes: &Value) -> Option<String> {
     patch.push_str(&sections.join("\n"));
     patch.push_str("\n*** End Patch");
     Some(patch)
+}
+
+fn patch_changes_match_input(input: &str, changes: &Value) -> bool {
+    let Some(changes) = changes.as_object() else {
+        return false;
+    };
+    !changes.is_empty()
+        && changes.keys().all(|path| {
+            apply_patch_section_order(input)
+                .iter()
+                .any(|known| known == path)
+        })
 }
 
 fn agent_message_phase(payload: &Value) -> Option<&str> {
@@ -922,6 +1022,7 @@ fn read_with_title_index(
     let mut msgs = Vec::new();
     let mut pending_user_images: Vec<Block> = Vec::new();
     let mut apply_patch_by_call_id: HashMap<String, usize> = HashMap::new();
+    let mut wrapped_apply_patch_indices: Vec<usize> = Vec::new();
     let mut session_id: Option<String> = None;
     let mut created_ms: Option<i64> = None;
     let mut first_user_title = String::new();
@@ -1051,13 +1152,21 @@ fn read_with_title_index(
                 }
             }
             ("response_item", "function_call") | ("response_item", "custom_tool_call") => {
-                let name = p
+                let mut name = p
                     .get("name")
                     .and_then(|x| x.as_str())
                     .unwrap_or("tool")
                     .to_string();
+                let mut input = format_args(p.get("arguments").or_else(|| p.get("input")));
+                let mut wrapped_apply_patch = false;
+                if name == "exec" {
+                    if let Some(patch) = extract_exec_apply_patch(&input) {
+                        name = "apply_patch".to_string();
+                        input = patch;
+                        wrapped_apply_patch = true;
+                    }
+                }
                 let is_apply_patch = name == "apply_patch";
-                let input = format_args(p.get("arguments").or_else(|| p.get("input")));
                 let id = p
                     .get("call_id")
                     .and_then(|x| x.as_str())
@@ -1077,8 +1186,12 @@ fn read_with_title_index(
                 msg.model = model_hint.clone();
                 msgs.push(msg);
                 if is_apply_patch {
+                    let msg_index = msgs.len().saturating_sub(1);
+                    if wrapped_apply_patch {
+                        wrapped_apply_patch_indices.push(msg_index);
+                    }
                     if let Some(call_id) = id_for_index {
-                        apply_patch_by_call_id.insert(call_id, msgs.len().saturating_sub(1));
+                        apply_patch_by_call_id.insert(call_id, msg_index);
                     }
                 }
             }
@@ -1088,6 +1201,20 @@ fn read_with_title_index(
                     .get("call_id")
                     .and_then(|x| x.as_str())
                     .map(|s| s.to_string());
+                let output_is_error = output_indicates_tool_error(p.get("output"));
+                if output_is_error {
+                    if let Some(msg_index) = id
+                        .as_deref()
+                        .and_then(|call_id| apply_patch_by_call_id.get(call_id))
+                    {
+                        if let Some(block) = msgs
+                            .get_mut(*msg_index)
+                            .and_then(|msg| msg.blocks.get_mut(0))
+                        {
+                            block.is_error = true;
+                        }
+                    }
+                }
                 let mut blocks = Vec::new();
                 if let Some(arr) = p.get("output").and_then(|x| x.as_array()) {
                     for el in arr {
@@ -1101,13 +1228,20 @@ fn read_with_title_index(
                         } else {
                             let text = match el {
                                 Value::String(s) => s.clone(),
+                                Value::Object(_) => el
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| el.to_string()),
                                 other => other.to_string(),
                             };
                             if !text.trim().is_empty() {
+                                let is_error = text_indicates_tool_error(&text);
                                 blocks.push(Block {
                                     kind: "tool_result".to_string(),
                                     text: Some(text),
                                     tool_id: id.clone(),
+                                    is_error,
                                     ..Default::default()
                                 });
                             }
@@ -1120,6 +1254,7 @@ fn read_with_title_index(
                             kind: "tool_result".to_string(),
                             text: Some(out),
                             tool_id: id,
+                            is_error: output_is_error,
                             ..Default::default()
                         });
                     }
@@ -1140,7 +1275,20 @@ fn read_with_title_index(
                 let Some(call_id) = p.get("call_id").and_then(|x| x.as_str()) else {
                     continue;
                 };
-                let Some(msg_index) = apply_patch_by_call_id.get(call_id).copied() else {
+                let changes = p.get("changes").unwrap_or(&Value::Null);
+                let msg_index = apply_patch_by_call_id.get(call_id).copied().or_else(|| {
+                    wrapped_apply_patch_indices
+                        .iter()
+                        .rposition(|msg_index| {
+                            msgs.get(*msg_index)
+                                .and_then(|msg| msg.blocks.first())
+                                .and_then(|block| block.tool_input.as_deref())
+                                .map(|input| patch_changes_match_input(input, changes))
+                                .unwrap_or(false)
+                        })
+                        .map(|position| wrapped_apply_patch_indices.remove(position))
+                });
+                let Some(msg_index) = msg_index else {
                     continue;
                 };
                 let Some(block) = msgs
@@ -1150,9 +1298,7 @@ fn read_with_title_index(
                     continue;
                 };
                 let original = block.tool_input.clone().unwrap_or_default();
-                if let Some(next_input) =
-                    augment_apply_patch_input(&original, p.get("changes").unwrap_or(&Value::Null))
-                {
+                if let Some(next_input) = augment_apply_patch_input(&original, changes) {
                     block.tool_input = Some(next_input);
                 }
             }
@@ -2760,6 +2906,55 @@ mod tests {
         assert!(input.contains("-beta"));
         assert!(input.contains("*** Update File: /repo/test/new.test.ts"));
         assert!(input.contains("+new line"));
+    }
+
+    #[test]
+    fn read_session_restores_apply_patch_wrapped_by_exec() {
+        let exec_input = r#"const patch = "*** Begin Patch\n*** Add File: /repo/src/new.ts\n+export const value = 1;\n*** Update File: /repo/src/current.ts\n@@\n-old\n+new\n*** Delete File: /repo/src/old.ts\n*** End Patch";
+const result = await tools.apply_patch(patch);"#;
+        let lines = [
+            json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_exec_patch","name":"exec","input":exec_input}}).to_string(),
+            json!({"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"exec-internal-patch-id","changes":{"/repo/src/new.ts":{"type":"add","content":"export const value = 1;\n"},"/repo/src/current.ts":{"type":"update","unified_diff":"@@ -10,2 +10,2 @@\n context\n-old\n+new\n","move_path":null},"/repo/src/old.ts":{"type":"delete","content":"old line\n"}}}}).to_string(),
+        ];
+        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = write_temp("codex-read-session-exec-apply-patch.jsonl", &line_refs);
+        let msgs = read_with_title_index(path.to_string_lossy().as_ref(), &HashMap::new())
+            .expect("session should parse");
+        let tool_use = msgs
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .find(|block| block.kind == "tool_use")
+            .expect("apply patch tool use");
+        assert_eq!(tool_use.tool_name.as_deref(), Some("apply_patch"));
+        let patch = tool_use.tool_input.as_deref().unwrap_or_default();
+        assert!(patch.contains("@@ -0,0 +1,1 @@"));
+        assert!(patch.contains("@@ -1,1 +0,0 @@"));
+        assert!(patch.contains("*** Update File: /repo/src/current.ts"));
+    }
+
+    #[test]
+    fn read_session_marks_failed_exec_apply_patch_as_error() {
+        let exec_input = r#"const patch = "*** Begin Patch\n*** Update File: /repo/src/example.ts\n@@\n-old\n+new\n*** End Patch";
+const result = await tools.apply_patch(patch);"#;
+        let lines = [
+            json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_failed_patch","name":"exec","input":exec_input}}).to_string(),
+            json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_failed_patch","output":[{"type":"input_text","text":"Script failed"},{"type":"input_text","text":"Script error: apply_patch verification failed"}]}}).to_string(),
+        ];
+        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let path = write_temp(
+            "codex-read-session-failed-exec-apply-patch.jsonl",
+            &line_refs,
+        );
+        let msgs = read_with_title_index(path.to_string_lossy().as_ref(), &HashMap::new())
+            .expect("session should parse");
+        assert!(msgs
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .any(|block| block.kind == "tool_use" && block.is_error));
+        assert!(msgs
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .any(|block| block.kind == "tool_result" && block.is_error));
     }
 
     #[test]

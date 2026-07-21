@@ -16,6 +16,7 @@ const CODE_REVIEW: &str = include_str!("../../../docs/规范约束/技能模板/
 const DEVELOPER: &str = include_str!("../../../docs/规范约束/技能模板/公共/developer/SKILL.md");
 const PROBLEM_DIAGNOSE: &str =
     include_str!("../../../docs/规范约束/技能模板/公共/problem-diagnose/SKILL.md");
+const FIND_SKILLS: &str = include_str!("../../../docs/规范约束/技能模板/公共/find-skills/SKILL.md");
 const FRONTEND_SELF_TEST: &str =
     include_str!("../../../docs/规范约束/技能模板/前端/frontend-self-test/SKILL.md");
 const BACKEND_SELF_TEST: &str =
@@ -79,6 +80,7 @@ const BACKEND_PERSISTENCE_RULE: &str =
     include_str!("../../../docs/规范约束/规则模板/后端/持久化与迁移规则.md");
 const BACKEND_INTEGRATION_RULE: &str =
     include_str!("../../../docs/规范约束/规则模板/后端/异步与第三方规则.md");
+const RULES_INDEX: &str = include_str!("../../../docs/规范约束/规则模板/README.md");
 
 const PLATFORM_INIT_MARKER: &str = "<!-- vibe-coding-platform:init:v3 -->";
 
@@ -142,7 +144,12 @@ fn make_executable(_path: &Path) -> Result<(), String> {
 pub(super) fn install_doc_sync_review(root: &Path, layers: ProjectLayers) -> Result<(), String> {
     let rule = format!(
         "{}\n{}\n",
-        DOC_SYNC_REVIEW_RULE.trim_end(),
+        DOC_SYNC_REVIEW_RULE
+            .replace(
+                "{{文档同步审核待补信息}}",
+                "- 待补信息：初始化未确认项目的提交范围、长期文档索引或审核脚本时，只能在实际任务中补充，不得编造。",
+            )
+            .trim_end(),
         doc_sync_long_document_mapping(layers)
     );
     write_rule(root, "code/doc-sync-review.md", &rule)?;
@@ -265,18 +272,18 @@ fn validate_generated_materials(root: &Path) -> Result<(), String> {
     }
 
     for relative in [
-        ".claude/rules/公共/开发基线.md",
-        ".claude/rules/公共/复用与影响面.md",
-        ".claude/rules/公共/事实与兜底边界.md",
-        ".claude/rules/公共/开发流程与文档同步.md",
-        ".claude/rules/公共/自测与交付.md",
-        ".claude/rules/公共/Git协作与历史保护.md",
+        ".claude/rules/common/development-baseline.md",
+        ".claude/rules/common/reuse-and-impact.md",
+        ".claude/rules/common/facts-and-no-fallbacks.md",
+        ".claude/rules/common/development-flow-and-doc-sync.md",
+        ".claude/rules/common/self-test-and-delivery.md",
+        ".claude/rules/common/git-collaboration-and-history.md",
         ".claude/rules/code/doc-sync-review.md",
-        ".claude/rules/前端/前端工程规则.md",
-        ".claude/rules/前端/前端验证规则.md",
-        ".claude/rules/后端/API与业务实现规则.md",
-        ".claude/rules/后端/持久化与迁移规则.md",
-        ".claude/rules/后端/异步与第三方规则.md",
+        ".claude/rules/frontend/engineering.md",
+        ".claude/rules/frontend/verification.md",
+        ".claude/rules/backend/api-and-business.md",
+        ".claude/rules/backend/persistence-and-migration.md",
+        ".claude/rules/backend/async-and-third-party.md",
     ] {
         let path = root.join(relative);
         if path.is_file() {
@@ -286,6 +293,7 @@ fn validate_generated_materials(root: &Path) -> Result<(), String> {
     }
     for name in [
         "skill-designer",
+        "find-skills",
         "detail-design-writer",
         "review-feedback-handler",
         "code-review",
@@ -1145,7 +1153,7 @@ fn render_template_for(
         .replace("{{测试证据路径}}", &test_evidence(root))
         .replace(
             "{{提交规范证据}}",
-            ".claude/rules/公共/Git协作与历史保护.md",
+            ".claude/rules/common/git-collaboration-and-history.md",
         )
         .replace(
             "{{开发基线事实表}}",
@@ -1184,7 +1192,10 @@ fn render_template_for(
             "只有项目提供 Docker/容器访问方式后才使用对应容器日志命令",
         )
         .replace("{{集中日志}}", "只有项目配置并授权集中日志入口后才使用")
-        .replace("{{日志规则路径}}", ".claude/rules/公共/事实与兜底边界.md")
+        .replace(
+            "{{日志规则路径}}",
+            ".claude/rules/common/facts-and-no-fallbacks.md",
+        )
         .replace("{{本地日志路径与检索命令}}", &log_source(root))
         .replace(
             "{{容器日志命令或不适用}}",
@@ -1212,9 +1223,9 @@ fn render_template_for(
             if adopted_decision(request, "persistence")
                 && !request.recommendation.database.is_empty()
             {
-                ".claude/rules/后端/持久化与迁移规则.md"
+                ".claude/rules/backend/persistence-and-migration.md"
             } else {
-                ".claude/rules/公共/事实与兜底边界.md"
+                ".claude/rules/common/facts-and-no-fallbacks.md"
             },
         )
         .replace(
@@ -1244,7 +1255,7 @@ fn render_template_for(
         .replace("{{迁移或测试命令}}", &test)
         .replace(
             "{{第三方规则路径}}",
-            ".claude/rules/后端/异步与第三方规则.md",
+            ".claude/rules/backend/async-and-third-party.md",
         )
         .replace("{{集成代码路径}}", &project_evidence(root))
         .replace(
@@ -1256,9 +1267,30 @@ fn render_template_for(
             &format!(
                 "长期文档位于 `{docs_root}/latest/`；业务、接口、架构或公共能力变化时同步更新。"
             ),
-        );
+        )
+        .replace(".claude/rules/前端/", ".claude/rules/frontend/")
+        .replace(".claude/rules/后端/", ".claude/rules/backend/")
+        .replace(".claude/rules/公共/", ".claude/rules/common/");
+    let rendered = resolve_remaining_template_placeholders(rendered);
     reject_forbidden_material(&rendered, "渲染结果")?;
     Ok(rendered)
+}
+
+/// Templates intentionally describe information that may not exist in a new
+/// project.  It must be an explicit gap, never an unresolved `{{token}}` that
+/// later looks like an instruction or fabricated project fact.
+fn resolve_remaining_template_placeholders(mut content: String) -> String {
+    while let Some(start) = content.find("{{") {
+        let Some(relative_end) = content[start + 2..].find("}}") else {
+            break;
+        };
+        let end = start + 2 + relative_end + 2;
+        content.replace_range(
+            start..end,
+            "待补信息：初始化扫描未确认，需读取当前代码、配置或用户材料后补充",
+        );
+    }
+    content
 }
 
 /// 将平台内置的 skill-designer 原样安装到项目中。
@@ -1285,6 +1317,7 @@ fn write_runtime_skills(root: &Path, request: &CreateProjectRequest) -> Result<(
     let layers = project_layers(root);
     write_skill_designer(root)?;
     for (name, content) in [
+        ("find-skills", FIND_SKILLS),
         ("detail-design-writer", DETAIL_DESIGN),
         ("review-feedback-handler", REVIEW_FEEDBACK),
         ("code-review", CODE_REVIEW),
@@ -1375,12 +1408,23 @@ fn write_runtime_skills(root: &Path, request: &CreateProjectRequest) -> Result<(
 
 fn write_runtime_rules(root: &Path, request: &CreateProjectRequest) -> Result<(), String> {
     let layers = project_layers(root);
+    write_rule(
+        root,
+        "README.md",
+        &render_template(RULES_INDEX, root, request, layers)?,
+    )?;
     let rules = [
-        ("公共/开发基线.md", DEVELOPMENT_BASELINE_RULE),
-        ("公共/复用与影响面.md", REUSE_AND_IMPACT_RULE),
-        ("公共/事实与兜底边界.md", FACT_AND_FALLBACK_RULE),
-        ("公共/开发流程与文档同步.md", DEVELOPMENT_FLOW_RULE),
-        ("公共/自测与交付.md", SELF_TEST_AND_DELIVERY_RULE),
+        ("common/development-baseline.md", DEVELOPMENT_BASELINE_RULE),
+        ("common/reuse-and-impact.md", REUSE_AND_IMPACT_RULE),
+        ("common/facts-and-no-fallbacks.md", FACT_AND_FALLBACK_RULE),
+        (
+            "common/development-flow-and-doc-sync.md",
+            DEVELOPMENT_FLOW_RULE,
+        ),
+        (
+            "common/self-test-and-delivery.md",
+            SELF_TEST_AND_DELIVERY_RULE,
+        ),
     ];
     for (name, content) in rules {
         write_rule(
@@ -1392,14 +1436,14 @@ fn write_runtime_rules(root: &Path, request: &CreateProjectRequest) -> Result<()
     if is_git_repository(root) {
         write_rule(
             root,
-            "公共/Git协作与历史保护.md",
+            "common/git-collaboration-and-history.md",
             &render_template(GIT_COLLABORATION_RULE, root, request, layers)?,
         )?;
     }
     if layers.frontend {
         write_rule(
             root,
-            "前端/前端工程规则.md",
+            "frontend/engineering.md",
             &render_template_for(
                 FRONTEND_ENGINEERING_RULE,
                 root,
@@ -1410,7 +1454,7 @@ fn write_runtime_rules(root: &Path, request: &CreateProjectRequest) -> Result<()
         )?;
         write_rule(
             root,
-            "前端/前端验证规则.md",
+            "frontend/verification.md",
             &render_template_for(
                 FRONTEND_VERIFICATION_RULE,
                 root,
@@ -1423,7 +1467,7 @@ fn write_runtime_rules(root: &Path, request: &CreateProjectRequest) -> Result<()
     if layers.backend {
         write_rule(
             root,
-            "后端/API与业务实现规则.md",
+            "backend/api-and-business.md",
             &render_template_for(
                 BACKEND_API_RULE,
                 root,
@@ -1435,7 +1479,7 @@ fn write_runtime_rules(root: &Path, request: &CreateProjectRequest) -> Result<()
         if adopted_decision(request, "persistence") && !request.recommendation.database.is_empty() {
             write_rule(
                 root,
-                "后端/持久化与迁移规则.md",
+                "backend/persistence-and-migration.md",
                 &render_template_for(
                     BACKEND_PERSISTENCE_RULE,
                     root,
@@ -1450,7 +1494,7 @@ fn write_runtime_rules(root: &Path, request: &CreateProjectRequest) -> Result<()
         {
             write_rule(
                 root,
-                "后端/异步与第三方规则.md",
+                "backend/async-and-third-party.md",
                 &render_template_for(
                     BACKEND_INTEGRATION_RULE,
                     root,
@@ -1556,37 +1600,30 @@ fn remove_existing_link_or_copy(path: &Path) -> Result<(), String> {
     }
 }
 
-fn write_shared_entrypoints(root: &Path, entry: &str) -> Result<String, String> {
+fn write_shared_entrypoints(root: &Path, entry: &str) -> Result<(), String> {
     write_file(&root.join("CLAUDE.md"), entry)?;
     let agents_entry = root.join("AGENTS.md");
     remove_existing_link_or_copy(&agents_entry)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
-        if symlink("CLAUDE.md", &agents_entry).is_ok() {
-            return Ok("symlink".to_string());
-        }
+        symlink("CLAUDE.md", &agents_entry).map_err(|error| {
+            format!("无法创建 AGENTS.md -> CLAUDE.md 相对软链接；拒绝写入副本：{error}")
+        })?;
+        Ok(())
     }
-    write_file(&agents_entry, entry)?;
-    Ok("copy".to_string())
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file("CLAUDE.md", &agents_entry).map_err(|error| {
+            format!("无法创建 AGENTS.md -> CLAUDE.md 相对软链接；拒绝写入副本：{error}")
+        })?;
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    Err("当前平台不支持 AGENTS.md 相对软链接；拒绝写入副本".to_string())
 }
 
-fn copy_dir_contents(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let from = entry.path();
-        let to = destination.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_contents(&from, &to)?;
-        } else {
-            fs::copy(&from, &to).map_err(|error| error.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn link_or_copy_shared_dir(root: &Path, dir: &str) -> Result<bool, String> {
+fn link_shared_dir(root: &Path, dir: &str) -> Result<(), String> {
     let agents_dir = root.join(".agents");
     fs::create_dir_all(&agents_dir).map_err(|error| error.to_string())?;
     let destination = agents_dir.join(dir);
@@ -1594,12 +1631,20 @@ fn link_or_copy_shared_dir(root: &Path, dir: &str) -> Result<bool, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
-        if symlink(format!("../.claude/{dir}"), &destination).is_ok() {
-            return Ok(true);
-        }
+        symlink(format!("../.claude/{dir}"), &destination)
+            .map_err(|error| format!("无法创建 .agents/{dir} 相对软链接；拒绝复制目录：{error}"))?;
+        Ok(())
     }
-    copy_dir_contents(&root.join(".claude").join(dir), &destination)?;
-    Ok(false)
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(format!("../.claude/{dir}"), &destination)
+            .map_err(|error| format!("无法创建 .agents/{dir} 相对软链接；拒绝复制目录：{error}"))?;
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    Err(format!(
+        "当前平台不支持 .agents/{dir} 相对软链接；拒绝复制目录"
+    ))
 }
 
 pub fn write_ai_rules(root: &Path, request: &CreateProjectRequest) -> Result<String, String> {
@@ -1618,20 +1663,16 @@ pub fn write_ai_rules(root: &Path, request: &CreateProjectRequest) -> Result<Str
 
     let entry = entry_document(root, request);
     reject_forbidden_material(&entry, "CLAUDE.md")?;
-    let entry_mode = write_shared_entrypoints(root, &entry)?;
-    let rules_linked = link_or_copy_shared_dir(root, "rules")?;
-    let skills_linked = link_or_copy_shared_dir(root, "skills")?;
-    let scripts_linked = link_or_copy_shared_dir(root, "scripts")?;
+    write_shared_entrypoints(root, &entry)?;
+    link_shared_dir(root, "rules")?;
+    link_shared_dir(root, "skills")?;
+    link_shared_dir(root, "scripts")?;
     write_file(
         &root.join(".agents/CODEX.md"),
         "遵守根目录 `AGENTS.md`；规则、技能和脚本与 `.claude/` 共用同一来源。创建或修改 skill 必须先使用 `skill-designer`。\n",
     )?;
 
-    if rules_linked && skills_linked && scripts_linked && entry_mode == "symlink" {
-        Ok("shared-symlink".to_string())
-    } else {
-        Ok("shared-copy-fallback".to_string())
-    }
+    Ok("shared-symlink".to_string())
 }
 
 #[cfg(test)]
@@ -1726,7 +1767,7 @@ mod tests {
 
     #[test]
     fn backend_log_skill_requires_developer_completion_before_available() {
-        assert!(BACKEND_LOG_DIAGNOSE.contains("## 待开发者补充"));
+        assert!(BACKEND_LOG_DIAGNOSE.contains("## 待补信息"));
         assert!(BACKEND_LOG_DIAGNOSE.contains("## 完成 Gate"));
         assert!(BACKEND_LOG_DIAGNOSE.contains("最小只读探测"));
         assert!(BACKEND_LOG_DIAGNOSE.contains("配置键"));
@@ -1751,7 +1792,7 @@ mod tests {
         let skill = fs::read_to_string(root.join(".claude/skills/database-read-diagnose/SKILL.md"))
             .expect("database skill must be generated");
 
-        assert!(skill.contains("## 待开发者补充"));
+        assert!(skill.contains("## 待补信息"));
         assert!(skill.contains("## 完成 Gate"));
         assert!(skill.contains("有证据但需配置"));
         assert!(skill.contains("SELECT 1"));
@@ -1774,8 +1815,8 @@ mod tests {
         let skill = fs::read_to_string(root.join(".claude/skills/database-read-diagnose/SKILL.md"))
             .expect("database skill must be generated");
 
-        assert!(skill.contains(".claude/rules/公共/事实与兜底边界.md"));
-        assert!(!skill.contains(".claude/rules/后端/持久化与迁移规则.md"));
+        assert!(skill.contains(".claude/rules/common/facts-and-no-fallbacks.md"));
+        assert!(!skill.contains(".claude/rules/backend/persistence-and-migration.md"));
         fs::remove_dir_all(root).expect("cleanup test project");
     }
 
@@ -1809,12 +1850,13 @@ mod tests {
         let request = maven_backend_request(&root);
 
         write_runtime_rules(&root, &request).expect("write project rules");
-        let reuse = fs::read_to_string(root.join(".claude/rules/公共/复用与影响面.md"))
+        let reuse = fs::read_to_string(root.join(".claude/rules/common/reuse-and-impact.md"))
             .expect("read reuse rule");
-        let backend = fs::read_to_string(root.join(".claude/rules/后端/API与业务实现规则.md"))
+        let backend = fs::read_to_string(root.join(".claude/rules/backend/api-and-business.md"))
             .expect("read backend rule");
-        let baseline = fs::read_to_string(root.join(".claude/rules/公共/开发基线.md"))
-            .expect("read baseline rule");
+        let baseline =
+            fs::read_to_string(root.join(".claude/rules/common/development-baseline.md"))
+                .expect("read baseline rule");
 
         assert!(reuse.contains("src/main/java/demo/common/MoneyUtils.java"));
         assert!(reuse.contains("src/main/java/demo/domain/OrderStatusEnum.java"));
@@ -1863,7 +1905,7 @@ mod tests {
         };
 
         write_runtime_rules(&root, &request).expect("write frontend rules");
-        let frontend = fs::read_to_string(root.join(".claude/rules/前端/前端工程规则.md"))
+        let frontend = fs::read_to_string(root.join(".claude/rules/frontend/engineering.md"))
             .expect("read frontend rule");
 
         for expected in [

@@ -184,18 +184,65 @@ fn warning_details(state: &InitializationState) -> Vec<String> {
 }
 
 fn status_from_state(state: InitializationState) -> ExistingProjectInitStatus {
+    // `existing_project_init_status` reaches this branch only after finding no
+    // ownership manifest.  A completed local state is therefore stale and
+    // must never be presented as a resumable final step.
+    if state.state == InitializationRunState::Completed {
+        return ExistingProjectInitStatus {
+            initialized: false,
+            status: "not-initialized".to_string(),
+            phase: "scan".to_string(),
+            marker_version: None,
+            run_id: None,
+            percent: 0,
+            detail: "检测到缺少所有权清单的旧完成状态；将从头初始化。".to_string(),
+            attempt: 0,
+            sequence: state.updated_at_unix_ms,
+            recoverable: true,
+            issues: Vec::new(),
+            conflicts: Vec::new(),
+            warnings: Vec::new(),
+            artifact_totals: None,
+        };
+    }
     let phase = phase_for_state(state.state).to_string();
     let warnings = warning_details(&state);
     let needs_attention = matches!(
         state.state,
-        InitializationRunState::Failed
-            | InitializationRunState::Conflict
-            | InitializationRunState::Completed
+        InitializationRunState::Failed | InitializationRunState::Conflict
     );
     let status = if needs_attention {
         "needs-attention"
     } else {
         "incomplete"
+    };
+    let detail = match state.state {
+        InitializationRunState::Failed => {
+            let stage = state
+                .issues
+                .first()
+                .and_then(|issue| issue.stage.as_deref())
+                .map(|stage| match stage {
+                    "plan" => "规划产物",
+                    "documents" => "生成文档",
+                    "rules" => "生成规则",
+                    "skills" => "生成 skills",
+                    "install" => "安全安装",
+                    "verify" => "验证结果",
+                    _ => "项目初始化",
+                })
+                .unwrap_or("项目初始化");
+            format!(
+                "{stage}未通过校验，共发现 {} 个问题。平台已保留诊断信息，请重试。",
+                state.issues.len()
+            )
+        }
+        InitializationRunState::Conflict => format!(
+            "检测到 {} 处用户文件冲突，请处理后重试。",
+            state.conflicts.len()
+        ),
+        InitializationRunState::Interrupted => "初始化已中断，可从上次有效节点继续。".to_string(),
+        _ => "已有未完成初始化，可从最后有效节点继续".to_string(),
     };
     ExistingProjectInitStatus {
         initialized: false,
@@ -204,18 +251,10 @@ fn status_from_state(state: InitializationState) -> ExistingProjectInitStatus {
         marker_version: None,
         run_id: Some(state.run_id.clone()),
         percent: percent_for_phase(&phase),
-        detail: state
-            .conflicts
-            .first()
-            .or_else(|| state.issues.first())
-            .map(|item| item.detail.clone())
-            .unwrap_or_else(|| "已有未完成初始化，可从最后有效节点继续".to_string()),
+        detail,
         attempt: state.attempt,
         sequence: state.updated_at_unix_ms,
-        recoverable: !matches!(
-            state.state,
-            InitializationRunState::Conflict | InitializationRunState::Completed
-        ),
+        recoverable: !matches!(state.state, InitializationRunState::Conflict),
         issues: state.issues,
         conflicts: state.conflicts,
         warnings,
@@ -250,7 +289,7 @@ pub fn existing_project_init_status(
     if !root.is_dir() {
         return Err("项目路径不存在或不是目录".to_string());
     }
-    let manifest_path = root.join("docs/ai/.initialization-manifest.json");
+    let manifest_path = root.join(".vibe-coding-platform/.initialization-manifest.json");
     if manifest_path.exists() {
         let manifest = match load_ownership_manifest(root) {
             Ok(Some(manifest)) => manifest,
@@ -398,6 +437,10 @@ pub fn finalize_existing_project_initialization(
 #[cfg(test)]
 mod tests {
     use super::{existing_project_init_status, prepare_existing_project_initialization};
+    use crate::project_factory::initialization_state::{
+        save_initialization_state, INITIALIZATION_STATE_SCHEMA_VERSION,
+    };
+    use crate::project_factory::types::{InitializationRunState, InitializationState};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -445,6 +488,27 @@ mod tests {
             "<!-- vibe-coding-platform:init:v3 -->\n"
         );
         assert!(!root.join("docs").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn completed_state_without_manifest_starts_a_fresh_initialization() {
+        let root = fixture("orphaned-completed-state");
+        fs::write(root.join("package.json"), r#"{"dependencies":{"vue":"3"}}"#).expect("package");
+        let state = InitializationState {
+            schema_version: INITIALIZATION_STATE_SCHEMA_VERSION,
+            run_id: "stale-completed-run".to_string(),
+            state: InitializationRunState::Completed,
+            updated_at_unix_ms: 1,
+            ..InitializationState::default()
+        };
+        save_initialization_state(&root, &state).expect("save stale state");
+
+        let status = existing_project_init_status(&root.to_string_lossy()).expect("status");
+
+        assert_eq!(status.status, "not-initialized");
+        assert_eq!(status.phase, "scan");
+        assert!(status.recoverable);
         let _ = fs::remove_dir_all(root);
     }
 }

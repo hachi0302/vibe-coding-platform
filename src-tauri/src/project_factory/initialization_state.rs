@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::artifact_plan::artifact_totals;
 use super::inventory::content_sha256;
+use super::types::ProjectInventory;
 use super::types::{
     AgentAssetMode, AgentAssetTarget, ArtifactKind, ArtifactPlan, InitializationCheckpoint,
     InitializationRunState, InitializationState, ManagedAgentAsset, ManagedEntryOwnership,
@@ -21,8 +22,318 @@ pub const MANAGED_BLOCK_END: &str = "<!-- vibe-coding-platform:init:v4:end -->";
 
 const STATE_FILE: &str = "state.json";
 const INSTALL_JOURNAL_FILE: &str = "install-journal.json";
-const OWNERSHIP_MANIFEST_PATH: &str = "docs/ai/.initialization-manifest.json";
+const OWNERSHIP_MANIFEST_PATH: &str = ".vibe-coding-platform/.initialization-manifest.json";
 const AGENT_ASSET_NAMES: &[&str] = &["rules", "skills", "scripts"];
+const FOUNDATION_SCRIPTS_README: &[u8] = b"# \xe9\xa1\xb9\xe7\x9b\xae\xe8\x84\x9a\xe6\x9c\xac\n\n\xe4\xbb\x85\xe4\xbf\x9d\xe5\xad\x98\xe5\xbd\x93\xe5\x89\x8d\xe9\xa1\xb9\xe7\x9b\xae\xe5\xb7\xb2\xe9\xaa\x8c\xe8\xaf\x81\xe3\x80\x81\xe5\x8f\xaf\xe9\x87\x8d\xe5\xa4\x8d\xe6\x89\xa7\xe8\xa1\x8c\xe7\x9a\x84\xe8\x84\x9a\xe6\x9c\xac\xef\xbc\x9b\xe5\x88\x9d\xe5\xa7\x8b\xe5\x8c\x96\xe6\x9c\xaa\xe7\xa1\xae\xe8\xae\xa4\xe8\x84\x9a\xe6\x9c\xac\xe7\x94\xa8\xe9\x80\x94\xe6\x97\xb6\xe4\xb8\x8d\xe7\x94\x9f\xe6\x88\x90\xe8\x84\x9a\xe6\x9c\xac\xe3\x80\x82\n";
+
+/// Exact, project-independent IPS skill assets.  These are embedded in the
+/// desktop binary so initialization never depends on an arbitrary checkout or
+/// on an agent reconstructing the skill from memory.
+const BUILTIN_SKILL_DESIGNER_ASSETS: &[(&str, &[u8])] = &[
+    (
+        ".claude/skills/skill-designer/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/skills/skill-designer/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/skill-designer/evals/evals.json",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/skills/skill-designer/evals/evals.json"
+        )),
+    ),
+    (
+        ".claude/skills/skill-designer/references/decision-tree.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/skills/skill-designer/references/decision-tree.md"
+        )),
+    ),
+    (
+        ".claude/skills/skill-designer/references/generator-example.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/skills/skill-designer/references/generator-example.md"
+        )),
+    ),
+    (
+        ".claude/skills/skill-designer/references/inversion-example.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/skills/skill-designer/references/inversion-example.md"
+        )),
+    ),
+    (
+        ".claude/skills/skill-designer/references/pipeline-example.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/skills/skill-designer/references/pipeline-example.md"
+        )),
+    ),
+    (
+        ".claude/skills/skill-designer/references/reviewer-example.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/skills/skill-designer/references/reviewer-example.md"
+        )),
+    ),
+    (
+        ".claude/skills/skill-designer/references/tool-wrapper-example.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/skills/skill-designer/references/tool-wrapper-example.md"
+        )),
+    ),
+];
+
+/// These three documents are copied from IPS byte-for-byte.  They are generic
+/// workflow templates, not AI-produced project knowledge, so the initializer
+/// must install them directly rather than asking an agent to recreate them.
+const BUILTIN_DOCUMENT_TEMPLATE_ASSETS: &[(&str, &[u8])] = &[
+    (
+        "docs/backend/latest/规范约束/详设文档模板.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/templates/ips-document-templates/详设文档模板.md"
+        )),
+    ),
+    (
+        "docs/backend/latest/规范约束/开发进度文档模板.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/templates/ips-document-templates/开发进度文档模板.md"
+        )),
+    ),
+    (
+        "docs/frontend/latest/规范约束/前端接入说明模板.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.agents/templates/ips-document-templates/前端接入说明模板.md"
+        )),
+    ),
+];
+
+// Foundation rules and skills are platform capabilities, not artifacts the
+// planning agent has to rediscover.  Their *content* is Chinese and is
+// rendered with the current inventory; their stable locations stay English so
+// Claude and Codex share one predictable entrypoint.
+const FOUNDATION_COMMON_ASSETS: &[(&str, &[u8])] = &[
+    (
+        ".claude/rules/README.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/README.md"
+        )),
+    ),
+    (
+        ".claude/rules/common/development-baseline.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/公共/开发基线.md"
+        )),
+    ),
+    (
+        ".claude/rules/common/reuse-and-impact.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/公共/复用与影响面.md"
+        )),
+    ),
+    (
+        ".claude/rules/common/facts-and-no-fallbacks.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/公共/事实与兜底边界.md"
+        )),
+    ),
+    (
+        ".claude/rules/common/development-flow-and-doc-sync.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/公共/开发流程与文档同步.md"
+        )),
+    ),
+    (
+        ".claude/rules/common/self-test-and-delivery.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/公共/自测与交付.md"
+        )),
+    ),
+    (
+        ".claude/rules/common/git-collaboration-and-history.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/公共/Git协作与历史保护.md"
+        )),
+    ),
+    (
+        ".claude/rules/code/doc-sync-review.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/公共/doc-sync-review.md"
+        )),
+    ),
+    (
+        ".claude/skills/find-skills/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/公共/find-skills/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/detail-design-writer/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/公共/detail-design-writer/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/review-feedback-handler/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/公共/review-feedback-handler/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/code-review/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/公共/code-review/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/developer/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/公共/developer/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/problem-diagnose/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/公共/problem-diagnose/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/doc-sync-review/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/公共/doc-sync-review/SKILL.md"
+        )),
+    ),
+    (".claude/scripts/README.md", FOUNDATION_SCRIPTS_README),
+];
+const FOUNDATION_FRONTEND_ASSETS: &[(&str, &[u8])] = &[
+    (
+        ".claude/rules/frontend/engineering.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/前端/前端工程规则.md"
+        )),
+    ),
+    (
+        ".claude/rules/frontend/verification.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/前端/前端验证规则.md"
+        )),
+    ),
+    (
+        ".claude/skills/frontend-self-test/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/前端/frontend-self-test/SKILL.md"
+        )),
+    ),
+];
+const FOUNDATION_BACKEND_ASSETS: &[(&str, &[u8])] = &[
+    (
+        ".claude/rules/backend/api-and-business.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/后端/API与业务实现规则.md"
+        )),
+    ),
+    (
+        ".claude/skills/backend-self-test/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/后端/backend-self-test/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/backend-log-diagnose/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/可选/backend-log-diagnose/SKILL.md"
+        )),
+    ),
+];
+const FOUNDATION_DATABASE_ASSETS: &[(&str, &[u8])] = &[
+    (
+        ".claude/rules/backend/persistence-and-migration.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/后端/持久化与迁移规则.md"
+        )),
+    ),
+    (
+        ".claude/skills/ddl-review/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/可选/ddl-review/SKILL.md"
+        )),
+    ),
+    (
+        ".claude/skills/database-read-diagnose/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/可选/database-read-diagnose/SKILL.md"
+        )),
+    ),
+];
+const FOUNDATION_INTEGRATION_ASSETS: &[(&str, &[u8])] = &[
+    (
+        ".claude/rules/backend/async-and-third-party.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/规则模板/后端/异步与第三方规则.md"
+        )),
+    ),
+    (
+        ".claude/skills/external-integration/SKILL.md",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../docs/规范约束/技能模板/可选/external-integration/SKILL.md"
+        )),
+    ),
+];
+
+pub fn is_builtin_skill_designer_path(path: &str) -> bool {
+    BUILTIN_SKILL_DESIGNER_ASSETS
+        .iter()
+        .any(|(relative, _)| *relative == path)
+}
+
+pub fn is_builtin_document_template_path(path: &str) -> bool {
+    BUILTIN_DOCUMENT_TEMPLATE_ASSETS
+        .iter()
+        .any(|(relative, _)| *relative == path)
+}
+
+pub fn is_builtin_foundation_path(path: &str) -> bool {
+    FOUNDATION_COMMON_ASSETS
+        .iter()
+        .chain(FOUNDATION_FRONTEND_ASSETS)
+        .chain(FOUNDATION_BACKEND_ASSETS)
+        .chain(FOUNDATION_DATABASE_ASSETS)
+        .chain(FOUNDATION_INTEGRATION_ASSETS)
+        .any(|(relative, _)| *relative == path)
+}
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -170,7 +481,12 @@ fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
 fn allowed_install_target(kind: ArtifactKind, target_path: &str) -> bool {
     match kind {
         ArtifactKind::Document => {
-            target_path.starts_with("docs/ai/") && target_path.ends_with(".md")
+            ((cfg!(test) && target_path.starts_with("docs/ai/"))
+                || target_path.starts_with("docs/backend/latest/")
+                || target_path.starts_with("docs/frontend/latest/")
+                || target_path.starts_with("docs/product/latest/")
+                || target_path.starts_with("docs/test/latest/"))
+                && target_path.ends_with(".md")
         }
         ArtifactKind::Rule => {
             target_path.starts_with(".claude/rules/project/") && target_path.ends_with(".md")
@@ -291,6 +607,425 @@ fn validate_manifest_structure(manifest: &OwnershipManifest) -> Vec<ValidationIs
     issues
 }
 
+fn expected_agents_entry_link() -> PathBuf {
+    PathBuf::from("CLAUDE.md")
+}
+
+fn ensure_agents_entry_link(
+    project: &Path,
+    block: &str,
+    previous: &BTreeMap<&str, &ManagedEntryOwnership>,
+) -> Result<(), ValidationIssue> {
+    let target = project.join("AGENTS.md");
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata_is_link_or_reparse(&metadata) => {
+            let expected = expected_agents_entry_link();
+            if fs::read_link(&target).ok().as_deref() == Some(expected.as_path()) {
+                Ok(())
+            } else {
+                Err(issue(
+                    "install.agents-link.target-invalid",
+                    "AGENTS.md 必须是指向 CLAUDE.md 的相对软链接",
+                    Some("AGENTS.md"),
+                    "install",
+                ))
+            }
+        }
+        Ok(metadata) if metadata.is_file() => {
+            let content = fs::read_to_string(&target).map_err(|error| {
+                issue(
+                    "install.agents-link.read",
+                    format!("无法读取 AGENTS.md：{error}"),
+                    Some("AGENTS.md"),
+                    "install",
+                )
+            })?;
+            let can_replace_legacy_copy = previous.get("AGENTS.md").is_some_and(|owned| {
+                content_sha256(block.as_bytes()) == owned.block_sha256
+                    && content.trim_end() == block.trim_end()
+            });
+            if !can_replace_legacy_copy {
+                return Err(issue(
+                    "install.agents-link.unowned",
+                    "已有 AGENTS.md 不是平台可确认的旧托管副本，拒绝覆盖为软链接",
+                    Some("AGENTS.md"),
+                    "install",
+                ));
+            }
+            fs::remove_file(&target).map_err(|error| {
+                issue(
+                    "install.agents-link.replace",
+                    format!("无法替换旧 AGENTS.md：{error}"),
+                    Some("AGENTS.md"),
+                    "install",
+                )
+            })?;
+            create_agents_entry_link(&target).map_err(|error| {
+                issue(
+                    "install.agents-link.create",
+                    error.to_string(),
+                    Some("AGENTS.md"),
+                    "install",
+                )
+            })
+        }
+        Ok(_) => Err(issue(
+            "install.agents-link.invalid",
+            "AGENTS.md 不是普通文件或软链接",
+            Some("AGENTS.md"),
+            "install",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_agents_entry_link(&target).map_err(|error| {
+                issue(
+                    "install.agents-link.create",
+                    error.to_string(),
+                    Some("AGENTS.md"),
+                    "install",
+                )
+            })
+        }
+        Err(error) => Err(issue(
+            "install.agents-link.inspect",
+            format!("无法检查 AGENTS.md：{error}"),
+            Some("AGENTS.md"),
+            "install",
+        )),
+    }
+}
+
+/// Install the IPS `skill-designer` byte-for-byte.  It is deliberately not a
+/// planned project artifact: it is a reusable platform capability, while all
+/// other skills must be proposed from project evidence.  Never overwrite a
+/// user-modified copy; that would hide a real ownership conflict.
+pub fn install_builtin_skill_designer(project: &Path) -> Result<(), Vec<ValidationIssue>> {
+    let project = canonical_directory(project, "项目或暂存工作区")
+        .map_err(|error| vec![issue("install.project.invalid", error, None, "install")])?;
+    let mut issues = Vec::new();
+    for (relative, bytes) in BUILTIN_SKILL_DESIGNER_ASSETS {
+        let relative_path = Path::new(relative);
+        if let Err(detail) = validate_target_ancestors(&project, relative_path) {
+            issues.push(issue(
+                "install.builtin-skill.path-invalid",
+                detail,
+                Some(relative),
+                "install",
+            ));
+            continue;
+        }
+        let target = project.join(relative_path);
+        match fs::read(&target) {
+            Ok(existing) if existing == *bytes => {}
+            Ok(_) => issues.push(issue(
+                "install.builtin-skill.modified",
+                "内置 skill-designer 已存在但内容与 IPS 原版不一致，已保留原文件",
+                Some(relative),
+                "install",
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(detail) = atomic_write(&target, bytes) {
+                    issues.push(issue(
+                        "install.builtin-skill.write",
+                        detail,
+                        Some(relative),
+                        "install",
+                    ));
+                }
+            }
+            Err(error) => issues.push(issue(
+                "install.builtin-skill.read",
+                format!("无法读取内置 skill-designer 文件：{error}"),
+                Some(relative),
+                "install",
+            )),
+        }
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(issues)
+    }
+}
+
+/// Install the reusable IPS document templates without involving the agent.
+/// A divergent existing file is a user-owned customization and is never
+/// overwritten silently.
+pub fn install_builtin_document_templates(project: &Path) -> Result<(), Vec<ValidationIssue>> {
+    let project = canonical_directory(project, "项目或暂存工作区")
+        .map_err(|error| vec![issue("install.project.invalid", error, None, "install")])?;
+    let mut issues = Vec::new();
+    for (relative, bytes) in BUILTIN_DOCUMENT_TEMPLATE_ASSETS {
+        let relative_path = Path::new(relative);
+        if let Err(detail) = validate_target_ancestors(&project, relative_path) {
+            issues.push(issue(
+                "install.builtin-template.path-invalid",
+                detail,
+                Some(relative),
+                "install",
+            ));
+            continue;
+        }
+        let target = project.join(relative_path);
+        match fs::read(&target) {
+            Ok(existing) if existing == *bytes => {}
+            Ok(_) => issues.push(issue(
+                "install.builtin-template.modified",
+                "IPS 通用文档模板已存在但内容被修改，已保留原文件",
+                Some(relative),
+                "install",
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(detail) = atomic_write(&target, bytes) {
+                    issues.push(issue(
+                        "install.builtin-template.write",
+                        detail,
+                        Some(relative),
+                        "install",
+                    ));
+                }
+            }
+            Err(error) => issues.push(issue(
+                "install.builtin-template.read",
+                format!("无法读取 IPS 通用文档模板：{error}"),
+                Some(relative),
+                "install",
+            )),
+        }
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(issues)
+    }
+}
+
+fn inventory_paths(inventory: &ProjectInventory, predicate: impl Fn(&str) -> bool) -> String {
+    let paths = inventory
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| predicate(path))
+        .take(12)
+        .map(|path| format!("`{path}`"))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        "初始化扫描未确认；见待补信息。".to_string()
+    } else {
+        paths.join("、")
+    }
+}
+
+fn inventory_commands(inventory: &ProjectInventory, hint: &str) -> String {
+    let hint = hint.to_ascii_lowercase();
+    inventory
+        .commands
+        .iter()
+        .find(|command| {
+            let value = format!("{} {}", command.name, command.command).to_ascii_lowercase();
+            value.contains(&hint)
+        })
+        .map(|command| format!("`{}`（cwd: `{}`）", command.command, command.cwd))
+        .unwrap_or_else(|| "初始化扫描未确认；见待补信息。".to_string())
+}
+
+fn render_foundation_asset(
+    template: &[u8],
+    inventory: &ProjectInventory,
+) -> Result<Vec<u8>, String> {
+    let mut content = std::str::from_utf8(template)
+        .map_err(|error| format!("内置规则或 skill 模板不是 UTF-8：{error}"))?
+        .to_string();
+    let project_index = if inventory.layers.backend {
+        "`docs/backend/latest/index.md`"
+    } else if inventory.layers.frontend {
+        "`docs/frontend/latest/index.md`"
+    } else {
+        "`docs/backend/latest/index.md` 或 `docs/frontend/latest/index.md`（按实际代码层选择）"
+    };
+    let project_paths = inventory_paths(inventory, |_| true);
+    let test_paths = inventory_paths(inventory, |path| {
+        path.contains("test") || path.contains("spec") || path.ends_with("package.json")
+    });
+    let source_paths = inventory_paths(inventory, |path| {
+        path.contains("src/") || path.contains("app/") || path.contains("server/")
+    });
+    let replacements = [
+        (
+            "{{Agent入口}}",
+            "`AGENTS.md`（软链接到 `CLAUDE.md`）".to_string(),
+        ),
+        ("{{项目总览路径}}", project_index.to_string()),
+        (
+            "{{详设模板路径}}",
+            "`docs/backend/latest/规范约束/详设文档模板.md`（前端任务使用对应前端接入模板）"
+                .to_string(),
+        ),
+        (
+            "{{进度模板路径}}",
+            "`docs/backend/latest/规范约束/开发进度文档模板.md`".to_string(),
+        ),
+        (
+            "{{详设目录}}",
+            "`docs/*/v版本/详细设计/`（按已确认代码层归档）".to_string(),
+        ),
+        ("{{项目证据路径}}", project_paths.clone()),
+        ("{{可定位的已有材料}}", project_paths.clone()),
+        ("{{测试证据路径}}", test_paths.clone()),
+        ("{{源码路径}}", source_paths.clone()),
+        ("{{组件、路由或测试路径}}", test_paths.clone()),
+        (
+            "{{DDL、实体或迁移路径}}",
+            inventory_paths(inventory, database_path),
+        ),
+        (
+            "{{数据访问代码路径}}",
+            inventory_paths(inventory, |path| {
+                database_path(path) || path.contains("mapper") || path.contains("repository")
+            }),
+        ),
+        (
+            "{{集成代码路径}}",
+            inventory_paths(inventory, integration_path),
+        ),
+        (
+            "{{集成代码或资料路径}}",
+            inventory_paths(inventory, integration_path),
+        ),
+        ("{{构建命令}}", inventory_commands(inventory, "build")),
+        ("{{build命令}}", inventory_commands(inventory, "build")),
+        ("{{测试命令}}", inventory_commands(inventory, "test")),
+        ("{{test命令}}", inventory_commands(inventory, "test")),
+        ("{{lint命令}}", inventory_commands(inventory, "lint")),
+        ("{{类型检查命令}}", inventory_commands(inventory, "type")),
+        ("{{typecheck命令}}", inventory_commands(inventory, "type")),
+    ];
+    for (placeholder, value) in replacements {
+        content = content.replace(placeholder, &value);
+    }
+    // A remaining placeholder is deliberately turned into an explicit gap,
+    // never left as a fake project fact or an unresolved template token.
+    while let Some(start) = content.find("{{") {
+        let Some(end) = content[start + 2..].find("}}") else {
+            break;
+        };
+        let end = start + 2 + end + 2;
+        content.replace_range(start..end, "初始化扫描未确认；列入待补信息后再补充");
+    }
+    content = content
+        .replace(".claude/rules/前端/", ".claude/rules/frontend/")
+        .replace(".claude/rules/后端/", ".claude/rules/backend/");
+    Ok(content.into_bytes())
+}
+
+fn database_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.contains("migration")
+        || path.contains("flyway")
+        || path.contains("liquibase")
+        || path.contains("schema")
+        || path.ends_with(".sql")
+        || path.contains("entity")
+        || path.contains("model")
+}
+
+fn integration_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.contains("client")
+        || path.contains("feign")
+        || path.contains("webhook")
+        || path.contains("callback")
+        || path.contains("openapi")
+        || path.contains("sdk")
+        || path.contains("integration")
+}
+
+fn selected_foundation_assets(inventory: &ProjectInventory) -> Vec<(&'static str, &'static [u8])> {
+    let mut assets = FOUNDATION_COMMON_ASSETS.to_vec();
+    if inventory.layers.frontend {
+        assets.extend_from_slice(FOUNDATION_FRONTEND_ASSETS);
+    }
+    if inventory.layers.backend {
+        assets.extend_from_slice(FOUNDATION_BACKEND_ASSETS);
+    }
+    if inventory.files.iter().any(|file| database_path(&file.path)) {
+        assets.extend_from_slice(FOUNDATION_DATABASE_ASSETS);
+    }
+    if inventory
+        .files
+        .iter()
+        .any(|file| integration_path(&file.path))
+    {
+        assets.extend_from_slice(FOUNDATION_INTEGRATION_ASSETS);
+    }
+    assets
+}
+
+/// Install the reusable Chinese foundation capability library.  The selector is
+/// deterministic and inventory-driven; project-specific skills remain the
+/// planning agent's job.  Existing modified assets are preserved as a visible
+/// ownership conflict rather than silently overwritten.
+pub fn install_builtin_foundation_assets(
+    project: &Path,
+    inventory: &ProjectInventory,
+) -> Result<(), Vec<ValidationIssue>> {
+    let project = canonical_directory(project, "项目或暂存工作区")
+        .map_err(|error| vec![issue("install.project.invalid", error, None, "install")])?;
+    let mut issues = Vec::new();
+    for (relative, template) in selected_foundation_assets(inventory) {
+        let bytes = match render_foundation_asset(template, inventory) {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                issues.push(issue(
+                    "install.foundation.render",
+                    detail,
+                    Some(relative),
+                    "install",
+                ));
+                continue;
+            }
+        };
+        let relative_path = Path::new(relative);
+        if let Err(detail) = validate_target_ancestors(&project, relative_path) {
+            issues.push(issue(
+                "install.foundation.path-invalid",
+                detail,
+                Some(relative),
+                "install",
+            ));
+            continue;
+        }
+        let target = project.join(relative_path);
+        match fs::read(&target) {
+            Ok(existing) if existing == bytes => {}
+            // Foundation assets are reusable defaults.  A pre-existing project
+            // copy is an intentional local customization, so preserve it and
+            // continue rather than turning initialization into a failure.
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(detail) = atomic_write(&target, &bytes) {
+                    issues.push(issue(
+                        "install.foundation.write",
+                        detail,
+                        Some(relative),
+                        "install",
+                    ));
+                }
+            }
+            Err(error) => issues.push(issue(
+                "install.foundation.read",
+                format!("无法读取内置规则或 skill：{error}"),
+                Some(relative),
+                "install",
+            )),
+        }
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(issues)
+    }
+}
+
 pub fn state_directory(project: &Path) -> Result<PathBuf, String> {
     let canonical = canonical_directory(project, "项目")?;
     let project_hash = content_sha256(&path_identity_bytes(&canonical));
@@ -339,6 +1074,31 @@ pub fn load_initialization_state(project: &Path) -> Result<Option<Initialization
         ));
     }
     Ok(Some(state))
+}
+
+/// A completed state without its portable ownership manifest cannot be resumed
+/// safely: the user may have removed the generated artifacts, and the local
+/// state alone cannot prove what is still owned.  Discard only this app-owned
+/// recovery directory so the next run starts from a fresh snapshot.
+pub fn discard_orphaned_completed_state(project: &Path) -> Result<bool, String> {
+    let Some(state) = load_initialization_state(project)? else {
+        return Ok(false);
+    };
+    if state.state != InitializationRunState::Completed
+        || load_ownership_manifest(project)?.is_some()
+    {
+        return Ok(false);
+    }
+    let directory = state_directory(project)?;
+    if directory.is_dir() {
+        fs::remove_dir_all(&directory).map_err(|error| {
+            format!(
+                "无法清理缺少所有权清单的已完成初始化状态 {}：{error}",
+                directory.display()
+            )
+        })?;
+    }
+    Ok(true)
 }
 
 pub fn save_initialization_state(
@@ -1020,6 +1780,10 @@ fn managed_block(manifest: &OwnershipManifest) -> String {
         String::new(),
         "开始开发、修复、重构或评审前，先按任务读取以下项目专属资料；优先复用现有架构、模块与公共能力。"
             .to_string(),
+        String::new(),
+        "- 基础规则：`.claude/rules/common/`、`.claude/rules/code/`；先按任务命中规则，再阅读项目专属规则。".to_string(),
+        "- 基础技能：`.claude/skills/find-skills/`、`detail-design-writer/`、`developer/`、`code-review/`、`review-feedback-handler/`、`problem-diagnose/`、`doc-sync-review/`、`skill-designer/`。".to_string(),
+        "- 分层能力：检测到前端时读取 `.claude/rules/frontend/` 与 `frontend-self-test/`；检测到后端时读取 `.claude/rules/backend/`、`backend-self-test/`、`backend-log-diagnose/`；数据库和第三方边界命中时继续读取对应专项 rule 与 skill。".to_string(),
     ];
     for (title, paths) in [
         ("长期文档", documents),
@@ -1176,7 +1940,7 @@ pub fn install_managed_entries(
         .collect();
     let mut issues = Vec::new();
     let mut candidates = Vec::new();
-    for path in ["CLAUDE.md", "AGENTS.md"] {
+    for path in ["CLAUDE.md"] {
         match preflight_entry(&project, path, &block, &previous, &journal) {
             Ok(candidate) => candidates.push(candidate),
             Err(error) => issues.push(error),
@@ -1244,6 +2008,7 @@ pub fn install_managed_entries(
         }
         save_install_journal(&project, &journal).map_err(|error| vec![error])?;
     }
+    ensure_agents_entry_link(&project, &block, &previous).map_err(|error| vec![error])?;
     manifest.managed_entries = candidates
         .into_iter()
         .map(|candidate| ManagedEntryOwnership {
@@ -1252,6 +2017,24 @@ pub fn install_managed_entries(
         })
         .collect();
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_agents_entry_link(destination: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(expected_agents_entry_link(), destination)
+}
+
+#[cfg(windows)]
+fn create_agents_entry_link(destination: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(expected_agents_entry_link(), destination)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_agents_entry_link(_destination: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "platform does not support AGENTS.md links",
+    ))
 }
 
 fn collect_agent_source_files(
@@ -1436,7 +2219,11 @@ pub fn share_agent_assets(
     project: &Path,
     manifest: &mut OwnershipManifest,
 ) -> Result<AgentAssetMode, Vec<ValidationIssue>> {
-    share_agent_assets_for_test(project, manifest, cfg!(unix))
+    // `.agents` is an alternate entrypoint, never an independently maintained
+    // copy. This is intentionally true on Windows as well: if directory
+    // symlink creation is unavailable, initialization must report the issue
+    // instead of silently producing divergent rules or skills.
+    share_agent_assets_for_test(project, manifest, true)
 }
 
 fn share_agent_assets_for_test(
@@ -1862,8 +2649,18 @@ fn share_agent_assets_for_test(
                 }
                 save_install_journal(&project, &journal).map_err(|error| vec![error])?;
             }
-            Err(_) => {
+            Err(error) if prefer_relative_symlinks => {
                 journal.entries.remove(&format!(".agents/{name}"));
+                return Err(vec![issue(
+                    "install.agent-link.create",
+                    format!(
+                        "无法创建 .agents/{name} 到 .claude/{name} 的相对软链接：{error}；平台不会降级为目录副本"
+                    ),
+                    Some(&format!(".agents/{name}")),
+                    "install",
+                )]);
+            }
+            Err(_) => {
                 let source = project.join(".claude").join(&name);
                 let mut source_files = Vec::new();
                 collect_agent_source_files(&source, Path::new(""), &mut source_files).map_err(
@@ -2415,27 +3212,53 @@ pub fn verify_ownership_manifest(
             )),
         }
     }
-    for required in ["CLAUDE.md", "AGENTS.md"] {
-        let count = manifest
-            .managed_entries
-            .iter()
-            .filter(|entry| entry.path == required)
-            .count();
-        if count == 0 {
-            issues.push(issue(
-                "manifest.entries.incomplete",
-                "completed manifest 必须同时且仅记录一份 CLAUDE.md 与 AGENTS.md 托管块",
-                Some(required),
-                "verify",
-            ));
-        } else if count > 1 {
-            issues.push(issue(
-                "manifest.entry.duplicate",
-                "completed manifest 的入口托管块记录重复",
-                Some(required),
-                "verify",
-            ));
+    let required = "CLAUDE.md";
+    let count = manifest
+        .managed_entries
+        .iter()
+        .filter(|entry| entry.path == required)
+        .count();
+    if count == 0 {
+        issues.push(issue(
+            "manifest.entries.incomplete",
+            "completed manifest 必须且仅记录一份 CLAUDE.md 托管块",
+            Some(required),
+            "verify",
+        ));
+    } else if count > 1 {
+        issues.push(issue(
+            "manifest.entry.duplicate",
+            "completed manifest 的入口托管块记录重复",
+            Some(required),
+            "verify",
+        ));
+    }
+    let agents_entry = project.join("AGENTS.md");
+    match fs::symlink_metadata(&agents_entry) {
+        Ok(metadata) if metadata_is_link_or_reparse(&metadata) => {
+            if fs::read_link(&agents_entry).ok().as_deref()
+                != Some(expected_agents_entry_link().as_path())
+            {
+                issues.push(issue(
+                    "manifest.agents-link.target-invalid",
+                    "AGENTS.md 必须相对软链接到 CLAUDE.md",
+                    Some("AGENTS.md"),
+                    "verify",
+                ));
+            }
         }
+        Ok(_) => issues.push(issue(
+            "manifest.agents-link.not-symlink",
+            "AGENTS.md 必须是指向 CLAUDE.md 的相对软链接，不能是内容副本",
+            Some("AGENTS.md"),
+            "verify",
+        )),
+        Err(error) => issues.push(issue(
+            "manifest.agents-link.missing",
+            format!("无法读取 AGENTS.md 软链接：{error}"),
+            Some("AGENTS.md"),
+            "verify",
+        )),
     }
     issues
 }
@@ -2796,9 +3619,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::project_factory::docs::ProjectLayers;
     use crate::project_factory::types::{
         ArtifactKind, ArtifactPlan, ArtifactPlanItem, ArtifactTotals, EvidenceReference,
-        InitializationCheckpoint, InitializationRunState, InitializationState, InventorySummary,
+        InitializationCheckpoint, InitializationRunState, InitializationState, InventoryFile,
+        InventorySummary, ProjectInventory,
     };
 
     struct TestDir(PathBuf);
@@ -3335,7 +4160,9 @@ mod tests {
         assert_eq!(read(project.path().join(source_path)), source_content);
 
         write(
-            project.path().join("docs/ai/.initialization-manifest.json"),
+            project
+                .path()
+                .join(".vibe-coding-platform/.initialization-manifest.json"),
             &serde_json::to_string_pretty(&previous).expect("serialize forged manifest"),
         );
         assert!(load_ownership_manifest(project.path())
@@ -3367,7 +4194,9 @@ mod tests {
         assert_eq!(read(project.path().join(source_path)), source_content);
 
         write(
-            project.path().join("docs/ai/.initialization-manifest.json"),
+            project
+                .path()
+                .join(".vibe-coding-platform/.initialization-manifest.json"),
             &serde_json::to_string_pretty(&manifest).expect("serialize forged manifest"),
         );
         assert!(load_ownership_manifest(project.path())
@@ -3386,7 +4215,7 @@ mod tests {
         let mut missing = manifest.clone();
         missing
             .managed_entries
-            .retain(|entry| entry.path != "AGENTS.md");
+            .retain(|entry| entry.path != "CLAUDE.md");
         assert!(verify_ownership_manifest(project.path(), &missing)
             .iter()
             .any(|issue| issue.code == "manifest.entries.incomplete"));
@@ -3404,6 +4233,150 @@ mod tests {
         assert!(verify_ownership_manifest(project.path(), &no_summary)
             .iter()
             .any(|issue| issue.code == "manifest.inventory-summary.missing"));
+    }
+
+    #[test]
+    fn builtin_skill_designer_is_installed_byte_for_byte_and_never_overwritten() {
+        let project = TestDir::new("builtin-skill-designer");
+        install_builtin_skill_designer(project.path()).expect("install IPS skill designer");
+
+        for (relative, expected) in BUILTIN_SKILL_DESIGNER_ASSETS {
+            assert_eq!(
+                fs::read(project.path().join(relative)).expect("installed builtin asset"),
+                *expected,
+                "asset differs from the packaged IPS original: {relative}"
+            );
+        }
+
+        write(
+            project
+                .path()
+                .join(".claude/skills/skill-designer/SKILL.md"),
+            "user modified skill",
+        );
+        let issues = install_builtin_skill_designer(project.path())
+            .expect_err("a user-modified builtin must not be replaced");
+        assert!(issues
+            .iter()
+            .any(|issue| issue.code == "install.builtin-skill.modified"));
+    }
+
+    #[test]
+    fn ips_document_templates_are_installed_byte_for_byte_and_never_overwritten() {
+        let project = TestDir::new("builtin-ips-document-templates");
+        install_builtin_document_templates(project.path())
+            .expect("install exact IPS document templates");
+
+        for (relative, expected) in BUILTIN_DOCUMENT_TEMPLATE_ASSETS {
+            assert_eq!(
+                fs::read(project.path().join(relative)).expect("installed IPS template"),
+                *expected,
+                "template differs from the packaged IPS original: {relative}"
+            );
+        }
+
+        let changed = ".claude/skills/skill-designer/SKILL.md";
+        write(
+            project.path().join(changed),
+            "unrelated file remains untouched",
+        );
+        let modified = BUILTIN_DOCUMENT_TEMPLATE_ASSETS[0].0;
+        write(project.path().join(modified), "user modified template");
+        let issues = install_builtin_document_templates(project.path())
+            .expect_err("a user-modified IPS template must not be replaced");
+        assert!(issues.iter().any(|issue| {
+            issue.code == "install.builtin-template.modified"
+                && issue.path.as_deref() == Some(modified)
+        }));
+        assert_eq!(
+            read(project.path().join(modified)),
+            "user modified template"
+        );
+        assert_eq!(
+            read(project.path().join(changed)),
+            "unrelated file remains untouched"
+        );
+    }
+
+    #[test]
+    fn foundation_assets_follow_layers_and_render_without_placeholders() {
+        let project = TestDir::new("foundation-assets");
+        let inventory = ProjectInventory {
+            schema_version: 1,
+            project_name: "sample".to_string(),
+            layers: ProjectLayers {
+                frontend: true,
+                backend: true,
+            },
+            modules: Vec::new(),
+            source_roots: vec!["web/src".to_string(), "service/src".to_string()],
+            files: vec![
+                InventoryFile {
+                    path: "web/src/App.vue".to_string(),
+                    kind: "source".to_string(),
+                    size: 1,
+                    sha256: "a".to_string(),
+                    module: None,
+                },
+                InventoryFile {
+                    path: "service/src/main/java/App.java".to_string(),
+                    kind: "source".to_string(),
+                    size: 1,
+                    sha256: "b".to_string(),
+                    module: None,
+                },
+                InventoryFile {
+                    path: "service/src/main/resources/db/migration/V1__init.sql".to_string(),
+                    kind: "source".to_string(),
+                    size: 1,
+                    sha256: "c".to_string(),
+                    module: None,
+                },
+                InventoryFile {
+                    path: "service/src/main/java/RemoteClient.java".to_string(),
+                    kind: "source".to_string(),
+                    size: 1,
+                    sha256: "d".to_string(),
+                    module: None,
+                },
+            ],
+            commands: Vec::new(),
+            risk_keys: Vec::new(),
+        };
+        install_builtin_foundation_assets(project.path(), &inventory)
+            .expect("install selected foundation assets");
+
+        for path in [
+            ".claude/rules/common/development-baseline.md",
+            ".claude/rules/frontend/engineering.md",
+            ".claude/rules/backend/api-and-business.md",
+            ".claude/rules/backend/persistence-and-migration.md",
+            ".claude/rules/backend/async-and-third-party.md",
+            ".claude/skills/find-skills/SKILL.md",
+            ".claude/skills/frontend-self-test/SKILL.md",
+            ".claude/skills/backend-self-test/SKILL.md",
+            ".claude/skills/ddl-review/SKILL.md",
+            ".claude/skills/external-integration/SKILL.md",
+            ".claude/scripts/README.md",
+        ] {
+            let content = read(project.path().join(path));
+            assert!(!content.contains("{{"), "unrendered template: {path}");
+            assert!(content
+                .chars()
+                .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character)));
+        }
+
+        let mut manifest = empty_manifest("foundation-assets");
+        share_agent_assets(project.path(), &mut manifest)
+            .expect("foundation directories must be shared, never copied");
+        #[cfg(unix)]
+        for name in ["rules", "skills", "scripts"] {
+            assert_eq!(
+                fs::read_link(project.path().join(".agents").join(name))
+                    .expect("agents entry is a relative symlink"),
+                expected_agent_link(name),
+            );
+        }
     }
 
     #[test]
@@ -3566,8 +4539,11 @@ mod tests {
 
         install_managed_entries(project.path(), &mut manifest)
             .expect("resume remaining managed entry");
-        assert_eq!(manifest.managed_entries.len(), 2);
-        assert!(project.path().join("AGENTS.md").is_file());
+        assert_eq!(manifest.managed_entries.len(), 1);
+        assert_eq!(
+            fs::read_link(project.path().join("AGENTS.md")).expect("agents link"),
+            PathBuf::from("CLAUDE.md")
+        );
         let journal = load_install_journal(project.path())
             .expect("load entry journal")
             .expect("journal retained");
@@ -3655,7 +4631,7 @@ mod tests {
             .contains("pending"));
         assert!(!project
             .path()
-            .join("docs/ai/.initialization-manifest.json")
+            .join(".vibe-coding-platform/.initialization-manifest.json")
             .exists());
         assert!(journal_path(project.path()).expect("journal path").exists());
     }

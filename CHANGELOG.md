@@ -6,6 +6,20 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ---
 
+## [v0.1.4] - 2026-07-20
+
+### Improvements
+
+- Replaces fixed existing-project initialization templates with a resumable, evidence-driven pipeline that derives project-specific documents, rules, and skills from verified source evidence.
+- Adds truthful initialization progress, bounded repair attempts, conflict-safe installation, and preservation checks for existing project files and Git configuration.
+- Adds secure cross-platform project inventory handling and Windows CI coverage.
+- Improves Codex side-chat behavior, terminal color normalization, tab navigation, and composer interactions.
+
+### Security
+
+- Hardens secret detection, symlink/reparse-point traversal, evidence validation, shell-command validation, and managed-output installation.
+- Updates the frontend build and test toolchain to versions with no known npm audit findings.
+
 ## [v0.3.3]
 
 ### Features

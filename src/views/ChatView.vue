@@ -167,7 +167,7 @@ function toolLabel(b: Block): string {
 }
 
 function isCodexInlineCodeToolUse(b: Block): boolean {
-  return props.agent === 'codex' && b.kind === 'tool_use' && b.toolName === 'apply_patch'
+  return props.agent === 'codex' && b.kind === 'tool_use' && b.toolName === 'apply_patch' && !b.isError
 }
 
 function renderNumberedCodeHtml(html: string): string {
@@ -234,7 +234,10 @@ const resultByToolId = computed(() => {
   const map = new Map<string, Block>()
   for (const m of props.messages) {
     for (const b of m.blocks) {
-      if (b.kind === 'tool_result' && b.toolId) map.set(b.toolId, b)
+      if (b.kind === 'tool_result' && b.toolId) {
+        const previous = map.get(b.toolId)
+        if (!previous || b.isError) map.set(b.toolId, b)
+      }
     }
   }
   return map

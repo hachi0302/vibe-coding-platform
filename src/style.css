@@ -3236,12 +3236,20 @@ details[open] > .block-summary > .chev {
 }
 .codex-patch-line {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
+  grid-template-columns: 3.5em 18px minmax(0, 1fr);
   align-items: start;
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+.codex-patch-no {
+  padding-right: 10px;
+  text-align: right;
+  user-select: none;
+  color: var(--text-mute);
+  border-right: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  font-variant-numeric: tabular-nums;
 }
 .codex-patch-line.hunk {
   display: block;

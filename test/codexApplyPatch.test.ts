@@ -50,4 +50,45 @@ describe('renderCodexApplyPatchHtml', () => {
     expect(html).not.toContain('*** Begin Patch')
     expect(html).not.toContain('*** Update File:')
   })
+
+  it('renders line numbers from unified-diff hunk headers', () => {
+    const input = [
+      '*** Begin Patch',
+      '*** Update File: /repo/src/a.ts',
+      '@@ -10,2 +10,3 @@',
+      ' context',
+      '-before',
+      '+after',
+      '+another',
+      '*** End Patch',
+    ].join('\n')
+
+    expect(parseCodexApplyPatch(input)[0].lines).toEqual([
+      { kind: 'hunk', text: '@@ -10,2 +10,3 @@' },
+      { kind: 'ctx', text: 'context', oldNo: 10, newNo: 10 },
+      { kind: 'del', text: 'before', oldNo: 11 },
+      { kind: 'add', text: 'after', newNo: 11 },
+      { kind: 'add', text: 'another', newNo: 12 },
+    ])
+    expect(renderCodexApplyPatchHtml(input)).toContain('class="codex-patch-no">11</span>')
+  })
+
+  it('numbers raw added files and omits an empty replace-delete section', () => {
+    const input = [
+      '*** Begin Patch',
+      '*** Delete File: /repo/src/a.ts',
+      '*** Add File: /repo/src/a.ts',
+      '+first',
+      '+second',
+      '*** End Patch',
+    ].join('\n')
+
+    const sections = parseCodexApplyPatch(input)
+    expect(sections).toHaveLength(1)
+    expect(sections[0]).toMatchObject({ op: 'add', path: '/repo/src/a.ts' })
+    expect(sections[0].lines).toEqual([
+      { kind: 'add', text: 'first', newNo: 1 },
+      { kind: 'add', text: 'second', newNo: 2 },
+    ])
+  })
 })

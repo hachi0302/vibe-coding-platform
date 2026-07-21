@@ -177,6 +177,7 @@ import {
   initializationProgressFor,
   initializationProgressFromResult,
   initializationProgressFromStatus,
+  initializationPublicDetail,
   isInitializationTaskCardVisible,
   isInitializationTaskVisible,
   isProjectInitializationAgent,
@@ -1036,19 +1037,19 @@ async function initializeProject(project: ProjectInfo) {
       projectPath: project.displayPath,
     }, true)
     if (applied) notify(resultProgress.detail, true)
-  } catch (error) {
+  } catch {
     if (!isCurrentInvocation()) return
-    const detail = error instanceof Error ? error.message : String(error)
     const current = initializationProgress.value
+    const detail = initializationPublicDetail('failed', undefined, current?.issues?.length ?? 0)
     if (
       current?.projectPath === project.displayPath
       && !isInitializationTaskVisible(current.phase)
     ) {
-      notify(`项目初始化进程结束：${detail}；保留状态：${current.detail}`, true)
+      notify(current.detail, true)
       return
     }
     advanceInitializationProgress(project.displayPath, 'failed', detail)
-    notify(`项目初始化失败：${detail}`, true)
+    notify(detail, true)
   }
 }
 async function ctxInitializeProject() {
@@ -4474,7 +4475,7 @@ provide<PaneActions>(PaneActionsKey, {
             :elapsed-seconds="initializationElapsedSeconds"
             :steps="projectInitializationSteps"
             title="正在初始化项目"
-            description="正在依据当前项目真实代码生成并验证工程文档、规则与 skills，请保持此页面打开。"
+            description="正在依据当前项目真实代码生成并审核工程文档、规则与 skills，请保持此页面打开。"
             step-label="01 / 初始化"
             note="每个节点仅在实际完成后推进；不会覆盖已有业务文档或业务代码。"
             progress-label="项目初始化进度"

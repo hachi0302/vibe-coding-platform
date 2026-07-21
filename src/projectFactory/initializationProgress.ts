@@ -29,16 +29,33 @@ const progressByPhase: Record<ProjectInitializationPhase, ProjectInitializationP
   documents: { phase: 'documents', percent: 34, detail: '正在生成项目文档' },
   rules: { phase: 'rules', percent: 50, detail: '正在生成项目规则' },
   skills: { phase: 'skills', percent: 64, detail: '正在生成项目专属 skills' },
-  install: { phase: 'install', percent: 78, detail: '正在检查冲突并安装已验证产物' },
-  verify: { phase: 'verify', percent: 90, detail: '正在校验安装结果与所有权清单' },
+  install: { phase: 'install', percent: 78, detail: '正在检查冲突并安装项目产物' },
+  verify: { phase: 'verify', percent: 90, detail: '正在确认安装结果与所有权清单' },
   complete: { phase: 'complete', percent: 100, detail: '初始化完成' },
-  failed: { phase: 'failed', percent: 0, detail: '初始化失败，请根据错误提示修正后重试' },
+  failed: { phase: 'failed', percent: 0, detail: '初始化未能安全完成，请处理安全问题后重试' },
   interrupted: { phase: 'interrupted', percent: 0, detail: '初始化已中断，可从上次有效节点继续' },
   conflict: { phase: 'conflict', percent: 0, detail: '检测到用户文件冲突，请处理后重试' },
 }
 
 export function initializationProgressFor(phase: ProjectInitializationPhase): ProjectInitializationProgress {
   return progressByPhase[phase]
+}
+
+export function initializationPublicDetail(
+  phase: ProjectInitializationPhase,
+  detail?: string,
+  issueCount = 0,
+): string {
+  if (phase === 'failed') {
+    const count = issueCount > 0 ? `，共发现 ${issueCount} 个问题` : ''
+    return `项目初始化未能安全完成${count}。平台已保留恢复诊断，请处理安全问题后重试。`
+  }
+  if (phase === 'conflict') {
+    const count = issueCount > 0 ? ` ${issueCount} 处` : ''
+    return `检测到${count}用户文件冲突，请处理后重试。`
+  }
+  if (phase === 'interrupted') return progressByPhase.interrupted.detail
+  return detail ?? progressByPhase[phase].detail
 }
 
 export type ProjectInitializationAction = 'start' | 'resume' | 'attention' | 'complete'
@@ -67,10 +84,11 @@ export function initializationProgressFromStatus(
   return {
     ...fallback,
     percent: Math.max(0, Math.min(100, status.percent ?? fallback.percent)),
-    detail: status.detail
-      ?? status.conflicts?.[0]?.detail
-      ?? status.issues?.[0]?.detail
-      ?? fallback.detail,
+    detail: initializationPublicDetail(
+      phase,
+      status.detail ?? fallback.detail,
+      status.conflicts?.length ?? status.issues?.length ?? 0,
+    ),
     runId: status.runId,
     attempt: status.attempt,
     sequence: status.sequence,
@@ -99,10 +117,11 @@ export function initializationProgressFromResult(
   return {
     ...fallback,
     percent: Math.max(0, Math.min(100, result.percent ?? fallback.percent)),
-    detail: result.detail
-      ?? result.conflicts?.[0]?.detail
-      ?? result.issues?.[0]?.detail
-      ?? fallback.detail,
+    detail: initializationPublicDetail(
+      phase,
+      result.detail ?? fallback.detail,
+      result.conflicts?.length ?? result.issues?.length ?? 0,
+    ),
     runId: result.runId,
     attempt: result.attempt,
     sequence: result.sequence,
@@ -117,7 +136,7 @@ export function initializationProgressFromResult(
 export function initializationCompletionDetail(totals?: ExistingProjectArtifactTotals): string {
   if (!totals) throw new Error('初始化完成结果缺少 artifactTotals，无法确认产物数量。')
   const skillLabel = totals.skills === 1 ? 'skill' : 'skills'
-  return `初始化完成：${totals.documents} 份文档、${totals.rules} 条规则、${totals.skills} 个 ${skillLabel} 已通过校验。`
+  return `初始化完成：已安装 ${totals.documents} 份文档、${totals.rules} 条规则、${totals.skills} 个 ${skillLabel}。`
 }
 
 export function initializationAgentGuardMessage(agent: string): string | null {
@@ -148,6 +167,6 @@ export const projectInitializationSteps = [
   { phase: 'rules', label: '生成规则' },
   { phase: 'skills', label: '生成 skills' },
   { phase: 'install', label: '安全安装' },
-  { phase: 'verify', label: '验证结果' },
+  { phase: 'verify', label: '确认安装' },
   { phase: 'complete', label: '初始化完成' },
 ] as const

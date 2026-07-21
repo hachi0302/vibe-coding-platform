@@ -21,11 +21,18 @@ fn main() {
     let exe = args.get(1).cloned().unwrap_or_else(|| "codex".into());
     let cwd = args.get(2).cloned().unwrap_or_else(|| ".".into());
     let answer = args.iter().position(|a| a == "--answer-osc11").map(|i| {
-        args.get(i + 1).cloned().unwrap_or_else(|| "rgb:ffff/ffff/ffff".into())
+        args.get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "rgb:ffff/ffff/ffff".into())
     });
 
     let pair = native_pty_system()
-        .openpty(PtySize { rows: 30, cols: 100, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .expect("openpty");
 
     let mut cmd = CommandBuilder::new(&exe);
@@ -140,7 +147,10 @@ fn describe(params: &str) -> String {
     let mut i = 0;
     while i < p.len() {
         if (p[i] == "38" || p[i] == "48") && i + 4 < p.len() && p[i + 1] == "2" {
-            let rgb: Vec<f64> = p[i + 2..i + 5].iter().filter_map(|v| v.parse().ok()).collect();
+            let rgb: Vec<f64> = p[i + 2..i + 5]
+                .iter()
+                .filter_map(|v| v.parse().ok())
+                .collect();
             if rgb.len() == 3 {
                 let luma = rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114;
                 let what = if p[i] == "38" { "前景" } else { "背景" };

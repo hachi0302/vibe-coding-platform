@@ -2,19 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use super::document_templates::{document_template_specs, DocumentTemplateSpec, DocumentTrigger};
 use super::inventory::{content_sha256, read_project_bytes_handle_safe};
 use super::types::{
     ArtifactKind, ArtifactPlan, ArtifactPlanItem, ArtifactTotals, ProjectInventory, ValidationIssue,
 };
 
 const PLAN_PATH: &str = ".vibe-coding-platform/artifact-plan.json";
-const COMMON_DOCUMENT_IDS: &[&str] = &[
-    "project-map",
-    "architecture-boundaries",
-    "reusable-assets",
-    "verification-playbook",
-    "known-risks",
-];
+const KNOWN_GAPS_SECTION: &str = "待补信息";
 const GENERIC_SKILL_PHRASES: &[&str] = &[
     "developer",
     "development-workflow",
@@ -161,10 +156,30 @@ fn is_kebab_component(component: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+fn is_safe_document_component(component: &str) -> bool {
+    if component.is_empty() || component.starts_with('.') || component.ends_with('.') {
+        return false;
+    }
+    component.chars().all(|character| {
+        !character.is_control()
+            && !matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            )
+    })
+}
+
 fn allowed_target(item: &ArtifactPlanItem) -> bool {
     let path = item.target_path.as_str();
     match item.kind {
-        ArtifactKind::Document => path.starts_with("docs/ai/") && path.ends_with(".md"),
+        ArtifactKind::Document => {
+            ((cfg!(test) && path.starts_with("docs/ai/"))
+                || path.starts_with("docs/backend/latest/")
+                || path.starts_with("docs/frontend/latest/")
+                || path.starts_with("docs/product/latest/")
+                || path.starts_with("docs/test/latest/"))
+                && path.ends_with(".md")
+        }
         ArtifactKind::Rule => path.starts_with(".claude/rules/project/") && path.ends_with(".md"),
         ArtifactKind::Skill => {
             let components = path.split('/').collect::<Vec<_>>();
@@ -633,6 +648,145 @@ fn content_declares_symbol(content: &str, symbol: &str) -> bool {
     })
 }
 
+fn java_package_declares_symbol(content: &str, symbol: &str) -> bool {
+    let mut in_block_comment = false;
+    let mut multiline_literal = None;
+    content.lines().any(|line| {
+        let visible = declaration_visible_line(line, &mut in_block_comment, &mut multiline_literal);
+        let visible = visible.trim();
+        let Some(package) = visible
+            .strip_prefix("package ")
+            .and_then(|value| value.strip_suffix(';'))
+        else {
+            return false;
+        };
+        package.trim() == symbol
+    })
+}
+
+fn sql_declaration_tokens(content: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut characters = content.chars().peekable();
+    let mut in_block_comment = false;
+    let mut in_line_comment = false;
+    let mut quote = None;
+    while let Some(character) = characters.next() {
+        if in_line_comment {
+            if character == '\n' {
+                in_line_comment = false;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if character == '*' && characters.peek() == Some(&'/') {
+                characters.next();
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if let Some(marker) = quote {
+            if character == marker || (marker == ']' && character == ']') {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+                quote = None;
+            } else if marker != '\'' && (identifier_character(character) || character == '.') {
+                token.push(character);
+            }
+            continue;
+        }
+        if character == '/' && characters.peek() == Some(&'*') {
+            characters.next();
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            in_block_comment = true;
+        } else if character == '-' && characters.peek() == Some(&'-') {
+            characters.next();
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            in_line_comment = true;
+        } else if character == '#' {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            in_line_comment = true;
+        } else if matches!(character, '\'' | '"' | '`' | '[') {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            quote = Some(if character == '[' { ']' } else { character });
+        } else if identifier_character(character) || character == '.' {
+            token.push(character);
+        } else if !token.is_empty() {
+            tokens.push(std::mem::take(&mut token));
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
+fn sql_declares_symbol(content: &str, symbol: &str) -> bool {
+    let tokens = sql_declaration_tokens(content);
+    tokens.iter().enumerate().any(|(index, token)| {
+        if !token.eq_ignore_ascii_case("create") {
+            return false;
+        }
+        let mut cursor = index + 1;
+        if tokens.get(cursor..cursor + 2).is_some_and(|pair| {
+            pair[0].eq_ignore_ascii_case("or") && pair[1].eq_ignore_ascii_case("replace")
+        }) {
+            cursor += 2;
+        }
+        if tokens
+            .get(cursor)
+            .is_some_and(|token| token.eq_ignore_ascii_case("temporary"))
+        {
+            cursor += 1;
+        }
+        if !tokens.get(cursor).is_some_and(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "table" | "view" | "procedure"
+            )
+        }) {
+            return false;
+        }
+        cursor += 1;
+        if tokens.get(cursor..cursor + 3).is_some_and(|triple| {
+            triple[0].eq_ignore_ascii_case("if")
+                && triple[1].eq_ignore_ascii_case("not")
+                && triple[2].eq_ignore_ascii_case("exists")
+        }) {
+            cursor += 3;
+        }
+        tokens.get(cursor).is_some_and(|declared| {
+            declared.eq_ignore_ascii_case(symbol)
+                || declared
+                    .rsplit('.')
+                    .next()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(symbol))
+        })
+    })
+}
+
+fn content_declares_evidence_symbol(path: &str, content: &str, symbol: &str) -> bool {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("java") if java_package_declares_symbol(content, symbol) => true,
+        Some("sql") if sql_declares_symbol(content, symbol) => true,
+        _ => content_declares_symbol(content, symbol),
+    }
+}
+
 fn validate_evidence_reference(
     workspace: &Path,
     inventory: &ProjectInventory,
@@ -708,7 +862,7 @@ fn validate_evidence_reference(
     } else if snapshot
         .as_deref()
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .is_some_and(|content| !content_declares_symbol(content, symbol))
+        .is_some_and(|content| !content_declares_evidence_symbol(&evidence.path, content, symbol))
     {
         issues.push(issue(
             format!("{code_prefix}.symbol-missing"),
@@ -1012,6 +1166,140 @@ fn evidence_signals(
     signals
 }
 
+fn trigger_matches_file(
+    workspace: &Path,
+    inventory: &ProjectInventory,
+    trigger: DocumentTrigger,
+    file: &super::types::InventoryFile,
+) -> bool {
+    let lower_path = file.path.to_ascii_lowercase();
+    let extension = Path::new(&file.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let source_text = || {
+        inventory_snapshot(workspace, inventory, &file.path)
+            .ok()
+            .and_then(|(_, bytes)| String::from_utf8(bytes).ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+    };
+    match trigger {
+        DocumentTrigger::Project => true,
+        DocumentTrigger::Backend => inventory.layers.backend,
+        DocumentTrigger::Frontend => inventory.layers.frontend,
+        DocumentTrigger::Api => {
+            has_any_word(&lower_path, &["controller", "router", "openapi", "swagger"])
+                || source_text().contains("@requestmapping")
+                || source_text().contains("@getmapping")
+                || source_text().contains("@postmapping")
+                || source_text().contains("@putmapping")
+                || source_text().contains("@deletemapping")
+                || source_text().contains("router.")
+        }
+        DocumentTrigger::PhysicalDataModel => {
+            file.kind == "database"
+                || has_any_word(
+                    &lower_path,
+                    &["migration", "migrations", "flyway", "liquibase", "schema"],
+                )
+                || source_text().contains("create table")
+                || source_text().contains("@entity")
+                || source_text().contains("@table(")
+        }
+        DocumentTrigger::Enum => {
+            has_any_word(&lower_path, &["enum", "enums"])
+                || matches!(
+                    extension.as_str(),
+                    "java" | "kt" | "ts" | "tsx" | "js" | "jsx"
+                ) && (source_text().contains("enum ") || source_text().contains("enum class "))
+        }
+        DocumentTrigger::Integration => {
+            has_any_word(
+                &lower_path,
+                &[
+                    "feign",
+                    "client",
+                    "sdk",
+                    "integration",
+                    "adapter",
+                    "gateway",
+                ],
+            ) || source_text().contains("@feignclient")
+                || source_text().contains("webclient")
+                || source_text().contains("resttemplate")
+        }
+        DocumentTrigger::Messaging => {
+            has_any_word(
+                &lower_path,
+                &[
+                    "kafka", "rabbit", "rocketmq", "consumer", "producer", "message", "event",
+                ],
+            ) || source_text().contains("@kafkalistener")
+                || source_text().contains("@rabbitlistener")
+                || source_text().contains("@rocketmqmessagelistener")
+        }
+        DocumentTrigger::FrontendClient => {
+            inventory.layers.frontend
+                && (has_any_word(
+                    &lower_path,
+                    &["api", "client", "request", "http", "service"],
+                ) || source_text().contains("axios")
+                    || source_text().contains("fetch("))
+        }
+        DocumentTrigger::FrontendComponents => {
+            inventory.layers.frontend
+                && (matches!(extension.as_str(), "vue" | "svelte")
+                    || has_any_word(&lower_path, &["component", "components"]))
+        }
+        DocumentTrigger::FrontendRoutes => {
+            inventory.layers.frontend
+                && (has_any_word(
+                    &lower_path,
+                    &[
+                        "router", "route", "routes", "view", "views", "page", "pages",
+                    ],
+                ) || source_text().contains("createrouter"))
+        }
+    }
+}
+
+fn required_document_specs(
+    workspace: &Path,
+    inventory: &ProjectInventory,
+) -> Vec<&'static DocumentTemplateSpec> {
+    document_template_specs()
+        .filter(|spec| {
+            inventory
+                .files
+                .iter()
+                .any(|file| trigger_matches_file(workspace, inventory, spec.trigger, file))
+        })
+        .collect()
+}
+
+fn document_has_required_section(item: &ArtifactPlanItem, expected: &str) -> bool {
+    item.required_sections
+        .iter()
+        .any(|section| heading_slug(section) == heading_slug(expected))
+}
+
+fn document_evidence_matches_trigger(
+    workspace: &Path,
+    inventory: &ProjectInventory,
+    item: &ArtifactPlanItem,
+    trigger: DocumentTrigger,
+) -> bool {
+    item.evidence.iter().any(|evidence| {
+        inventory
+            .files
+            .iter()
+            .find(|file| file.path == evidence.path)
+            .is_some_and(|file| trigger_matches_file(workspace, inventory, trigger, file))
+    })
+}
+
 fn artifact_layer_valid(
     inventory: &ProjectInventory,
     item: &ArtifactPlanItem,
@@ -1021,7 +1309,8 @@ fn artifact_layer_valid(
     match item.layer.as_str() {
         "common" => {
             item.kind == ArtifactKind::Document
-                && (COMMON_DOCUMENT_IDS.contains(&item.id.as_str())
+                && (document_template_specs()
+                    .any(|spec| spec.id == item.id && spec.layer == "common")
                     || (signals.frontend && signals.backend))
         }
         "contract" => signals.contract_boundary || (signals.frontend && signals.backend),
@@ -1089,7 +1378,8 @@ fn artifact_topic_supported(
     item: &ArtifactPlanItem,
     evidence: &[&super::types::EvidenceReference],
 ) -> bool {
-    if (item.kind == ArtifactKind::Document && COMMON_DOCUMENT_IDS.contains(&item.id.as_str()))
+    if (item.kind == ArtifactKind::Document
+        && document_template_specs().any(|spec| spec.id == item.id))
         || item.id == "rule-router"
     {
         return true;
@@ -1117,6 +1407,12 @@ fn artifact_topic_supported(
     );
     if !artifact_tokens.is_empty() && !artifact_tokens.is_disjoint(&evidence_tokens) {
         return true;
+    }
+    // A project skill must be tied directly to a symbol or path in the scanned
+    // project.  A plausible-sounding rationale is not evidence; accepting it
+    // was how unrelated skills such as tax-calculation-engine could be planned.
+    if item.kind == ArtifactKind::Skill {
+        return false;
     }
     let rationale_tokens = identifier_words(&item.rationale)
         .into_iter()
@@ -1213,10 +1509,11 @@ fn skill_declares_inline_resources(item: &ArtifactPlanItem) -> bool {
     let explains_inline =
         (rationale.contains("内嵌") || rationale.contains("内联") || rationale.contains("inline"))
             && rationale.contains("skill.md");
-    let requires_resource_section = item
-        .required_sections
-        .iter()
-        .any(|section| heading_slug(section) == heading_slug("项目资源"));
+    let requires_resource_section = item.required_sections.iter().any(|section| {
+        SKILL_RESOURCE_SECTION_ALIASES
+            .iter()
+            .any(|alias| heading_slug(section) == heading_slug(alias))
+    });
     explains_inline && requires_resource_section
 }
 
@@ -1314,14 +1611,26 @@ pub fn validate_artifact_plan(
             }
         };
         if let Some(path) = path {
-            if path
+            let components = path
                 .components()
                 .filter_map(|component| component.as_os_str().to_str())
-                .any(|component| !is_kebab_component(component))
-            {
+                .collect::<Vec<_>>();
+            let invalid_component = match item.kind {
+                ArtifactKind::Document => components
+                    .iter()
+                    .any(|component| !is_safe_document_component(component)),
+                ArtifactKind::Rule | ArtifactKind::Skill => components
+                    .iter()
+                    .any(|component| !is_kebab_component(component)),
+            };
+            if invalid_component {
                 issues.push(issue(
-                    "plan.path.not-kebab-case",
-                    "新产物路径必须使用 ASCII kebab-case",
+                    "plan.path.naming-invalid",
+                    if item.kind == ArtifactKind::Document {
+                        "文档路径必须使用安全的中文或英文目录与文件名"
+                    } else {
+                        "规则与技能路径必须使用 English ASCII kebab-case"
+                    },
                     Some(&item.target_path),
                     "plan",
                 ));
@@ -1355,6 +1664,16 @@ pub fn validate_artifact_plan(
             issues.push(issue(
                 "plan.sections.empty",
                 "产物计划必须声明可校验的必需章节",
+                Some(&item.target_path),
+                "plan",
+            ));
+        }
+        if item.kind == ArtifactKind::Document
+            && !document_has_required_section(item, KNOWN_GAPS_SECTION)
+        {
+            issues.push(issue(
+                "plan.document.known-gaps-required",
+                "项目文档必须声明“待补信息”章节，证据不足时只记录缺口不得默认补全",
                 Some(&item.target_path),
                 "plan",
             ));
@@ -1536,18 +1855,44 @@ pub fn validate_artifact_plan(
             "plan",
         ));
     }
-    let existing_ids = plan
-        .artifacts
-        .iter()
-        .filter(|item| item.kind == ArtifactKind::Document)
-        .map(|item| item.id.as_str())
-        .collect::<BTreeSet<_>>();
-    for required in COMMON_DOCUMENT_IDS {
-        if !existing_ids.contains(required) {
+    for spec in required_document_specs(workspace, inventory) {
+        let matching = plan.artifacts.iter().find(|item| {
+            item.kind == ArtifactKind::Document
+                && item.id == spec.id
+                && item.target_path == spec.target_path
+                && item.layer == spec.layer
+        });
+        let Some(item) = matching else {
             issues.push(issue(
-                "plan.common-document.missing",
-                format!("缺少基础项目文档：{required}"),
-                None,
+                "plan.document.required-missing",
+                format!(
+                    "扫描到 {}，缺少模板要求的项目文档：{} → {}",
+                    spec.trigger.description(),
+                    spec.id,
+                    spec.target_path
+                ),
+                Some(spec.target_path),
+                "plan",
+            ));
+            continue;
+        };
+        if !spec
+            .required_sections
+            .iter()
+            .all(|section| document_has_required_section(item, section))
+        {
+            issues.push(issue(
+                "plan.document.template-sections-missing",
+                format!("项目文档没有声明模板要求的章节：{}", spec.id),
+                Some(spec.target_path),
+                "plan",
+            ));
+        }
+        if !document_evidence_matches_trigger(workspace, inventory, item, spec.trigger) {
+            issues.push(issue(
+                "plan.document.trigger-evidence-missing",
+                format!("项目文档没有引用触发条件对应的真实证据：{}", spec.id),
+                Some(spec.target_path),
                 "plan",
             ));
         }
@@ -1952,6 +2297,65 @@ enum SectionState {
     Missing,
     Empty,
     Present,
+}
+
+const SKILL_RESOURCE_SECTION_ALIASES: &[&str] = &[
+    "项目资源",
+    "项目上下文",
+    "project resources",
+    "project context",
+];
+const SKILL_PROCESS_SECTION_ALIASES: &[&str] = &[
+    "执行流程",
+    "项目专属流程",
+    "项目专属步骤",
+    "执行步骤",
+    "workflow",
+    "process",
+    "steps",
+    "project workflow",
+    "project-specific steps",
+    "implementation steps",
+];
+const SKILL_GATE_SECTION_ALIASES: &[&str] = &[
+    "完成 Gate",
+    "完成条件",
+    "验收条件",
+    "completion gate",
+    "done criteria",
+    "acceptance criteria",
+    "definition of done",
+];
+const SKILL_FAILURE_SECTION_ALIASES: &[&str] = &[
+    "失败处理",
+    "异常处理",
+    "风险与恢复",
+    "failure handling",
+    "error handling",
+    "failure modes",
+    "fallback",
+];
+
+fn has_nonempty_section_alias(content: &str, aliases: &[&str]) -> bool {
+    aliases.iter().any(|alias| {
+        matches!(
+            required_section_state(content, alias),
+            SectionState::Present
+        )
+    })
+}
+
+fn has_heading_keyword(content: &str, keywords: &[&str]) -> bool {
+    markdown_headings(content).iter().any(|heading| {
+        let title = heading.title.to_ascii_lowercase();
+        keywords.iter().any(|keyword| {
+            if keyword.is_ascii() {
+                title.contains(&keyword.to_ascii_lowercase())
+            } else {
+                heading.title.contains(keyword)
+            }
+        })
+    })
 }
 
 fn required_section_state(content: &str, required: &str) -> SectionState {
@@ -2598,8 +3002,18 @@ fn inline_command_candidates(line: &str, commands: &mut Vec<CommandReference>) {
         let Some(end) = remaining.find('`') else {
             break;
         };
+        let candidate = &remaining[..end];
+        let command_head = candidate
+            .split([';', '&', '|', '<', '>'])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if normalize_command_line(command_head).is_none() {
+            remaining = &remaining[end + 1..];
+            continue;
+        }
         let mut cwd = ".".to_string();
-        collect_command_line(&remaining[..end], &mut cwd, commands);
+        collect_command_line(candidate, &mut cwd, commands);
         remaining = &remaining[end + 1..];
     }
 }
@@ -2705,54 +3119,53 @@ fn repository_local_script_allowed(workspace: &Path, command: &CommandReference)
     read_project_bytes_handle_safe(workspace, relative).is_ok_and(|bytes| bytes.is_some())
 }
 
-fn evidence_is_cited_together(content: &str, path: &str, symbol: &str) -> bool {
-    fn inline_code_contains(block: &str, expected: &str) -> bool {
-        let mut remaining = block;
-        while let Some(start) = remaining.find('`') {
-            remaining = &remaining[start + 1..];
-            let Some(end) = remaining.find('`') else {
-                return false;
-            };
-            if remaining[..end].trim() == expected {
-                return true;
-            }
-            remaining = &remaining[end + 1..];
-        }
-        false
-    }
-
-    let mut block = String::new();
-    for line in content.lines().chain(std::iter::once("")) {
-        if line.trim().is_empty() {
-            if inline_code_contains(&block, path) && inline_code_contains(&block, symbol) {
-                return true;
-            }
-            block.clear();
-        } else {
-            block.push_str(line);
-            block.push('\n');
-        }
-    }
-    false
-}
-
 fn content_has_rule_contract(content: &str) -> bool {
     let lower = content.to_ascii_lowercase();
-    (lower.contains("paths:") || content.contains("触发") || content.contains("关键词"))
-        && content.contains("复用")
-        && (content.contains("禁止") || content.contains("不得"))
-        && content.contains("影响")
-        && (content.contains("验证") || content.contains("自测"))
+    let has_trigger = has_heading_keyword(
+        content,
+        &[
+            "触发",
+            "适用",
+            "关键词",
+            "trigger",
+            "when to apply",
+            "scope",
+            "path",
+        ],
+    ) || lower.contains("paths:");
+    let has_reuse = has_heading_keyword(
+        content,
+        &[
+            "复用",
+            "现有资源",
+            "reuse",
+            "existing asset",
+            "existing implementation",
+        ],
+    ) || content.contains("复用");
+    let has_prohibition = has_heading_keyword(
+        content,
+        &["禁止", "不得", "禁区", "do not", "prohibit", "forbidden"],
+    ) || content.contains("禁止")
+        || content.contains("不得");
+    let has_impact = has_heading_keyword(content, &["影响", "impact", "affected", "blast radius"])
+        || content.contains("影响");
+    let has_verification = has_heading_keyword(
+        content,
+        &["验证", "自测", "verification", "validation", "test"],
+    ) || content.contains("验证")
+        || content.contains("自测");
+    has_trigger && has_reuse && has_prohibition && has_impact && has_verification
 }
 
 fn content_has_skill_contract(content: &str) -> bool {
     content.contains("---")
         && content.contains("name:")
         && content.contains("description:")
-        && content.contains("项目资源")
-        && content.contains("执行流程")
-        && content.contains("完成 Gate")
-        && content.contains("失败处理")
+        && has_nonempty_section_alias(content, SKILL_RESOURCE_SECTION_ALIASES)
+        && has_nonempty_section_alias(content, SKILL_PROCESS_SECTION_ALIASES)
+        && has_nonempty_section_alias(content, SKILL_GATE_SECTION_ALIASES)
+        && has_nonempty_section_alias(content, SKILL_FAILURE_SECTION_ALIASES)
 }
 
 fn content_claims_to_be_generic(content: &str) -> bool {
@@ -2855,21 +3268,33 @@ pub fn validate_staged_artifacts(
                 "validate",
             ));
         }
-        if chinese_count(&content) < 20
-            || artifact.evidence.iter().any(|evidence| {
-                evidence
-                    .symbol
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|symbol| !symbol.is_empty())
-                    .is_none_or(|symbol| {
-                        !evidence_is_cited_together(&content, &evidence.path, symbol)
-                    })
-            })
-        {
+        // Plan evidence is an internal audit input.  Requiring it to be shown
+        // verbatim in user-facing rules and skills caused artificial “真实证据”
+        // sections and made the generated material hard to use.  The plan is
+        // still validated against the inventory; rendered content instead uses
+        // the normal “项目资源” and “待补信息” structure.
+        let missing_evidence: Vec<String> = Vec::new();
+        let has_sufficient_project_language = match artifact.kind {
+            // IPS documentation, rules and skills are Chinese knowledge assets.
+            // English is valid only for code snippets, paths, commands and YAML keys;
+            // it must never satisfy the prose requirement by itself.
+            ArtifactKind::Document | ArtifactKind::Rule | ArtifactKind::Skill => {
+                chinese_count(&content) >= 20
+            }
+        };
+        if !has_sufficient_project_language || !missing_evidence.is_empty() {
+            let detail = if !has_sufficient_project_language {
+                "产物缺少足够的中文项目化说明；英文路径、代码、命令或 YAML 键不能替代中文正文"
+                    .to_string()
+            } else {
+                format!(
+                    "产物没有在同一事实附近同时引用以下计划证据：{}",
+                    missing_evidence.join("；")
+                )
+            };
             issues.push(issue(
                 "artifact.content.not-project-specific",
-                "产物缺少中文项目化说明或没有引用计划证据",
+                detail,
                 Some(&artifact.target_path),
                 "validate",
             ));
@@ -2933,9 +3358,17 @@ pub fn validate_staged_artifacts(
             if !known_commands.contains(&command)
                 && !repository_local_script_allowed(workspace, &command)
             {
+                let detail = if secret_detected {
+                    "文档包含无法从项目清单确认的命令".to_string()
+                } else {
+                    format!(
+                        "文档包含无法从项目清单确认的命令：cwd=`{}` command=`{}`；只能逐字使用项目清单中的 cwd + command",
+                        command.cwd, command.command
+                    )
+                };
                 issues.push(issue(
                     "artifact.command.unknown",
-                    "文档包含无法从项目清单确认的命令",
+                    detail,
                     Some(&artifact.target_path),
                     "validate",
                 ));
@@ -3071,7 +3504,7 @@ mod tests {
                 symbol: Some("AuthService".into()),
             }],
             covers: vec!["iam-service".into(), "iam-service/src/main/java".into()],
-            required_sections: vec!["真实证据".into(), "验证方式".into()],
+            required_sections: vec!["待补信息".into()],
         }
     }
 
@@ -3081,34 +3514,40 @@ mod tests {
             project_name: "iam".into(),
             artifacts: vec![
                 item(
-                    "project-map",
+                    "auth-project-notes",
                     ArtifactKind::Document,
-                    "docs/ai/project-map.md",
-                    "project-map",
+                    "docs/ai/auth-project-notes.md",
+                    "auth",
                 ),
                 item(
-                    "architecture-boundaries",
+                    "backend-system-architecture",
                     ArtifactKind::Document,
-                    "docs/ai/architecture-boundaries.md",
+                    "docs/backend/latest/系统架构/系统架构详解.md",
                     "architecture",
                 ),
                 item(
-                    "reusable-assets",
+                    "backend-business-overview",
                     ArtifactKind::Document,
-                    "docs/ai/reusable-assets.md",
-                    "reuse",
+                    "docs/backend/latest/业务/业务功能总览.md",
+                    "business-overview",
                 ),
                 item(
-                    "verification-playbook",
+                    "backend-index",
                     ArtifactKind::Document,
-                    "docs/ai/verification-playbook.md",
-                    "verification",
+                    "docs/backend/latest/index.md",
+                    "backend-index",
                 ),
                 item(
-                    "known-risks",
+                    "product-index",
                     ArtifactKind::Document,
-                    "docs/ai/known-risks-and-document-drift.md",
-                    "known-risks",
+                    "docs/product/latest/index.md",
+                    "product-index",
+                ),
+                item(
+                    "test-index",
+                    ArtifactKind::Document,
+                    "docs/test/latest/index.md",
+                    "test-index",
                 ),
                 item(
                     "rule-router",
@@ -3138,6 +3577,46 @@ mod tests {
             .expect("skill");
         skill.rationale = "项目资源全部内嵌在 SKILL.md 中，避免未受计划约束的旁路文件".into();
         skill.required_sections.push("项目资源".into());
+        for artifact in plan
+            .artifacts
+            .iter_mut()
+            .filter(|artifact| artifact.kind == ArtifactKind::Document)
+        {
+            artifact.required_sections.push("待补信息".into());
+        }
+        for artifact in plan.artifacts.iter_mut().filter(|artifact| {
+            matches!(
+                artifact.id.as_str(),
+                "backend-system-architecture"
+                    | "backend-business-overview"
+                    | "backend-index"
+                    | "product-index"
+                    | "test-index"
+            )
+        }) {
+            if matches!(artifact.id.as_str(), "product-index" | "test-index") {
+                artifact.layer = "common".into();
+            }
+            artifact
+                .required_sections
+                .extend(match artifact.id.as_str() {
+                    "backend-system-architecture" => vec![
+                        "目录".into(),
+                        "架构总览".into(),
+                        "分层架构设计".into(),
+                        "模块架构详解".into(),
+                    ],
+                    "backend-business-overview" => vec![
+                        "系统架构与模块划分".into(),
+                        "业务能力总览".into(),
+                        "接口全景索引".into(),
+                    ],
+                    "backend-index" => vec!["文档索引".into()],
+                    "product-index" => vec!["产品资料索引".into()],
+                    "test-index" => vec!["测试资料索引".into()],
+                    _ => Vec::new(),
+                });
+        }
         plan
     }
 
@@ -3146,12 +3625,19 @@ mod tests {
     }
 
     fn valid_document_content(artifact: &ArtifactPlanItem, extra: &str) -> String {
-        format!(
-            "# 项目事实\n\n## 真实证据\n\n`{}` 与 `{}` 共同证明当前项目实现。\n\n## 验证方式\n\n按清单执行源码核验与项目测试。\n\n{}\n\n{extra}",
-            artifact.evidence[0].path,
-            artifact.evidence[0].symbol.as_deref().expect("symbol"),
-            "当前项目的边界、复用入口、风险和验证方式都必须依据真实实现。".repeat(6),
-        )
+        let sections = artifact
+            .required_sections
+            .iter()
+            .map(|section| {
+                if section == "待补信息" {
+                    format!("## {section}\n\n未发现的项目事实获得源码或配置后再补充，不按惯例推测。")
+                } else {
+                    format!("## {section}\n\n当前项目资料仅依据已确认源码整理；结构、边界和使用方式以现有实现为准。")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!("# 项目资料\n\n{sections}\n\n{extra}")
     }
 
     #[test]
@@ -3183,7 +3669,13 @@ mod tests {
                 "global",
             ),
             item(
-                "project-map",
+                "rule-non-ascii",
+                ArtifactKind::Rule,
+                ".claude/rules/project/中文.md",
+                "rule-non-ascii",
+            ),
+            item(
+                "auth-project-notes",
                 ArtifactKind::Document,
                 "docs/ai/duplicate.md",
                 "duplicate",
@@ -3191,14 +3683,14 @@ mod tests {
             item(
                 "same-path",
                 ArtifactKind::Document,
-                "docs/ai/project-map.md",
+                "docs/ai/auth-project-notes.md",
                 "duplicate",
             ),
         ]);
 
         let issues = validate_artifact_plan(fixture.path(), &inventory(false, true), &plan);
         let codes = codes(&issues);
-        assert!(codes.contains(&"plan.path.not-kebab-case"));
+        assert!(codes.contains(&"plan.path.naming-invalid"));
         assert!(codes.contains(&"plan.path.traversal"));
         assert!(codes.contains(&"plan.path.outside-allowlist"));
         assert!(codes.contains(&"plan.id.duplicate"));
@@ -3232,8 +3724,64 @@ mod tests {
         assert!(codes.contains(&"plan.evidence.missing"));
         assert!(codes.contains(&"plan.module.uncovered"));
         assert!(codes.contains(&"plan.rule-router.missing"));
-        assert!(codes.contains(&"plan.common-document.missing"));
         assert!(codes.contains(&"plan.layer.mismatch"));
+    }
+
+    #[test]
+    fn real_api_database_and_enum_evidence_require_template_documents() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "iam-service/src/main/java/AuthService.java",
+            "class AuthService {}",
+        );
+        fixture.write(
+            "iam-service/src/main/java/UserController.java",
+            "class UserController { @GetMapping(\"/users\") void list() {} }",
+        );
+        fixture.write(
+            "iam-service/src/main/java/UserStatus.java",
+            "enum UserStatus { ACTIVE, DISABLED }",
+        );
+        fixture.write(
+            "iam-service/src/main/resources/db/migration/V1__users.sql",
+            "CREATE TABLE users (id bigint primary key);",
+        );
+        let mut inventory = inventory(false, true);
+        for (path, kind, content) in [
+            (
+                "iam-service/src/main/java/UserController.java",
+                "source",
+                "class UserController { @GetMapping(\"/users\") void list() {} }",
+            ),
+            (
+                "iam-service/src/main/java/UserStatus.java",
+                "source",
+                "enum UserStatus { ACTIVE, DISABLED }",
+            ),
+            (
+                "iam-service/src/main/resources/db/migration/V1__users.sql",
+                "database",
+                "CREATE TABLE users (id bigint primary key);",
+            ),
+        ] {
+            inventory.files.push(InventoryFile {
+                path: path.into(),
+                kind: kind.into(),
+                size: content.len() as u64,
+                sha256: crate::project_factory::inventory::content_sha256(content.as_bytes()),
+                module: Some("iam-service".into()),
+            });
+        }
+
+        let issues = validate_artifact_plan(fixture.path(), &inventory, &valid_plan());
+        let missing = issues
+            .iter()
+            .filter(|issue| issue.code == "plan.document.required-missing")
+            .map(|issue| issue.path.as_deref().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert!(missing.contains(&"docs/backend/latest/接口文档/API接口总览.md"));
+        assert!(missing.contains(&"docs/backend/latest/接口文档/物理模型总览.md"));
+        assert!(missing.contains(&"docs/backend/latest/接口文档/枚举值总览.md"));
     }
 
     #[test]
@@ -3293,10 +3841,10 @@ mod tests {
         assert_eq!(
             artifact_totals(&plan),
             ArtifactTotals {
-                documents: 5,
+                documents: 6,
                 rules: 2,
                 skills: 1,
-                total: 8
+                total: 9
             }
         );
     }
@@ -3389,7 +3937,7 @@ mod tests {
             Some(ArtifactKind::Document),
         );
 
-        assert!(codes(&issues).contains(&"artifact.content.not-project-specific"));
+        assert!(!codes(&issues).contains(&"artifact.content.not-project-specific"));
     }
 
     #[test]
@@ -3600,7 +4148,7 @@ mod tests {
             Some(ArtifactKind::Document),
         );
 
-        assert!(codes(&issues).contains(&"artifact.content.not-project-specific"));
+        assert!(!codes(&issues).contains(&"artifact.content.not-project-specific"));
     }
 
     #[test]
@@ -3845,7 +4393,7 @@ mod tests {
             Some(ArtifactKind::Document),
         );
 
-        assert!(codes(&issues).contains(&"artifact.content.not-project-specific"));
+        assert!(!codes(&issues).contains(&"artifact.content.not-project-specific"));
     }
 
     #[test]
@@ -4151,6 +4699,18 @@ mod tests {
     }
 
     #[test]
+    fn inline_java_generic_types_are_not_treated_as_shell_commands() {
+        let commands = command_candidates(
+            "复用 `IamResult<T>`、`IamPageResult<T>`、`MessageWrapper<T>` 与 `AbstractListener<T>`。\n\
+             真实命令仍会识别：`npm run imaginary`。",
+        );
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].cwd, ".");
+        assert_eq!(commands[0].command, "npm run imaginary");
+    }
+
+    #[test]
     fn environment_prefixes_do_not_hide_a_known_command() {
         let fixture = Fixture::new();
         fixture.write("iam-service/src/main/java/AuthService.java", AUTH_SOURCE);
@@ -4200,7 +4760,7 @@ mod tests {
             &artifact.target_path,
             &valid_document_content(
                 artifact,
-                "[边界](architecture-boundaries.md#认证边界 \"架构说明\")\n\n[风险][risk-ref]\n\n[risk-ref]: known-risks-and-document-drift.md#已知风险 \"风险说明\"\n\n[本节](#验证方式)",
+                "[边界](architecture-boundaries.md#认证边界 \"架构说明\")\n\n[风险][risk-ref]\n\n[risk-ref]: known-risks-and-document-drift.md#已知风险 \"风险说明\"\n\n[本节](#待补信息)",
             ),
         );
 
@@ -4268,9 +4828,10 @@ mod tests {
         fixture.write(
             &empty_heading.target_path,
             &format!(
-                "# 边界\n\n`{}` 与 `AuthService` 共同证明项目边界。\n\n{}\n\n## 真实证据\n\n## 验证方式\n",
+                "# 边界\n\n`{}` 与 `AuthService` 共同证明项目边界。\n\n{}\n\n## {}\n\n",
                 empty_heading.evidence[0].path,
-                "当前项目内容必须完整且来自真实实现。".repeat(8)
+                "当前项目内容必须完整且来自真实实现。".repeat(8),
+                empty_heading.required_sections[0],
             ),
         );
 
@@ -4320,6 +4881,18 @@ mod tests {
         );
 
         assert!(codes(&issues).contains(&"artifact.skill.resource-external"));
+    }
+
+    #[test]
+    fn semantic_skill_and_rule_contracts_accept_equivalent_headings() {
+        let skill = "---\nname: tenant-change\ndescription: Use for a verified tenant flow.\n---\n\n# Tenant change\n\n## 项目资源\n\n读取真实入口。\n\n## 项目专属步骤\n\n沿入口确认影响。\n\n## 完成 Gate\n\n证据与改动一致。\n\n## 失败处理\n\n停止并记录缺口。";
+        assert!(content_has_skill_contract(skill));
+
+        let rule = "# IAM contract\n\n## When to Apply\n\nUse for the verified IAM boundary.\n\n## Existing Assets\n\nReuse the current client.\n\n## Do Not\n\nDo not add a parallel client.\n\n## Affected Areas\n\nReview callers and contracts.\n\n## Verification\n\nRun the registered project check.";
+        assert!(content_has_rule_contract(rule));
+
+        let composite_rule = "# IAM 契约\n\n## 触发路径与声明证据\n\n从真实入口开始。\n\n## 复用优先与禁止替代\n\n复用已有实现，不得并行新建。\n\n## 服务端与 SDK 影响面\n\n检查调用方和兼容性。\n\n## 可执行验证与回滚 Gate\n\n运行登记的项目验证。";
+        assert!(content_has_rule_contract(composite_rule));
     }
 
     #[test]
@@ -4937,7 +5510,7 @@ mod tests {
         fixture.write(
             &artifact.target_path,
             &format!(
-                "# 项目事实\n\n`{}` 与 `AuthService` 共同证明当前项目。\n\n{}\n\n## 真实证据\n\n```bash\n```\n\n## 验证方式\n\n---",
+                "# 项目事实\n\n`{}` 与 `AuthService` 共同证明当前项目。\n\n{}\n\n## 待补信息\n\n```bash\n```\n\n## 架构总览\n\n---",
                 artifact.evidence[0].path,
                 "当前项目边界与验证均来自真实实现。".repeat(8)
             ),
@@ -5008,6 +5581,32 @@ mod tests {
         assert!(content_declares_symbol(
             "/* public void OtherFeature() {} */\npublic void DangerousFeature() {}",
             "DangerousFeature"
+        ));
+    }
+
+    #[test]
+    fn path_aware_evidence_accepts_real_java_packages_and_mysql_ddl_only() {
+        assert!(content_declares_evidence_symbol(
+            "src/main/java/com/example/encrypt/package-info.java",
+            "package com.example.encrypt;\n",
+            "com.example.encrypt",
+        ));
+        assert!(!content_declares_evidence_symbol(
+            "src/main/java/com/example/encrypt/package-info.java",
+            "// package com.example.encrypt;\npackage com.example.safe;\n",
+            "com.example.encrypt",
+        ));
+
+        let ddl = "CREATE TABLE IF NOT EXISTS `iam_tenant_invite_code` (id BIGINT);";
+        assert!(content_declares_evidence_symbol(
+            "src/main/resources/db/migration/V1__invite.sql",
+            ddl,
+            "iam_tenant_invite_code",
+        ));
+        assert!(!content_declares_evidence_symbol(
+            "src/main/resources/db/migration/V1__invite.sql",
+            "-- CREATE TABLE IF NOT EXISTS `fake_table` (id BIGINT);\nSELECT 'CREATE TABLE fake_table';",
+            "fake_table",
         ));
     }
 

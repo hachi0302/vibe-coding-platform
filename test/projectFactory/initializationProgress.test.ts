@@ -19,11 +19,11 @@ describe('project initialization progress', () => {
     })
     expect(initializationProgressFor('install')).toMatchObject({
       phase: 'install',
-      detail: '正在检查冲突并安装已验证产物',
+      detail: '正在检查冲突并安装项目产物',
     })
     expect(initializationProgressFor('verify')).toMatchObject({
       phase: 'verify',
-      detail: '正在校验安装结果与所有权清单',
+      detail: '正在确认安装结果与所有权清单',
     })
     expect(initializationProgressFor('complete')).toMatchObject({
       phase: 'complete',
@@ -54,7 +54,7 @@ describe('project initialization progress', () => {
     expect(decide({ status: 'current-v4', initialized: true, markerVersion: 'v4' })).toBe('complete')
   })
 
-  it('keeps actionable backend detail while restoring a recoverable run', () => {
+  it('uses a stable public summary while restoring a recoverable run', () => {
     const progressFromStatus = (initializationUi as Record<string, unknown>).initializationProgressFromStatus
 
     expect(progressFromStatus).toBeTypeOf('function')
@@ -76,7 +76,7 @@ describe('project initialization progress', () => {
     expect(progress).toMatchObject({
       phase: 'interrupted',
       percent: 61,
-      detail: '规则阶段完成后进程退出，可从 skills 阶段继续',
+      detail: '初始化已中断，可从上次有效节点继续',
       runId: 'run-3',
       attempt: 2,
       sequence: 17,
@@ -97,7 +97,7 @@ describe('project initialization progress', () => {
       rules: 2,
       skills: 1,
       total: 6,
-    })).toBe('初始化完成：3 份文档、2 条规则、1 个 skill 已通过校验。')
+    })).toBe('初始化完成：已安装 3 份文档、2 条规则、1 个 skill。')
     expect(() => (completionDetail as (totals?: unknown) => string)()).toThrow(
       '初始化完成结果缺少 artifactTotals，无法确认产物数量。',
     )
