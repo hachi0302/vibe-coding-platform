@@ -96,10 +96,29 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          while IFS= read -r -d '' BUNDLE; do
-            rm -f "${BUNDLE}.sig"
-            npx tauri signer sign "$BUNDLE"
-          done < <(find src-tauri/target -type f \( -name '*.app.tar.gz' -o -name '*-setup.exe' -o -name '*.AppImage' \) -print0)
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          RELEASE_DIR=release-assets
+          mkdir -p "$RELEASE_DIR"
+
+          case "${{ matrix.platform }}" in
+            macos-latest)
+              BUNDLE=$(find src-tauri/target -type f -name '*.app.tar.gz' -print -quit)
+              ASSET="Vibe.Coding.Platform.app.tar.gz"
+              ;;
+            windows-latest)
+              BUNDLE=$(find src-tauri/target -type f -name '*-setup.exe' -print -quit)
+              ASSET="Vibe.Coding.Platform_${VERSION}_x64-setup.exe"
+              ;;
+            ubuntu-22.04)
+              BUNDLE=$(find src-tauri/target -type f -name '*.AppImage' -print -quit)
+              ASSET="Vibe.Coding.Platform_${VERSION}_amd64.AppImage"
+              ;;
+          esac
+
+          [ -n "$BUNDLE" ] || { echo "No updater bundle found"; exit 1; }
+          cp "$BUNDLE" "$RELEASE_DIR/$ASSET"
+          npx tauri signer sign "$RELEASE_DIR/$ASSET"
+          node -e "const c=require('crypto'),f=require('fs'); process.stdout.write(c.createHash('sha256').update(f.readFileSync(process.argv[1])).digest('hex'))" "$RELEASE_DIR/$ASSET" > "$RELEASE_DIR/$ASSET.sha256"
 
       - name: Generate updater latest.json
         shell: bash
@@ -131,7 +150,7 @@ jobs:
             return files
           }
 
-          const bundleDir = 'src-tauri/target'
+          const bundleDir = 'release-assets'
           const allFiles = walk(bundleDir)
           const platforms = {}
           const mapping = [
@@ -154,9 +173,8 @@ jobs:
             throw new Error('No updater platforms found')
           }
 
-          const outDir = path.dirname(allFiles.find(f => f.endsWith('.sig')) || bundleDir)
           const manifest = { version, notes: '', pub_date: new Date().toISOString(), platforms }
-          const outPath = path.join(outDir, 'latest.json')
+          const outPath = path.join(bundleDir, 'latest.json')
           fs.writeFileSync(outPath, JSON.stringify(manifest, null, 2) + '\n')
           console.log(`Generated ${outPath} with platforms: ${Object.keys(platforms).join(', ')}`)
           SCRIPT
@@ -167,13 +185,10 @@ jobs:
           name: bundle-${{ matrix.platform }}
           path: |
             src-tauri/target/**/release/bundle/**/*.dmg
-            src-tauri/target/**/release/bundle/**/*.app.tar.gz
             src-tauri/target/**/release/bundle/**/*.msi
-            src-tauri/target/**/release/bundle/**/*-setup.exe
             src-tauri/target/**/release/bundle/**/*.deb
-            src-tauri/target/**/release/bundle/**/*.AppImage
-            src-tauri/target/**/release/bundle/**/*.sig
-            src-tauri/target/**/release/bundle/**/latest.json
+            src-tauri/target/**/release/bundle/**/*.rpm
+            release-assets/**
           if-no-files-found: error
 
   publish:
@@ -229,23 +244,20 @@ jobs:
             }
           }
 
-          walk(root)
-          if (!manifests.length) {
-            throw new Error('No updater latest.json files found in downloaded artifacts')
-          }
-
-          // Collect ALL files in dist/ — artifact download may rename files
-          // (e.g. spaces → dots), so we need the actual on-disk names for URLs.
           function walkAll(dir) {
             let files = []
-            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-              const full = path.join(dir, e.name)
-              if (e.isDirectory()) files.push(...walkAll(full))
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name)
+              if (entry.isDirectory()) files.push(...walkAll(full))
               else files.push(full)
             }
             return files
           }
-          const allDistFiles = walkAll(root)
+
+          walk(root)
+          if (!manifests.length) {
+            throw new Error('No updater latest.json files found in downloaded artifacts')
+          }
 
           let merged = null
           for (const file of manifests) {
@@ -266,22 +278,6 @@ jobs:
             Object.assign(merged.platforms, json.platforms)
           }
 
-          // Re-derive URLs from actual files in dist/ — artifact upload/download
-          // can replace spaces with dots in file names, making the build-job URLs stale.
-          const extToKeys = [
-            ['.app.tar.gz', ['darwin-x86_64', 'darwin-aarch64']],
-            ['-setup.exe', ['windows-x86_64']],
-            ['.AppImage',   ['linux-x86_64']],
-          ]
-          for (const [ext, keys] of extToKeys) {
-            const actual = allDistFiles.find(f => f.endsWith(ext) && !f.endsWith('.sig'))
-            if (!actual) continue
-            const url = releaseAssetUrl(path.basename(actual))
-            for (const k of keys) {
-              if (merged.platforms[k]) merged.platforms[k].url = url
-            }
-          }
-
           const required = ['windows-x86_64', 'linux-x86_64']
           for (const platform of required) {
             if (!merged.platforms[platform]) {
@@ -294,6 +290,13 @@ jobs:
 
           for (const file of manifests) {
             fs.rmSync(file, { force: true })
+          }
+          for (const checksum of walkAll(root).filter(file => file.endsWith('.sha256'))) {
+            const asset = checksum.slice(0, -'.sha256'.length)
+            const expected = fs.readFileSync(checksum, 'utf8').trim()
+            const actual = require('crypto').createHash('sha256').update(fs.readFileSync(asset)).digest('hex')
+            if (actual !== expected) throw new Error(`Artifact checksum mismatch: ${asset}`)
+            fs.rmSync(checksum, { force: true })
           }
           fs.writeFileSync(path.join(root, 'latest.json'), `${JSON.stringify(merged, null, 2)}\n`)
           console.log(`Merged ${manifests.length} updater manifests into dist/latest.json`)
@@ -315,3 +318,44 @@ jobs:
           files: dist/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify published updater assets
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node <<'NODE'
+          const crypto = require('crypto')
+          const fs = require('fs')
+          const path = require('path')
+
+          const latest = JSON.parse(fs.readFileSync('dist/latest.json', 'utf8'))
+          const localFiles = []
+          function walk(dir) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name)
+              if (entry.isDirectory()) walk(full)
+              else localFiles.push(full)
+            }
+          }
+          walk('dist')
+
+          async function check(platform, update) {
+            const file = path.basename(new URL(update.url).pathname)
+            const local = localFiles.find(candidate => path.basename(candidate) === file)
+            if (!local) throw new Error(`${platform}: local staged asset not found: ${file}`)
+            const localSignature = fs.readFileSync(`${local}.sig`, 'utf8').trim()
+            if (update.signature !== localSignature) throw new Error(`${platform}: manifest signature differs from staged signature`)
+            const response = await fetch(update.url)
+            if (!response.ok) throw new Error(`${platform}: release download returned ${response.status}`)
+            const published = Buffer.from(await response.arrayBuffer())
+            const localHash = crypto.createHash('sha256').update(fs.readFileSync(local)).digest('hex')
+            const publishedHash = crypto.createHash('sha256').update(published).digest('hex')
+            if (localHash !== publishedHash) throw new Error(`${platform}: published asset hash differs from signed staged asset`)
+            console.log(`${platform}: published bundle and signature match staged final asset`)
+          }
+
+          Promise.all(Object.entries(latest.platforms).map(([platform, update]) => check(platform, update)))
+            .catch(error => { console.error(error); process.exitCode = 1 })
+          NODE
