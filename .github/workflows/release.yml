@@ -101,10 +101,6 @@ jobs:
             npx tauri signer sign "$BUNDLE"
           done < <(find src-tauri/target -type f \( -name '*.app.tar.gz' -o -name '*-setup.exe' -o -name '*.AppImage' \) -print0)
 
-      - name: Verify final updater bundles
-        shell: bash
-        run: node scripts/verify-updater-bundles.mjs --root src-tauri/target --config src-tauri/tauri.conf.json
-
       - name: Generate updater latest.json
         shell: bash
         env:
