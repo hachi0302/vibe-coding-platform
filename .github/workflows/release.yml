@@ -305,6 +305,13 @@ jobs:
           }
           NODE
 
+      - name: Verify updater signatures with configured public key
+        run: |
+          node scripts/verify-updater-signatures.mjs \
+            src-tauri/tauri.conf.json \
+            dist/latest.json \
+            dist
+
       - name: Generate release notes
         run: npx changelogithub
         env:

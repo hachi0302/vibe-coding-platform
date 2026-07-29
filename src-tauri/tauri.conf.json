@@ -51,7 +51,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk0NzVCRTZEQjEwRjU4QkIKUldTN1dBK3hiYjUxbE5rMWxOazFmNDRPZjZPdUJHM0xiWXpwUDdTeEthQ3dBdFNDSnlyRXFpYnAK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgOTQ3NUJFNkRCMTBGNThCQgpSV1M3V0EreGJiNTFsTmsxZjQ0T2Z2TE9mNk91QkczTGJZenBQN1N4S2FDd0F0U0NKeXJFcWlicAo=",
       "endpoints": [
         "https://github.com/hachi0302/vibe-coding-platform/releases/latest/download/latest.json"
       ],

@@ -649,6 +649,7 @@ export default {
   'settings.updateDownloadingProgress': 'アップデートをダウンロード中: {pct}%',
   'settings.updateReady': 'アップデートをインストールしました。アプリを再起動してください。',
   'settings.updateInstallFail': 'アップデートのインストールに失敗: {e}',
+  'settings.updateDownloadIncomplete': 'アップデートのダウンロードが不完全で、自動再試行後も失敗しました。ネットワークを確認して再試行するか、下の release 表示から手動でインストールしてください。',
   'settings.relaunch': 'アプリを再起動',
   'settings.updateFail': 'アップデート確認に失敗: {e}',
   'settings.viewRelease': 'release v{v} を表示',

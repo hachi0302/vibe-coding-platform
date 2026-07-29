@@ -653,6 +653,7 @@ export default {
   'settings.updateDownloadingProgress': 'Downloading update: {pct}%',
   'settings.updateReady': 'Update installed. Relaunch the app to finish.',
   'settings.updateInstallFail': 'Update install failed: {e}',
+  'settings.updateDownloadIncomplete': 'The update download was incomplete after automatic retries. Check your network and try again, or use View release to install it manually.',
   'settings.relaunch': 'Relaunch app',
   'settings.updateFail': 'Update check failed: {e}',
   'settings.viewRelease': 'View release v{v}',

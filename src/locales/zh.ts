@@ -641,6 +641,7 @@ export default {
   'settings.updateDownloadingProgress': '正在下载更新：{pct}%',
   'settings.updateReady': '更新已安装，重启应用后生效。',
   'settings.updateInstallFail': '安装更新失败：{e}',
+  'settings.updateDownloadIncomplete': '更新包下载不完整，已自动重试仍失败。请检查网络后重试，或点击下方“查看 release”手动安装。',
   'settings.relaunch': '重启应用',
   'settings.updateFail': '检查更新失败：{e}',
   'settings.viewRelease': '查看 release v{v}',

@@ -13,7 +13,15 @@ vi.mock('../src/api', () => ({
 vi.mock('@tauri-apps/plugin-updater', () => ({ check: vi.fn() }))
 vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: vi.fn() }))
 
-import { latestVersion, runBackgroundCheck, updateAvailable } from '../src/updateCheck'
+import {
+  downloadAndInstallUpdate,
+  latestVersion,
+  runBackgroundCheck,
+  updateAvailable,
+  updateDownloaded,
+  updateDownloading,
+  updaterUpdate,
+} from '../src/updateCheck'
 
 describe('runBackgroundCheck', () => {
   beforeEach(() => {
@@ -26,6 +34,9 @@ describe('runBackgroundCheck', () => {
     })
     latestVersion.value = null
     updateAvailable.value = false
+    updateDownloaded.value = false
+    updateDownloading.value = false
+    updaterUpdate.value = null
   })
 
   it('ignores an update cache left by another desktop application', async () => {
@@ -40,5 +51,22 @@ describe('runBackgroundCheck', () => {
     expect(localStorage.getItem('updateCheck:v1')).toBeNull()
     expect(latestVersion.value).toBe('0.1.0')
     expect(updateAvailable.value).toBe(false)
+  })
+
+  it('retries an interrupted updater download and completes without surfacing its transport error', async () => {
+    vi.useFakeTimers()
+    const downloadAndInstall = vi.fn()
+      .mockRejectedValueOnce(new Error('error decoding response body'))
+      .mockResolvedValueOnce(undefined)
+    updaterUpdate.value = { downloadAndInstall } as never
+
+    const download = downloadAndInstallUpdate()
+    await vi.advanceTimersByTimeAsync(750)
+    await download
+
+    expect(downloadAndInstall).toHaveBeenCalledTimes(2)
+    expect(updateDownloaded.value).toBe(true)
+    expect(updateDownloading.value).toBe(false)
+    vi.useRealTimers()
   })
 })

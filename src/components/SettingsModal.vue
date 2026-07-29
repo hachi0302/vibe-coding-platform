@@ -62,6 +62,7 @@ import {
   latestVersion,
   openReleasePage,
   relaunchApp,
+  UpdateDownloadRetryError,
   updateDownloaded,
   updateDownloading,
   updateInstallError,
@@ -309,7 +310,9 @@ async function installUpdate() {
     await downloadAndInstallUpdate()
     updateMsg.value = t('settings.updateReady')
   } catch (e) {
-    updateInstallError.value = String(e)
+    updateInstallError.value = e instanceof UpdateDownloadRetryError
+      ? t('settings.updateDownloadIncomplete')
+      : String(e)
     updateMsg.value = ''
   }
 }

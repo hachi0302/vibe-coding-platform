@@ -43,6 +43,38 @@ export const updateDownloading = ref(false)
  *  时 updateMsg 的 v-if 会把错误藏掉，所以需要独立的 ref。 */
 export const updateInstallError = ref<string | null>(null)
 
+/**
+ * The updater's Rust HTTP client reports interrupted release-asset transfers as
+ * the opaque `error decoding response body`. Keep the transport detail out of
+ * the UI after retries have been exhausted, while still allowing callers to
+ * distinguish it from an installer or signature error.
+ */
+export class UpdateDownloadRetryError extends Error {
+  constructor() {
+    super('Update download did not complete after automatic retries')
+    this.name = 'UpdateDownloadRetryError'
+  }
+}
+
+const UPDATE_DOWNLOAD_ATTEMPTS = 3
+const UPDATE_DOWNLOAD_RETRY_DELAY_MS = 750
+
+function isRetryableDownloadError(error: unknown): boolean {
+  const message = String(error).toLowerCase()
+  return [
+    'decoding response body',
+    'request or response body',
+    'unexpected eof',
+    'connection reset',
+    'error sending request',
+    'timed out',
+  ].some((needle) => message.includes(needle))
+}
+
+function waitForRetry(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, UPDATE_DOWNLOAD_RETRY_DELAY_MS))
+}
+
 function loadCache(): Cached | null {
   try {
     const raw = localStorage.getItem(CACHE_KEY)
@@ -175,21 +207,33 @@ export function downloadAndInstallUpdate(): Promise<void> {
 
   inFlightDownload = (async () => {
     try {
-      await upd.downloadAndInstall((event) => {
-        if (event.event === 'Started') {
-          downloaded = 0
-          total = event.data.contentLength
-          updateProgress.value = total ? 0 : null
-        } else if (event.event === 'Progress') {
-          downloaded += event.data.chunkLength
-          updateProgress.value = total
-            ? Math.min(100, Math.round((downloaded / total) * 100))
-            : null
-        } else if (event.event === 'Finished') {
-          updateProgress.value = 100
+      for (let attempt = 1; attempt <= UPDATE_DOWNLOAD_ATTEMPTS; attempt++) {
+        try {
+          await upd.downloadAndInstall((event) => {
+            if (event.event === 'Started') {
+              downloaded = 0
+              total = event.data.contentLength
+              updateProgress.value = total ? 0 : null
+            } else if (event.event === 'Progress') {
+              downloaded += event.data.chunkLength
+              updateProgress.value = total
+                ? Math.min(100, Math.round((downloaded / total) * 100))
+                : null
+            } else if (event.event === 'Finished') {
+              updateProgress.value = 100
+            }
+          })
+          updateDownloaded.value = true
+          return
+        } catch (error) {
+          const canRetry = isRetryableDownloadError(error) && attempt < UPDATE_DOWNLOAD_ATTEMPTS
+          if (!canRetry) {
+            if (isRetryableDownloadError(error)) throw new UpdateDownloadRetryError()
+            throw error
+          }
+          await waitForRetry()
         }
-      })
-      updateDownloaded.value = true
+      }
     } finally {
       updateDownloading.value = false
       inFlightDownload = null
